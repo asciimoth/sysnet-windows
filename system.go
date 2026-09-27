@@ -121,7 +121,12 @@ func (s *System) handleReconcileFailure(err error) {
 
 // trackResource adds a socket, listener, or TUN to ordered System cleanup.
 func (s *System) trackResource(resource io.Closer) (func(), error) {
-	if err := s.acceptingWork(); err != nil {
+	if s == nil {
+		return nil, stateValidationError(sysnet.ReasonSystemClosed, "system is nil")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.acceptingWorkLocked(); err != nil {
 		return nil, err
 	}
 	return s.resources.Track(resource)

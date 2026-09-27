@@ -3,6 +3,7 @@ package windows
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -683,6 +684,171 @@ func TestLifecycleTransitionsAndClose(t *testing.T) {
 	if unsupportedRename.State != sysnet.CapabilityUnsupported {
 		t.Fatalf("static unsupported row changed on close: %+v", unsupportedRename)
 	}
+}
+
+func TestCloseOverridesUnknownCapabilityFacts(t *testing.T) {
+	t.Parallel()
+	unknown := sysnet.Capability{
+		State:   sysnet.CapabilityUnknown,
+		Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeNotRun},
+	}
+	system, err := newSystem(SystemConfig{}, systemDependencies{
+		capabilityCode: implementationSupport{regularTun: true},
+		capabilityProbe: &sequenceCapabilityProbe{facts: []capabilityProbeFacts{{
+			netIO: unknown, split: unknown,
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	beforeRevision := system.Capabilities().Revision
+	if err := system.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	key := operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4)
+	capability := system.Capabilities().Operation(key)
+	if capability.State != sysnet.CapabilityUnavailable ||
+		!containsReason(capability.Reasons, sysnet.ReasonSystemClosed) {
+		t.Errorf("capability after Close = %+v, want system closed", capability)
+	}
+	if err := system.CheckTunOpts(sysnet.TunOpts{
+		TunAddrs: []string{"192.0.2.1/24"},
+	}).Err(); !errors.Is(err, sysnet.ErrUnavailable) {
+		t.Fatalf("CheckTunOpts() after Close error = %v, want unavailable", err)
+	}
+	if got := system.Capabilities().Revision; got <= beforeRevision {
+		t.Fatalf("capability revision after Close = %d, want greater than %d", got, beforeRevision)
+	}
+}
+
+func TestLifecycleCapabilityPrecedence(t *testing.T) {
+	t.Parallel()
+	bases := []struct {
+		name       string
+		capability sysnet.Capability
+	}{
+		{name: "available", capability: sysnet.Capability{State: sysnet.CapabilityAvailable}},
+		{name: "unknown", capability: sysnet.Capability{State: sysnet.CapabilityUnknown, Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeNotRun}}},
+		{name: "unavailable", capability: unavailableCapability(sysnet.ReasonPermissionDenied)},
+		{name: "unsupported", capability: unsupported(sysnet.ReasonDisabledByConfig, "disabled")},
+	}
+	states := []struct {
+		name   string
+		state  lifecycleState
+		reason sysnet.CapabilityReason
+	}{
+		{name: "applying", state: lifecycleApplying, reason: sysnet.ReasonResourceBusy},
+		{name: "closing", state: lifecycleClosing, reason: sysnet.ReasonSystemClosed},
+		{name: "closed", state: lifecycleClosed, reason: sysnet.ReasonSystemClosed},
+		{name: "recovery", state: lifecycleRecoveryRequired, reason: sysnet.ReasonRecoveryRequired},
+	}
+	for _, state := range states {
+		for _, base := range bases {
+			t.Run(state.name+"/"+base.name, func(t *testing.T) {
+				t.Parallel()
+				got := lifecycleCapability(base.capability, state.state)
+				if base.capability.State == sysnet.CapabilityUnsupported {
+					if !reflect.DeepEqual(got, base.capability) {
+						t.Fatalf("capability = %+v, want unchanged unsupported capability %+v", got, base.capability)
+					}
+					return
+				}
+				if got.State != sysnet.CapabilityUnavailable || !containsReason(got.Reasons, state.reason) {
+					t.Fatalf("capability = %+v, want unavailable reason %q", got, state.reason)
+				}
+			})
+		}
+	}
+}
+
+func TestLifecycleAppliesToEveryCapabilitySurface(t *testing.T) {
+	t.Parallel()
+	config := defaultNormalizedSystemConfig()
+	config.ipv6 = false
+	unknown := sysnet.Capability{
+		State:   sysnet.CapabilityUnknown,
+		Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeNotRun},
+	}
+	support := implementationSupport{
+		regularTun: true, regularTunDual: true, regularTunNamed: true,
+		defaultTun: true, defaultTunDual: true, defaultTunNamed: true,
+		exclusions: true, exclusionsDual: true, matchers: true,
+		exclusionRuleValidation: true, matcherRuleValidation: true,
+	}
+	facts := capabilityProbeFacts{netIO: unknown, split: unknown}
+	ready := reportCapabilityList(buildCapabilityReport(config, support, facts, lifecycleReady))
+	states := []struct {
+		name   string
+		state  lifecycleState
+		reason sysnet.CapabilityReason
+	}{
+		{name: "applying", state: lifecycleApplying, reason: sysnet.ReasonResourceBusy},
+		{name: "closed", state: lifecycleClosed, reason: sysnet.ReasonSystemClosed},
+		{name: "recovery", state: lifecycleRecoveryRequired, reason: sysnet.ReasonRecoveryRequired},
+	}
+	for _, test := range states {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			report := buildCapabilityReport(config, support, facts, test.state)
+			if err := report.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+			got := reportCapabilityList(report)
+			if len(got) != len(ready) {
+				t.Fatalf("capability count = %d, want %d", len(got), len(ready))
+			}
+			for index := range ready {
+				if got[index].name != ready[index].name {
+					t.Fatalf("capability[%d] name = %q, want %q", index, got[index].name, ready[index].name)
+				}
+				if ready[index].capability.State == sysnet.CapabilityUnsupported {
+					if !reflect.DeepEqual(got[index].capability, ready[index].capability) {
+						t.Errorf("%s = %+v, want unchanged unsupported capability %+v", got[index].name, got[index].capability, ready[index].capability)
+					}
+					continue
+				}
+				if got[index].capability.State != sysnet.CapabilityUnavailable ||
+					!containsReason(got[index].capability.Reasons, test.reason) {
+					t.Errorf("%s = %+v, want unavailable reason %q", got[index].name, got[index].capability, test.reason)
+				}
+			}
+		})
+	}
+}
+
+type namedCapability struct {
+	name       string
+	capability sysnet.Capability
+}
+
+func reportCapabilityList(report sysnet.CapabilityReport) []namedCapability {
+	var result []namedCapability
+	for _, operation := range report.Operations {
+		result = append(result, namedCapability{name: fmt.Sprintf("operation/%+v", operation.Key), capability: operation.Capability})
+	}
+	for _, profile := range report.DefaultTunProfiles {
+		result = append(result, namedCapability{name: fmt.Sprintf("profile/%+v", profile.Key), capability: profile.Capability})
+		for _, binding := range profile.Rules {
+			result = append(result, namedCapability{name: fmt.Sprintf("profile/%+v/rule/%s", profile.Key, binding.Type), capability: binding.Capability})
+		}
+	}
+	for _, rule := range report.Rules {
+		result = append(result,
+			namedCapability{name: "rule/" + rule.Type + "/validation", capability: rule.Validation},
+			namedCapability{name: "rule/" + rule.Type + "/completion", capability: rule.Completion},
+		)
+		for _, matcher := range rule.Matchers {
+			result = append(result, namedCapability{name: fmt.Sprintf("rule/%s/matcher/%+v", rule.Type, matcher.Key), capability: matcher.Capability})
+		}
+	}
+	for _, ownership := range report.Ownership {
+		result = append(result, namedCapability{name: fmt.Sprintf("owner/%+v", ownership.Key), capability: ownership.Capability})
+		for _, field := range ownership.Fields {
+			result = append(result, namedCapability{name: fmt.Sprintf("owner/%+v/field/%s", ownership.Key, field.Field), capability: field.Capability})
+		}
+	}
+	return result
 }
 
 func TestRecoveryRequiredLifecycle(t *testing.T) {

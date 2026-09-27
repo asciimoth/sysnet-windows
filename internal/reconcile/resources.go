@@ -22,9 +22,12 @@ type resourceEntry struct {
 	closeDone chan struct{}
 	closeErr  error
 	started   bool
+	released  bool
 }
 
-// Track adds a resource and returns an idempotent release function. Track
+// Track adds a resource and returns an idempotent release function. A release
+// transfers cleanup responsibility to the caller if tracked cleanup has not
+// started. It does not cancel a Close call which has already started. Track
 // rejects resources after shutdown intake has stopped.
 func (r *Resources) Track(closer io.Closer) (func(), error) {
 	if closer == nil {
@@ -42,7 +45,7 @@ func (r *Resources) Track(closer io.Closer) (func(), error) {
 	})
 	var once sync.Once
 	return func() {
-		once.Do(func() { r.remove(id) })
+		once.Do(func() { r.release(id) })
 	}, nil
 }
 
@@ -63,7 +66,9 @@ func (r *Resources) CloseAll(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(result, err)
 		}
-		r.startClose(entry)
+		if !r.startClose(entry) {
+			continue
+		}
 		select {
 		case <-entry.closeDone:
 			if entry.closeErr != nil {
@@ -76,11 +81,15 @@ func (r *Resources) CloseAll(ctx context.Context) error {
 	return result
 }
 
-func (r *Resources) startClose(entry *resourceEntry) {
+func (r *Resources) startClose(entry *resourceEntry) bool {
 	r.mu.Lock()
+	if entry.released {
+		r.mu.Unlock()
+		return false
+	}
 	if entry.started {
 		r.mu.Unlock()
-		return
+		return true
 	}
 	entry.started = true
 	r.mu.Unlock()
@@ -94,11 +103,18 @@ func (r *Resources) startClose(entry *resourceEntry) {
 		r.mu.Unlock()
 		close(entry.closeDone)
 	}()
+	return true
 }
 
-func (r *Resources) remove(id uint64) {
+func (r *Resources) release(id uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	for _, entry := range r.entries {
+		if entry.id == id {
+			entry.released = true
+			break
+		}
+	}
 	r.removeLocked(id)
 }
 

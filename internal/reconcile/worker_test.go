@@ -317,6 +317,130 @@ func TestResourcesCloseFailureIsStableAndNotRetried(t *testing.T) {
 	}
 }
 
+func TestResourcesCloseDoesNotCloseConcurrentlyReleasedResource(t *testing.T) {
+	t.Parallel()
+	var resources Resources
+	releasedClosed := make(chan struct{}, 1)
+	release, err := resources.Track(closeFunc(func() error {
+		releasedClosed <- struct{}{}
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("Track(released) error = %v", err)
+	}
+
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	if _, err := resources.Track(closeFunc(func() error {
+		close(blockerStarted)
+		<-releaseBlocker
+		return nil
+	})); err != nil {
+		t.Fatalf("Track(blocker) error = %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- resources.CloseAll(context.Background()) }()
+	<-blockerStarted
+	release()
+	close(releaseBlocker)
+	if err := <-result; err != nil {
+		t.Fatalf("CloseAll() error = %v", err)
+	}
+	select {
+	case <-releasedClosed:
+		t.Fatal("CloseAll() closed a resource after its release function returned")
+	default:
+	}
+}
+
+func TestResourcesReleaseBeforeCloseIsIdempotent(t *testing.T) {
+	t.Parallel()
+	var resources Resources
+	var closeCalls atomic.Int32
+	release, err := resources.Track(closeFunc(func() error {
+		closeCalls.Add(1)
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("Track() error = %v", err)
+	}
+	release()
+	release()
+	if err := resources.CloseAll(context.Background()); err != nil {
+		t.Fatalf("CloseAll() error = %v", err)
+	}
+	if err := resources.CloseAll(context.Background()); err != nil {
+		t.Fatalf("second CloseAll() error = %v", err)
+	}
+	if got := closeCalls.Load(); got != 0 {
+		t.Fatalf("Close() calls = %d, want 0", got)
+	}
+}
+
+func TestResourcesReleasePreservesReverseCloseOrder(t *testing.T) {
+	t.Parallel()
+	var resources Resources
+	var mu sync.Mutex
+	var order []string
+	track := func(name string) func() {
+		release, err := resources.Track(closeFunc(func() error {
+			mu.Lock()
+			defer mu.Unlock()
+			order = append(order, name)
+			return nil
+		}))
+		if err != nil {
+			t.Fatalf("Track(%s) error = %v", name, err)
+		}
+		return release
+	}
+	releaseFirst := track("first")
+	track("second")
+	track("third")
+	releaseFirst()
+	if err := resources.CloseAll(context.Background()); err != nil {
+		t.Fatalf("CloseAll() error = %v", err)
+	}
+	mu.Lock()
+	got := append([]string(nil), order...)
+	mu.Unlock()
+	if !reflect.DeepEqual(got, []string{"third", "second"}) {
+		t.Fatalf("close order = %v, want [third second]", got)
+	}
+}
+
+func TestResourcesReleaseAfterCloseStartsDoesNotStartSecondClose(t *testing.T) {
+	t.Parallel()
+	var resources Resources
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	var closeCalls atomic.Int32
+	release, err := resources.Track(closeFunc(func() error {
+		closeCalls.Add(1)
+		close(started)
+		<-unblock
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("Track() error = %v", err)
+	}
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- resources.CloseAll(context.Background()) }()
+	<-started
+	release()
+	if err := resources.CloseAll(context.Background()); err != nil {
+		t.Fatalf("second CloseAll() error = %v", err)
+	}
+	close(unblock)
+	if err := <-firstResult; err != nil {
+		t.Fatalf("first CloseAll() error = %v", err)
+	}
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("Close() calls = %d, want 1", got)
+	}
+}
+
 type closeFunc func() error
 
 func (f closeFunc) Close() error { return f() }

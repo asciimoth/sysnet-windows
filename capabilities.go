@@ -282,13 +282,14 @@ func ruleCapabilities(
 	if !config.exclusions {
 		exclusionValidation = unsupported(sysnet.ReasonDisabledByConfig, "executable exclusions are disabled")
 	}
+	exclusionValidation = lifecycleCapability(exclusionValidation, state)
 	matcherValidation := implementedCapability(support.matcherRuleValidation || support.matchers)
 	matcher := implementedCapability(support.matchers)
 	if !config.matchers {
 		matcherValidation = unsupported(sysnet.ReasonDisabledByConfig, "matchers are disabled")
 		matcher = unsupported(sysnet.ReasonDisabledByConfig, "matchers are disabled")
 	}
-	matcher = lifecycleCapability(matcher, state)
+	matcherValidation = lifecycleCapability(matcherValidation, state)
 
 	rules := []sysnet.RuleCapability{{
 		Type:        ruleExecutableTree,
@@ -317,7 +318,7 @@ func ruleCapabilities(
 			if family == sysnet.FamilyDual {
 				continue
 			}
-			familyMatcher := familyCapability(matcher, config, family)
+			familyMatcher := lifecycleCapability(familyCapability(matcher, config, family), state)
 			for _, transport := range []sysnet.Transport{sysnet.TransportTCP, sysnet.TransportUDP} {
 				quality := sysnet.MatchQualityBestEffortTuple
 				if transport == sysnet.TransportUDP {
@@ -339,10 +340,9 @@ func ownerCapabilities(config normalizedSystemConfig, support implementationSupp
 	if !config.matchers {
 		capability = unsupported(sysnet.ReasonDisabledByConfig, "matchers are disabled")
 	}
-	capability = lifecycleCapability(capability, state)
 	result := make([]sysnet.OwnerCapability, 0, 4)
 	for _, family := range []sysnet.AddressFamily{sysnet.FamilyIPv4, sysnet.FamilyIPv6} {
-		familyOwner := familyCapability(capability, config, family)
+		familyOwner := lifecycleCapability(familyCapability(capability, config, family), state)
 		for _, transport := range []sysnet.Transport{sysnet.TransportTCP, sysnet.TransportUDP} {
 			quality := sysnet.MatchQualityBestEffortTuple
 			if transport == sysnet.TransportUDP {
@@ -376,7 +376,10 @@ func dependentCapability(base, dependency sysnet.Capability) sysnet.Capability {
 }
 
 func lifecycleCapability(capability sysnet.Capability, state lifecycleState) sysnet.Capability {
-	if capability.State != sysnet.CapabilityAvailable {
+	// Unsupported behavior is independent of instance lifecycle. All other
+	// states describe work that this instance could perform, so lifecycle
+	// conditions take precedence over cached dependency facts.
+	if capability.State == sysnet.CapabilityUnsupported {
 		return capability.Clone()
 	}
 	switch state {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,6 +75,48 @@ func TestSystemCloseOrdersResourcesBeforeHostRollback(t *testing.T) {
 	}
 	if _, err := system.trackResource(systemCloseFunc(func() error { return nil })); !errors.Is(err, sysnet.ErrUnavailable) {
 		t.Fatalf("trackResource() after Close error = %v, want unavailable", err)
+	}
+}
+
+func TestSystemTrackResourceLinearizesWithClose(t *testing.T) {
+	for iteration := range 200 {
+		system, err := newSystem(SystemConfig{}, systemDependencies{})
+		if err != nil {
+			t.Fatalf("iteration %d: newSystem() error = %v", iteration, err)
+		}
+		var closeCalls atomic.Int32
+		start := make(chan struct{})
+		trackResult := make(chan error, 1)
+		closeResult := make(chan error, 1)
+		go func() {
+			<-start
+			_, err := system.trackResource(systemCloseFunc(func() error {
+				closeCalls.Add(1)
+				return nil
+			}))
+			trackResult <- err
+		}()
+		go func() {
+			<-start
+			closeResult <- system.Close()
+		}()
+		close(start)
+		trackErr := <-trackResult
+		if err := <-closeResult; err != nil {
+			t.Fatalf("iteration %d: Close() error = %v", iteration, err)
+		}
+		switch {
+		case trackErr == nil:
+			if got := closeCalls.Load(); got != 1 {
+				t.Fatalf("iteration %d: accepted resource Close() calls = %d, want 1", iteration, got)
+			}
+		case errors.Is(trackErr, sysnet.ErrUnavailable):
+			if got := closeCalls.Load(); got != 0 {
+				t.Fatalf("iteration %d: rejected resource Close() calls = %d, want 0", iteration, got)
+			}
+		default:
+			t.Fatalf("iteration %d: trackResource() error = %v, want nil or unavailable", iteration, trackErr)
+		}
 	}
 }
 
