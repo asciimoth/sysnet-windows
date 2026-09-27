@@ -2,8 +2,9 @@
 
 Windows network integration for `github.com/asciimoth/gonnect`.
 
-The implementation is not present yet. The repository contains the locked
-development environment and Windows test harness for the work in
+The root package contains the frozen gonnect contract scaffold. Native Windows
+behavior is not present yet. The repository also contains the locked development
+environment and Windows test harness for the work in
 [`docs/sysnet-windows-implementation-testing-plan.md`](docs/sysnet-windows-implementation-testing-plan.md).
 
 ## Development

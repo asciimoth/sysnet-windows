@@ -13,6 +13,9 @@ build locks. Update them together.
 | `golang.zx2c4.com/wireguard/windows`           | `v1.1.1`                                               | NetIO and `winipcfg` operations                        |
 | `golang.org/x/sys`                             | `v0.47.0` (`9e7e939dcafac07e8ab4cffa6e5fc74908413f00`) | Windows system calls                                   |
 
+The exact public method inventory and accepted changes from the earlier
+inspected contract are in [`gonnect-contract.md`](gonnect-contract.md).
+
 The direct module set requires Go 1.25.5. `gonnect` and `tuntap` set that
 minimum; no selected direct or transitive module requires a later version. The
 flake obtains Go 1.25.5 from the separate `toolchain-nixpkgs` input because the
