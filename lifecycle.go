@@ -44,7 +44,8 @@ func validLifecycleTransition(from, to lifecycleState) bool {
 	case lifecycleNew:
 		return to == lifecycleReady || to == lifecycleClosing
 	case lifecycleReady:
-		return to == lifecycleApplying || to == lifecycleClosing
+		return to == lifecycleApplying || to == lifecycleClosing ||
+			to == lifecycleRecoveryRequired
 	case lifecycleApplying:
 		return to == lifecycleReady || to == lifecycleActive ||
 			to == lifecycleRecoveryRequired || to == lifecycleClosing

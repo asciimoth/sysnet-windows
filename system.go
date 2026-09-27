@@ -3,6 +3,7 @@ package windows
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 
 	"github.com/asciimoth/gonnect"
@@ -10,6 +11,7 @@ import (
 	"github.com/asciimoth/gonnect/subnet"
 	"github.com/asciimoth/gonnect/sysnet"
 	"github.com/asciimoth/gonnect/tun"
+	"github.com/asciimoth/sysnet-windows/internal/reconcile"
 )
 
 // System is the Windows implementation of the gonnect system contract.
@@ -21,6 +23,11 @@ type System struct {
 	capabilities capabilityModel
 	probeFacts   capabilityProbeFacts
 	support      implementationSupport
+	journal      *reconcile.Journal
+	worker       *reconcile.Worker
+	resources    reconcile.Resources
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 // This assertion intentionally uses the selected gonnect version. In older
@@ -29,22 +36,80 @@ type System struct {
 var _ sysnet.System = (*System)(nil)
 
 func (s *System) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.state == lifecycleClosed {
+	if s == nil {
 		return nil
 	}
+	s.closeOnce.Do(func() { s.closeErr = s.close() })
+	return s.closeErr
+}
+
+func (s *System) close() error {
+	s.mu.Lock()
 	if s.state != lifecycleClosing {
 		if err := s.transitionLocked(lifecycleClosing); err != nil {
+			s.mu.Unlock()
 			return err
 		}
 		s.rebuildCapabilitiesLocked()
 	}
-	if err := s.transitionLocked(lifecycleClosed); err != nil {
+	s.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), s.config.operationTimeout)
+	defer cancel()
+	var stopErr error
+	if s.worker != nil {
+		stopErr = s.worker.Stop(ctx)
+	}
+	resourceErr := s.resources.CloseAll()
+	var cleanupErr error
+	if stopErr == nil && s.journal != nil {
+		cleanupErr = s.journal.UndoAll(ctx)
+	}
+	result := errors.Join(stopErr, resourceErr, cleanupErr)
+
+	s.mu.Lock()
+	next := lifecycleClosed
+	if stopErr != nil || reconcile.RequiresRecovery(cleanupErr) {
+		next = lifecycleRecoveryRequired
+	}
+	transitionErr := s.transitionLocked(next)
+	s.rebuildCapabilitiesLocked()
+	s.mu.Unlock()
+	return errors.Join(result, transitionErr)
+}
+
+// applyTransaction is the single path for native policy mutations. The later
+// TUN, DNS, WFP, and split implementations provide exact journal entries here.
+func (s *System) applyTransaction(entries []reconcile.Entry) error {
+	if err := s.beginApply(); err != nil {
 		return err
 	}
-	s.rebuildCapabilitiesLocked()
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), s.config.operationTimeout)
+	defer cancel()
+	err := s.worker.Submit(ctx, entries)
+	recoveryRequired := reconcile.RequiresRecovery(err)
+	active := s.journal.Len() != 0
+	return errors.Join(err, s.finishApply(active, recoveryRequired))
+}
+
+func (s *System) handleReconcileFailure(err error) {
+	if !reconcile.RequiresRecovery(err) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == lifecycleReady || s.state == lifecycleActive || s.state == lifecycleApplying {
+		_ = s.transitionLocked(lifecycleRecoveryRequired)
+		s.rebuildCapabilitiesLocked()
+	}
+}
+
+// trackResource adds a socket, listener, or TUN to ordered System cleanup.
+func (s *System) trackResource(resource io.Closer) (func(), error) {
+	if err := s.acceptingWork(); err != nil {
+		return nil, err
+	}
+	return s.resources.Track(resource)
 }
 
 func (s *System) Capabilities() sysnet.CapabilityReport {

@@ -1,6 +1,10 @@
 package windows
 
-import "context"
+import (
+	"context"
+
+	"github.com/asciimoth/sysnet-windows/internal/reconcile"
+)
 
 func newSystem(config SystemConfig, dependencies systemDependencies) (*System, error) {
 	normalized, err := normalizeSystemConfig(config)
@@ -17,7 +21,9 @@ func newSystem(config SystemConfig, dependencies systemDependencies) (*System, e
 		dependencies: dependencies,
 		probeFacts:   initialProbeFacts(),
 		support:      dependencies.capabilityCode,
+		journal:      &reconcile.Journal{},
 	}
+	system.worker = reconcile.NewWorker(context.Background(), system.journal, nil, system.handleReconcileFailure)
 	if system.support == (implementationSupport{}) {
 		system.support = currentImplementationSupport()
 	}

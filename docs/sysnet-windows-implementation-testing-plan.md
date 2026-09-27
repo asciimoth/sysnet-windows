@@ -602,7 +602,7 @@ defer rollback to a later milestone.
    - Complete this step when C01-C03 and C07-C12 pass concurrently with the race
      detector and no getter performs a native mutation.
 
-5. **Step 5 - Implement the reconciliation core and resource journal.**
+5. **Step 5 - Implement the reconciliation core and resource journal. (Completed)**
 
    - Define desired, observed and applied records for adapters, addresses,
      routes, DNS, WFP objects and split-driver state.
