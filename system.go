@@ -61,9 +61,11 @@ func (s *System) close() error {
 		stopErr = s.worker.Stop(stopCtx)
 		cancelStop()
 	}
-	resourceErr := s.resources.CloseAll()
+	resourceCtx, cancelResources := context.WithTimeout(context.Background(), s.config.operationTimeout)
+	resourceErr := s.resources.CloseAll(resourceCtx)
+	cancelResources()
 	var cleanupErr error
-	if stopErr == nil && s.journal != nil {
+	if stopErr == nil && resourceErr == nil && s.journal != nil {
 		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), s.config.operationTimeout)
 		cleanupErr = s.journal.UndoAll(cleanupCtx)
 		cancelCleanup()
@@ -210,17 +212,18 @@ func (*System) OutNet() gonnect.Network { return &gonnect.RejectNetwork{} }
 func (*System) LocalNet() gonnect.Network { return &gonnect.RejectNetwork{} }
 
 func (s *System) BuildMatcher(rule sysnet.Rule) (sysnet.Matcher, error) {
-	if report := validateMatcherRule(s.policyConfig(), rule); report.Err() != nil {
-		return nil, report.Err()
+	normalized, validation := validateMatcherRule(s.policyConfig(), rule)
+	if validation.Err() != nil {
+		return nil, validation.Err()
 	}
-	if err := s.finalPreflight(); err != nil {
+	capabilities, err := s.finalPreflight()
+	if err != nil {
 		return nil, err
 	}
-	report := s.Capabilities()
 	var unavailable error
 	for _, family := range []sysnet.AddressFamily{sysnet.FamilyIPv4, sysnet.FamilyIPv6} {
 		for _, transport := range []sysnet.Transport{sysnet.TransportTCP, sysnet.TransportUDP} {
-			profile := matcherProfile(report.Rule(rule.Type), sysnet.MatcherProfileKey{Family: family, Transport: transport})
+			profile := matcherProfile(capabilities.Rule(normalized.typeName), sysnet.MatcherProfileKey{Family: family, Transport: transport})
 			if profile.State == sysnet.CapabilityAvailable {
 				return nil, sysnet.ErrNotSupported
 			}
@@ -240,14 +243,15 @@ func (s *System) BuildDefaultTun(opts sysnet.DefaultTunOpts) (sysnet.DefaultTun,
 	if report.Err() != nil {
 		return nil, report.Err()
 	}
-	if err := s.finalPreflight(); err != nil {
+	capabilities, err := s.finalPreflight()
+	if err != nil {
 		return nil, err
 	}
 	operation := sysnet.OpCreate
 	if desired.tun.name != "" {
 		operation = sysnet.OpCreateNamed
 	}
-	create := s.Capabilities().Operation(sysnet.OperationKey{
+	create := capabilities.Operation(sysnet.OperationKey{
 		Target: sysnet.TargetDefaultTun, Operation: operation, Family: desired.family,
 	})
 	if create.State != sysnet.CapabilityAvailable {
@@ -257,7 +261,7 @@ func (s *System) BuildDefaultTun(opts sysnet.DefaultTunOpts) (sysnet.DefaultTun,
 	if len(desired.excludes) != 0 {
 		mode = sysnet.RoutingExclude
 	}
-	capability := s.Capabilities().DefaultTunProfile(sysnet.RoutingProfileKey{Family: desired.family, Mode: mode}).Capability
+	capability := capabilities.DefaultTunProfile(sysnet.RoutingProfileKey{Family: desired.family, Mode: mode}).Capability
 	if capability.State != sysnet.CapabilityAvailable {
 		return nil, capabilityError("DefaultTun.Profile", capability)
 	}
@@ -271,7 +275,8 @@ func (s *System) BuildTun(opts sysnet.TunOpts) (tun.Tun, error) {
 	if report.Err() != nil {
 		return nil, report.Err()
 	}
-	if err := s.finalPreflight(); err != nil {
+	capabilities, err := s.finalPreflight()
+	if err != nil {
 		return nil, err
 	}
 	family := familyForPrefixes(desired.addresses, desired.routes)
@@ -279,7 +284,7 @@ func (s *System) BuildTun(opts sysnet.TunOpts) (tun.Tun, error) {
 	if desired.name != "" {
 		operation = sysnet.OpCreateNamed
 	}
-	capability := s.Capabilities().Operation(sysnet.OperationKey{Target: sysnet.TargetTun, Operation: operation, Family: family})
+	capability := capabilities.Operation(sysnet.OperationKey{Target: sysnet.TargetTun, Operation: operation, Family: family})
 	if capability.State != sysnet.CapabilityAvailable {
 		return nil, capabilityError("Tun.Create", capability)
 	}
@@ -293,10 +298,11 @@ func (s *System) SetTunMTU(_ tun.Tun, mtu int) error {
 	if err := report.Err(); err != nil {
 		return err
 	}
-	if err := s.finalPreflight(); err != nil {
+	capabilities, err := s.finalPreflight()
+	if err != nil {
 		return err
 	}
-	if capability := s.Capabilities().Operation(sysnet.OperationKey{Target: sysnet.TargetTun, Operation: sysnet.OpSetMTU, Family: sysnet.FamilyNone}); capability.State != sysnet.CapabilityAvailable {
+	if capability := capabilities.Operation(sysnet.OperationKey{Target: sysnet.TargetTun, Operation: sysnet.OpSetMTU, Family: sysnet.FamilyNone}); capability.State != sysnet.CapabilityAvailable {
 		return capabilityError("Tun.MTU", capability)
 	}
 	return sysnet.ErrNotSupported
@@ -326,14 +332,15 @@ func (s *System) changeTunPrefixes(_ tun.Tun, raw []string, path string, kind pr
 	if err := report.Err(); err != nil {
 		return err
 	}
-	if err := s.finalPreflight(); err != nil {
+	capabilities, err := s.finalPreflight()
+	if err != nil {
 		return err
 	}
 	family := familyForPrefixes(prefixes)
 	if family == sysnet.FamilyNone {
 		family = defaultTunFamily(s.policyConfig())
 	}
-	capability := s.Capabilities().Operation(sysnet.OperationKey{
+	capability := capabilities.Operation(sysnet.OperationKey{
 		Target: sysnet.TargetTun, Operation: operation, Family: family,
 	})
 	if capability.State != sysnet.CapabilityAvailable {
@@ -377,27 +384,29 @@ func (s *System) acceptingWork() error {
 
 // finalPreflight refreshes read-only dependency facts. Cached capability
 // snapshots guide callers but never authorize an operation by themselves.
-func (s *System) finalPreflight() error {
-	if err := s.acceptingWork(); err != nil {
-		return err
+func (s *System) finalPreflight() (sysnet.CapabilityReport, error) {
+	if s == nil {
+		return sysnet.CapabilityReport{}, stateValidationError(sysnet.ReasonSystemClosed, "system is nil")
 	}
 	if s.dependencies.capabilityProbe == nil {
-		return nil
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		if err := s.acceptingWorkLocked(); err != nil {
+			return sysnet.CapabilityReport{}, err
+		}
+		return s.capabilities.snapshot(), nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.operationTimeout)
-	facts := s.dependencies.capabilityProbe.Probe(ctx)
-	if err := ctx.Err(); err != nil {
-		facts = failedProbeFacts(err)
-	}
+	facts := runCapabilityProbe(ctx, s.dependencies.capabilityProbe)
 	cancel()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.acceptingWorkLocked(); err != nil {
-		return err
+		return sysnet.CapabilityReport{}, err
 	}
 	s.probeFacts = facts
 	s.rebuildCapabilitiesLocked()
-	return nil
+	return s.capabilities.snapshot(), nil
 }
 
 func matcherProfile(rule sysnet.RuleCapability, key sysnet.MatcherProfileKey) sysnet.MatcherProfile {

@@ -84,8 +84,14 @@ func (j *Journal) Apply(ctx context.Context, entries []Entry) error {
 		if err := entry.Apply(ctx); err != nil {
 			return j.fail(ctx, fmt.Errorf("apply resource %v: %w", entry.Key, err), completed)
 		}
+		if err := ctx.Err(); err != nil {
+			return j.fail(ctx, err, completed)
+		}
 		if err := entry.Verify(ctx, ExpectedApplied); err != nil {
 			return j.fail(ctx, fmt.Errorf("verify applied resource %v: %w", entry.Key, err), completed)
+		}
+		if err := ctx.Err(); err != nil {
+			return j.fail(ctx, err, completed)
 		}
 	}
 	j.entries = append(j.entries, completed...)

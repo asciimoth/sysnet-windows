@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/asciimoth/gonnect/sysnet"
 	"github.com/asciimoth/sysnet-windows/internal/reconcile"
@@ -118,12 +119,69 @@ func TestSystemCloseMarksRecoveryWhenResourceCloseFails(t *testing.T) {
 		t.Fatalf("newSystem() error = %v", err)
 	}
 	closeErr := errors.New("close resource")
+	undoCalled := false
+	entry := reconcile.Entry{
+		Key:     reconcile.OwnershipKey{Kind: reconcile.KindRoute, ID: "owned-route"},
+		Apply:   func(context.Context) error { return nil },
+		Inverse: func(context.Context) error { undoCalled = true; return nil },
+		Verify:  func(context.Context, reconcile.ExpectedState) error { return nil },
+	}
+	if err := system.applyTransaction([]reconcile.Entry{entry}); err != nil {
+		t.Fatalf("applyTransaction() error = %v", err)
+	}
 	if _, err := system.trackResource(systemCloseFunc(func() error { return closeErr })); err != nil {
 		t.Fatalf("trackResource() error = %v", err)
 	}
 	if err := system.Close(); !errors.Is(err, closeErr) {
 		t.Fatalf("Close() error = %v, want resource close error", err)
 	}
+	system.mu.RLock()
+	state := system.state
+	system.mu.RUnlock()
+	if state != lifecycleRecoveryRequired {
+		t.Fatalf("lifecycle state = %s, want recovery-required", state)
+	}
+	if undoCalled {
+		t.Fatal("host rollback ran while resource close state was uncertain")
+	}
+	if got := system.journal.Len(); got != 1 {
+		t.Fatalf("journal length = %d, want retained ownership", got)
+	}
+}
+
+func TestSystemCloseIsBoundedWhenResourceCloseBlocks(t *testing.T) {
+	t.Parallel()
+	const timeout = 20 * time.Millisecond
+	system, err := newSystem(SystemConfig{OperationTimeout: timeout}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	blocked := make(chan struct{})
+	started := make(chan struct{})
+	if _, err := system.trackResource(systemCloseFunc(func() error {
+		close(started)
+		<-blocked
+		return nil
+	})); err != nil {
+		t.Fatalf("trackResource() error = %v", err)
+	}
+
+	begin := time.Now()
+	result := make(chan error, 1)
+	go func() { result <- system.Close() }()
+	<-started
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Close() error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close() did not honor the resource cleanup timeout")
+	}
+	if elapsed := time.Since(begin); elapsed > time.Second {
+		t.Fatalf("Close() took %s, want a bounded result", elapsed)
+	}
+	close(blocked)
 	system.mu.RLock()
 	state := system.state
 	system.mu.RUnlock()

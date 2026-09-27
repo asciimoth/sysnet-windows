@@ -28,10 +28,7 @@ func newSystem(config SystemConfig, dependencies systemDependencies) (*System, e
 	}
 	if dependencies.capabilityProbe != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), normalized.operationTimeout)
-		system.probeFacts = dependencies.capabilityProbe.Probe(ctx)
-		if err := ctx.Err(); err != nil {
-			system.probeFacts = failedProbeFacts(err)
-		}
+		system.probeFacts = runCapabilityProbe(ctx, dependencies.capabilityProbe)
 		cancel()
 	}
 	if err := system.transitionLocked(lifecycleReady); err != nil {
@@ -39,4 +36,18 @@ func newSystem(config SystemConfig, dependencies systemDependencies) (*System, e
 	}
 	system.rebuildCapabilitiesLocked()
 	return system, nil
+}
+
+func runCapabilityProbe(ctx context.Context, probe capabilityProber) capabilityProbeFacts {
+	result := make(chan capabilityProbeFacts, 1)
+	go func() { result <- probe.Probe(ctx) }()
+	select {
+	case facts := <-result:
+		if err := ctx.Err(); err != nil {
+			return failedProbeFacts(err)
+		}
+		return facts
+	case <-ctx.Done():
+		return failedProbeFacts(ctx.Err())
+	}
 }

@@ -189,6 +189,19 @@ func TestRuleContexts(t *testing.T) {
 	}
 }
 
+func TestValidateMatcherRuleReturnsNormalizedPolicy(t *testing.T) {
+	t.Parallel()
+	normalized, report := validateMatcherRule(defaultNormalizedSystemConfig(), sysnet.Rule{
+		Type: " win-pid ", Rule: "00042",
+	})
+	if err := report.Err(); err != nil {
+		t.Fatalf("validateMatcherRule() error = %v", err)
+	}
+	if normalized.typeName != "win-pid" || normalized.value != "42" {
+		t.Fatalf("normalized rule = %+v, want win-pid 42", normalized)
+	}
+}
+
 func TestNewUnsupportedPlatform(t *testing.T) {
 	t.Parallel()
 

@@ -116,6 +116,84 @@ func TestWorkerStopCancelsAndIsBounded(t *testing.T) {
 	}
 }
 
+func TestWorkerStopSerializesWithCallbackIntake(t *testing.T) {
+	t.Parallel()
+	worker := NewWorker(context.Background(), nil, nil, nil)
+
+	worker.reasonMu.Lock()
+	stopped := make(chan error, 1)
+	go func() { stopped <- worker.Stop(context.Background()) }()
+	select {
+	case <-worker.stop:
+		worker.reasonMu.Unlock()
+		t.Fatal("Stop closed intake without the intake lock")
+	case <-time.After(20 * time.Millisecond):
+	}
+	worker.reasonMu.Unlock()
+	if err := <-stopped; err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if worker.Enqueue("late") {
+		t.Fatal("Enqueue() accepted work after serialized stop")
+	}
+}
+
+func TestWorkerParentCancellationStopsIdleIntake(t *testing.T) {
+	t.Parallel()
+	parent, cancel := context.WithCancel(context.Background())
+	worker := NewWorker(parent, nil, nil, nil)
+	cancel()
+
+	select {
+	case <-worker.done:
+	case <-time.After(time.Second):
+		t.Fatal("idle worker did not exit after parent cancellation")
+	}
+	if worker.Enqueue("late") {
+		t.Fatal("Enqueue() accepted work after parent cancellation")
+	}
+	if err := worker.Submit(context.Background(), nil); !errors.Is(err, ErrStopped) {
+		t.Fatalf("Submit() error = %v, want stopped", err)
+	}
+	if err := worker.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+}
+
+func TestWorkerParentCancellationReleasesSubmitter(t *testing.T) {
+	t.Parallel()
+	parent, cancelParent := context.WithCancel(context.Background())
+	worker := NewWorker(parent, nil, nil, nil)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	entry := Entry{
+		Key: OwnershipKey{Kind: KindWFP, ID: "blocked"},
+		Apply: func(context.Context) error {
+			close(started)
+			<-release
+			return nil
+		},
+		Inverse: func(context.Context) error { return nil },
+		Verify:  func(context.Context, ExpectedState) error { return nil },
+	}
+	result := make(chan error, 1)
+	go func() { result <- worker.Submit(context.Background(), []Entry{entry}) }()
+	<-started
+	cancelParent()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Submit() error = %v, want canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Submit() did not return after parent cancellation")
+	}
+	close(release)
+	if err := worker.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+}
+
 func TestResourcesCloseInReverseAndRejectLateTrack(t *testing.T) {
 	t.Parallel()
 	var resources Resources
@@ -131,7 +209,7 @@ func TestResourcesCloseInReverseAndRejectLateTrack(t *testing.T) {
 			t.Fatalf("Track() error = %v", err)
 		}
 	}
-	if err := resources.CloseAll(); err != nil {
+	if err := resources.CloseAll(context.Background()); err != nil {
 		t.Fatalf("CloseAll() error = %v", err)
 	}
 	if !reflect.DeepEqual(order, []string{"tun", "listener", "socket"}) {
@@ -139,6 +217,63 @@ func TestResourcesCloseInReverseAndRejectLateTrack(t *testing.T) {
 	}
 	if _, err := resources.Track(closeFunc(func() error { return nil })); !errors.Is(err, ErrStopped) {
 		t.Fatalf("late Track() error = %v, want stopped", err)
+	}
+}
+
+func TestResourcesCloseHonorsCancellation(t *testing.T) {
+	t.Parallel()
+	var resources Resources
+	blocked := make(chan struct{})
+	started := make(chan struct{})
+	lowerClosed := make(chan struct{}, 1)
+	if _, err := resources.Track(closeFunc(func() error {
+		lowerClosed <- struct{}{}
+		return nil
+	})); err != nil {
+		t.Fatalf("Track(lower) error = %v", err)
+	}
+	if _, err := resources.Track(closeFunc(func() error {
+		close(started)
+		<-blocked
+		return nil
+	})); err != nil {
+		t.Fatalf("Track(blocked) error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- resources.CloseAll(ctx) }()
+	<-started
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("CloseAll() error = %v, want canceled", err)
+	}
+	select {
+	case <-lowerClosed:
+		t.Fatal("CloseAll() continued past a resource with uncertain close state")
+	default:
+	}
+	close(blocked)
+}
+
+func TestResourcesCloseFailureIsStableAndNotRetried(t *testing.T) {
+	t.Parallel()
+	var resources Resources
+	closeErr := errors.New("close failed")
+	var calls atomic.Int32
+	if _, err := resources.Track(closeFunc(func() error {
+		calls.Add(1)
+		return closeErr
+	})); err != nil {
+		t.Fatalf("Track() error = %v", err)
+	}
+	for attempt := range 2 {
+		if err := resources.CloseAll(context.Background()); !errors.Is(err, closeErr) {
+			t.Fatalf("CloseAll() attempt %d error = %v, want close failure", attempt+1, err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("Close() calls = %d, want 1", got)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -297,6 +298,144 @@ func TestCapabilityProbeCannotReportAvailableAfterDeadline(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = system.Close() })
 	capability := system.Capabilities().Operation(operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4))
+	if capability.State != sysnet.CapabilityUnknown || !containsReason(capability.Reasons, sysnet.ReasonProbeFailed) {
+		t.Fatalf("create capability = %+v, want failed probe", capability)
+	}
+}
+
+func TestCapabilityProbeDeadlineDoesNotDependOnProbeCooperation(t *testing.T) {
+	t.Parallel()
+	const timeout = 20 * time.Millisecond
+	blocked := make(chan struct{})
+	started := make(chan struct{})
+	result := make(chan *System, 1)
+	errorsCh := make(chan error, 1)
+	go func() {
+		system, err := newSystem(SystemConfig{OperationTimeout: timeout}, systemDependencies{
+			capabilityCode: implementationSupport{regularTun: true},
+			capabilityProbe: capabilityProbeFunc(func(context.Context) capabilityProbeFacts {
+				close(started)
+				<-blocked
+				available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+				return capabilityProbeFacts{netIO: available, split: available}
+			}),
+		})
+		result <- system
+		errorsCh <- err
+	}()
+	<-started
+	var system *System
+	select {
+	case system = <-result:
+		if err := <-errorsCh; err != nil {
+			t.Fatalf("newSystem() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("newSystem() waited for a probe that ignored cancellation")
+	}
+	close(blocked)
+	t.Cleanup(func() { _ = system.Close() })
+	capability := system.Capabilities().Operation(operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4))
+	if capability.State != sysnet.CapabilityUnknown || !containsReason(capability.Reasons, sysnet.ReasonProbeFailed) {
+		t.Fatalf("create capability = %+v, want failed probe", capability)
+	}
+}
+
+func TestFinalPreflightReturnsItsOwnCapabilitySnapshot(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	busy := unavailableCapability(sysnet.ReasonResourceBusy)
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var calls atomic.Int32
+	probe := capabilityProbeFunc(func(context.Context) capabilityProbeFacts {
+		switch calls.Add(1) {
+		case 1:
+			return capabilityProbeFacts{netIO: available, split: available}
+		case 2:
+			close(firstStarted)
+			<-releaseFirst
+			return capabilityProbeFacts{netIO: available, split: available}
+		default:
+			return capabilityProbeFacts{netIO: busy, split: available}
+		}
+	})
+	system, err := newSystem(SystemConfig{}, systemDependencies{
+		capabilityCode: implementationSupport{regularTun: true}, capabilityProbe: probe,
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	firstResult := make(chan sysnet.CapabilityReport, 1)
+	firstErr := make(chan error, 1)
+	go func() {
+		report, err := system.finalPreflight()
+		firstResult <- report
+		firstErr <- err
+	}()
+	<-firstStarted
+	second, err := system.finalPreflight()
+	if err != nil {
+		t.Fatalf("second finalPreflight() error = %v", err)
+	}
+	close(releaseFirst)
+	first := <-firstResult
+	if err := <-firstErr; err != nil {
+		t.Fatalf("first finalPreflight() error = %v", err)
+	}
+
+	key := operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4)
+	if got := first.Operation(key).State; got != sysnet.CapabilityAvailable {
+		t.Fatalf("first snapshot state = %v, want available", got)
+	}
+	secondCapability := second.Operation(key)
+	if secondCapability.State != sysnet.CapabilityUnavailable || !containsReason(secondCapability.Reasons, sysnet.ReasonResourceBusy) {
+		t.Fatalf("second snapshot capability = %+v, want busy", secondCapability)
+	}
+}
+
+func TestFinalPreflightBoundsUncooperativeProbe(t *testing.T) {
+	t.Parallel()
+	const timeout = 20 * time.Millisecond
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	blocked := make(chan struct{})
+	started := make(chan struct{})
+	var calls atomic.Int32
+	probe := capabilityProbeFunc(func(context.Context) capabilityProbeFacts {
+		if calls.Add(1) == 1 {
+			return capabilityProbeFacts{netIO: available, split: available}
+		}
+		close(started)
+		<-blocked
+		return capabilityProbeFacts{netIO: available, split: available}
+	})
+	system, err := newSystem(SystemConfig{OperationTimeout: timeout}, systemDependencies{
+		capabilityCode: implementationSupport{regularTun: true}, capabilityProbe: probe,
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	result := make(chan sysnet.CapabilityReport, 1)
+	errorsCh := make(chan error, 1)
+	go func() {
+		report, err := system.finalPreflight()
+		result <- report
+		errorsCh <- err
+	}()
+	<-started
+	var report sysnet.CapabilityReport
+	select {
+	case report = <-result:
+		if err := <-errorsCh; err != nil {
+			t.Fatalf("finalPreflight() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("finalPreflight() waited for a probe that ignored cancellation")
+	}
+	close(blocked)
+	t.Cleanup(func() { _ = system.Close() })
+	capability := report.Operation(operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4))
 	if capability.State != sysnet.CapabilityUnknown || !containsReason(capability.Reasons, sysnet.ReasonProbeFailed) {
 		t.Fatalf("create capability = %+v, want failed probe", capability)
 	}

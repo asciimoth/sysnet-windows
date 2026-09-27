@@ -40,6 +40,7 @@ type Worker struct {
 	reasonMu       sync.Mutex
 	pendingReasons []Reason
 	pendingSet     map[Reason]struct{}
+	stopped        bool
 }
 
 // NewWorker starts one policy worker. A nil handler is valid when the caller
@@ -78,6 +79,8 @@ func (w *Worker) Submit(ctx context.Context, entries []Entry) error {
 	select {
 	case <-w.stop:
 		return ErrStopped
+	case <-w.ctx.Done():
+		return ErrStopped
 	case <-ctx.Done():
 		return ctx.Err()
 	case w.requests <- req:
@@ -85,6 +88,8 @@ func (w *Worker) Submit(ctx context.Context, entries []Entry) error {
 	select {
 	case err := <-result:
 		return err
+	case <-w.ctx.Done():
+		return w.ctx.Err()
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -93,21 +98,14 @@ func (w *Worker) Submit(ctx context.Context, entries []Entry) error {
 // Enqueue queues a callback reason without waiting. A full queue coalesces the
 // reason with already pending work.
 func (w *Worker) Enqueue(reason Reason) bool {
-	select {
-	case <-w.stop:
-		return false
-	default:
-	}
 	w.reasonMu.Lock()
+	defer w.reasonMu.Unlock()
+	if w.stopped || w.ctx.Err() != nil {
+		return false
+	}
 	if _, exists := w.pendingSet[reason]; !exists {
 		w.pendingSet[reason] = struct{}{}
 		w.pendingReasons = append(w.pendingReasons, reason)
-	}
-	w.reasonMu.Unlock()
-	select {
-	case <-w.stop:
-		return false
-	default:
 	}
 	select {
 	case w.reasons <- struct{}{}:
@@ -118,9 +116,15 @@ func (w *Worker) Enqueue(reason Reason) bool {
 
 // Stop stops intake, cancels active work, and waits for the worker to exit.
 func (w *Worker) Stop(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	w.once.Do(func() {
+		w.reasonMu.Lock()
+		w.stopped = true
 		close(w.stop)
 		w.cancel()
+		w.reasonMu.Unlock()
 	})
 	select {
 	case <-w.done:
@@ -135,6 +139,8 @@ func (w *Worker) run() {
 	for {
 		select {
 		case <-w.stop:
+			return
+		case <-w.ctx.Done():
 			return
 		case req := <-w.requests:
 			ctx, cancel := mergeContext(w.ctx, req.ctx)

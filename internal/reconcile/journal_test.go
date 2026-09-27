@@ -111,6 +111,32 @@ func TestJournalRollbackHasFreshBoundedContext(t *testing.T) {
 	}
 }
 
+func TestJournalRollsBackSuccessReturnedAfterCancellation(t *testing.T) {
+	t.Parallel()
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	host := newFakeHost("foreign")
+	entry := host.entry("owned", "", -1, 0)
+	apply := entry.Apply
+	entry.Apply = func(ctx context.Context) error {
+		if err := apply(ctx); err != nil {
+			return err
+		}
+		cancelRequest()
+		return nil
+	}
+
+	err := (&Journal{}).Apply(requestCtx, []Entry{entry})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Apply() error = %v, want canceled", err)
+	}
+	if RequiresRecovery(err) {
+		t.Fatalf("RequiresRecovery() = true after verified rollback: %v", err)
+	}
+	if got := host.resourceNames(); !reflect.DeepEqual(got, []string{"foreign"}) {
+		t.Fatalf("host resources = %v, want foreign sentinel only", got)
+	}
+}
+
 func TestJournalJoinsCleanupFailureAndRetainsOwnership(t *testing.T) {
 	t.Parallel()
 	host := newFakeHost("foreign")

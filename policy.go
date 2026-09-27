@@ -270,16 +270,15 @@ func normalizeRule(config normalizedSystemConfig, rule sysnet.Rule, context sysn
 	return normalizedRule{typeName: typeName, value: value}, sysnet.ValidationReport{}
 }
 
-func validateMatcherRule(config normalizedSystemConfig, rule sysnet.Rule) sysnet.ValidationReport {
+func validateMatcherRule(config normalizedSystemConfig, rule sysnet.Rule) (normalizedRule, sysnet.ValidationReport) {
 	for _, family := range []sysnet.AddressFamily{sysnet.FamilyIPv4, sysnet.FamilyIPv6} {
 		if (family == sysnet.FamilyIPv4 && !config.ipv4) || (family == sysnet.FamilyIPv6 && !config.ipv6) {
 			continue
 		}
 		key := sysnet.MatcherProfileKey{Family: family, Transport: sysnet.TransportTCP}
-		_, report := normalizeRule(config, rule, sysnet.RuleContext{Matcher: &key})
-		return report
+		return normalizeRule(config, rule, sysnet.RuleContext{Matcher: &key})
 	}
-	return unsupportedReport("Rule.Context.Matcher.Family", sysnet.ReasonAddressFamilyUnavailable, "no address family is enabled")
+	return normalizedRule{}, unsupportedReport("Rule.Context.Matcher.Family", sysnet.ReasonAddressFamilyUnavailable, "no address family is enabled")
 }
 
 func validateRuleContext(config normalizedSystemConfig, context sysnet.RuleContext) *sysnet.ValidationIssue {
