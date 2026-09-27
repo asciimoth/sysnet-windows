@@ -191,6 +191,103 @@ func TestSystemCloseMarksRecoveryWhenRollbackCannotBeVerified(t *testing.T) {
 	}
 }
 
+func TestSystemCloseDoesNotRequireRecoveryAfterVerifiedInverseError(t *testing.T) {
+	t.Parallel()
+	system, err := newSystem(SystemConfig{}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	inverseErr := errors.New("inverse reported an error after restoring state")
+	applied := false
+	undoneVerifications := 0
+	entry := reconcile.Entry{
+		Key: reconcile.OwnershipKey{Kind: reconcile.KindRoute, ID: "owned-route"},
+		Apply: func(context.Context) error {
+			applied = true
+			return nil
+		},
+		Inverse: func(context.Context) error {
+			applied = false
+			return inverseErr
+		},
+		Verify: func(_ context.Context, expected reconcile.ExpectedState) error {
+			if expected == reconcile.ExpectedUndone {
+				undoneVerifications++
+				if applied {
+					return errors.New("route is still applied")
+				}
+			}
+			return nil
+		},
+	}
+	if err := system.applyTransaction([]reconcile.Entry{entry}); err != nil {
+		t.Fatalf("applyTransaction() error = %v", err)
+	}
+	if err := system.Close(); !errors.Is(err, inverseErr) {
+		t.Fatalf("Close() error = %v, want inverse error", err)
+	}
+	if undoneVerifications != 1 {
+		t.Fatalf("undone verification calls = %d, want 1", undoneVerifications)
+	}
+	system.mu.RLock()
+	state := system.state
+	system.mu.RUnlock()
+	if state != lifecycleClosed {
+		t.Fatalf("lifecycle state = %s, want closed", state)
+	}
+	if got := system.journal.Len(); got != 0 {
+		t.Fatalf("journal length = %d, want 0 after verified cleanup", got)
+	}
+}
+
+func TestSystemApplyReturnsReadyAfterVerifiedRollbackError(t *testing.T) {
+	t.Parallel()
+	system, err := newSystem(SystemConfig{}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	applyErr := errors.New("apply failed after mutation")
+	inverseErr := errors.New("inverse reported an error after restoring state")
+	applied := false
+	undoneVerifications := 0
+	err = system.applyTransaction([]reconcile.Entry{{
+		Key: reconcile.OwnershipKey{Kind: reconcile.KindRoute, ID: "owned-route"},
+		Apply: func(context.Context) error {
+			applied = true
+			return applyErr
+		},
+		Inverse: func(context.Context) error {
+			applied = false
+			return inverseErr
+		},
+		Verify: func(_ context.Context, expected reconcile.ExpectedState) error {
+			if expected == reconcile.ExpectedUndone {
+				undoneVerifications++
+				if applied {
+					return errors.New("route is still applied")
+				}
+			}
+			return nil
+		},
+	}})
+	if !errors.Is(err, applyErr) || !errors.Is(err, inverseErr) {
+		t.Fatalf("applyTransaction() error = %v, want apply and inverse errors", err)
+	}
+	if reconcile.RequiresRecovery(err) {
+		t.Fatalf("verified rollback requires recovery: %v", err)
+	}
+	if undoneVerifications != 1 {
+		t.Fatalf("undone verification calls = %d, want 1", undoneVerifications)
+	}
+	if system.state != lifecycleReady {
+		t.Fatalf("lifecycle state = %s, want ready", system.state)
+	}
+	if got := system.journal.Len(); got != 0 {
+		t.Fatalf("journal length = %d, want 0 after verified rollback", got)
+	}
+}
+
 func TestSystemCloseMarksRecoveryWhenResourceCloseFails(t *testing.T) {
 	t.Parallel()
 	system, err := newSystem(SystemConfig{}, systemDependencies{})
@@ -383,6 +480,9 @@ func TestSystemHandlesRecoveryFailureAfterNonRecoveryFailure(t *testing.T) {
 			Verify: func(_ context.Context, expected reconcile.ExpectedState) error {
 				if expected != reconcile.ExpectedUndone {
 					return errors.New("unexpected verification state")
+				}
+				if inverseErr != nil {
+					return errors.New("cleanup state is uncertain")
 				}
 				return nil
 			},

@@ -167,6 +167,194 @@ func TestJournalJoinsCleanupFailureAndRetainsOwnership(t *testing.T) {
 	}
 }
 
+func TestJournalUsesReadbackAfterInverseError(t *testing.T) {
+	t.Parallel()
+	for _, phase := range []string{"rollback", "undo-all"} {
+		t.Run(phase, func(t *testing.T) {
+			t.Parallel()
+			primaryErr := errors.New("apply failed after mutation")
+			inverseErr := errors.New("inverse reported an error after restoring state")
+			applied := false
+			undoneVerifications := 0
+			entry := Entry{
+				Key: OwnershipKey{Kind: KindRoute, ID: phase},
+				Apply: func(context.Context) error {
+					applied = true
+					if phase == "rollback" {
+						return primaryErr
+					}
+					return nil
+				},
+				Inverse: func(context.Context) error {
+					applied = false
+					return inverseErr
+				},
+				Verify: func(_ context.Context, expected ExpectedState) error {
+					switch expected {
+					case ExpectedApplied:
+						if !applied {
+							return errors.New("resource was not applied")
+						}
+					case ExpectedUndone:
+						undoneVerifications++
+						if applied {
+							return errors.New("resource is still applied")
+						}
+					}
+					return nil
+				},
+			}
+			journal := &Journal{}
+			err := journal.Apply(context.Background(), []Entry{entry})
+			if phase == "undo-all" {
+				if err != nil {
+					t.Fatalf("Apply() error = %v", err)
+				}
+				err = journal.UndoAll(context.Background())
+			} else if !errors.Is(err, primaryErr) {
+				t.Fatalf("Apply() error = %v, want primary error", err)
+			}
+			if !errors.Is(err, inverseErr) {
+				t.Fatalf("cleanup error = %v, want inverse error", err)
+			}
+			if undoneVerifications != 1 {
+				t.Fatalf("undone verification calls = %d, want 1", undoneVerifications)
+			}
+			if RequiresRecovery(err) || journal.RecoveryRequired() {
+				t.Fatalf("verified absent resource requires recovery: %v", err)
+			}
+			if got := journal.Len(); got != 0 {
+				t.Fatalf("journal length = %d, want 0 after verified cleanup", got)
+			}
+			if phase == "undo-all" {
+				if err := journal.UndoAll(context.Background()); err != nil {
+					t.Fatalf("second UndoAll() error = %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestJournalContinuesReverseCleanupAfterVerifiedInverseError(t *testing.T) {
+	t.Parallel()
+	inverseErr := errors.New("second inverse reported an error after restoring state")
+	resources := map[string]bool{}
+	var events []string
+	entry := func(name string, failInverse bool) Entry {
+		return Entry{
+			Key: OwnershipKey{Kind: KindRoute, ID: name},
+			Apply: func(context.Context) error {
+				resources[name] = true
+				return nil
+			},
+			Inverse: func(context.Context) error {
+				events = append(events, "undo:"+name)
+				delete(resources, name)
+				if failInverse {
+					return inverseErr
+				}
+				return nil
+			},
+			Verify: func(_ context.Context, expected ExpectedState) error {
+				events = append(events, fmt.Sprintf("verify-%d:%s", expected, name))
+				if resources[name] != (expected == ExpectedApplied) {
+					return errors.New("readback mismatch")
+				}
+				return nil
+			},
+		}
+	}
+	journal := &Journal{}
+	if err := journal.Apply(context.Background(), []Entry{
+		entry("first", false),
+		entry("second", true),
+	}); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	events = nil
+	err := journal.UndoAll(context.Background())
+	if !errors.Is(err, inverseErr) || RequiresRecovery(err) {
+		t.Fatalf("UndoAll() error = %v, want verified inverse error", err)
+	}
+	want := []string{
+		"undo:second", "verify-2:second",
+		"undo:first", "verify-2:first",
+	}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("cleanup events = %v, want %v", events, want)
+	}
+	if len(resources) != 0 || journal.Len() != 0 {
+		t.Fatalf("resources = %v, journal length = %d; want complete cleanup", resources, journal.Len())
+	}
+}
+
+func TestJournalRetainsInverseErrorWhenReadbackCannotProveCleanup(t *testing.T) {
+	t.Parallel()
+	inverseErr := errors.New("inverse failed")
+	readbackErr := errors.New("resource is still present")
+	undoneVerifications := 0
+	journal := &Journal{}
+	entry := Entry{
+		Key:     OwnershipKey{Kind: KindRoute, ID: "uncertain"},
+		Apply:   func(context.Context) error { return nil },
+		Inverse: func(context.Context) error { return inverseErr },
+		Verify: func(_ context.Context, expected ExpectedState) error {
+			if expected == ExpectedUndone {
+				undoneVerifications++
+				return readbackErr
+			}
+			return nil
+		},
+	}
+	if err := journal.Apply(context.Background(), []Entry{entry}); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	err := journal.UndoAll(context.Background())
+	if !errors.Is(err, inverseErr) || !errors.Is(err, readbackErr) {
+		t.Fatalf("UndoAll() error = %v, want inverse and readback errors", err)
+	}
+	if undoneVerifications != 1 {
+		t.Fatalf("undone verification calls = %d, want 1", undoneVerifications)
+	}
+	if !RequiresRecovery(err) || !journal.RecoveryRequired() {
+		t.Fatalf("unverified cleanup does not require recovery: %v", err)
+	}
+	if got := journal.Len(); got != 1 {
+		t.Fatalf("journal length = %d, want retained entry", got)
+	}
+}
+
+func TestJournalRetainsNestedRecoveryAfterSuccessfulReadback(t *testing.T) {
+	t.Parallel()
+	nested := &Failure{err: errors.New("dependency state is uncertain"), recoveryRequired: true}
+	undoneVerifications := 0
+	journal := &Journal{}
+	entry := Entry{
+		Key:     OwnershipKey{Kind: KindRoute, ID: "nested-recovery"},
+		Apply:   func(context.Context) error { return nil },
+		Inverse: func(context.Context) error { return nested },
+		Verify: func(_ context.Context, expected ExpectedState) error {
+			if expected == ExpectedUndone {
+				undoneVerifications++
+			}
+			return nil
+		},
+	}
+	if err := journal.Apply(context.Background(), []Entry{entry}); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	err := journal.UndoAll(context.Background())
+	if !errors.Is(err, nested) || !RequiresRecovery(err) {
+		t.Fatalf("UndoAll() error = %v, want nested recovery failure", err)
+	}
+	if undoneVerifications != 1 {
+		t.Fatalf("undone verification calls = %d, want 1", undoneVerifications)
+	}
+	if got := journal.Len(); got != 1 {
+		t.Fatalf("journal length = %d, want retry target retained", got)
+	}
+}
+
 func TestRequiresRecoverySearchesCompleteErrorTree(t *testing.T) {
 	t.Parallel()
 	plain := errors.New("plain failure")

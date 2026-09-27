@@ -152,18 +152,22 @@ func (j *Journal) fail(ctx context.Context, primary error, completed []Entry) er
 	if len(remaining) != 0 {
 		j.entries = append(j.entries, remaining...)
 	}
-	if cleanupErr == nil {
-		return &Failure{err: primary}
+	recoveryRequired := len(remaining) != 0 || RequiresRecovery(cleanupErr)
+	if recoveryRequired {
+		j.recoveryNeeded = true
 	}
-	j.recoveryNeeded = true
+	if cleanupErr == nil {
+		return &Failure{err: primary, recoveryRequired: recoveryRequired}
+	}
 	return &Failure{
 		err:              errors.Join(primary, cleanupErr),
-		recoveryRequired: true,
+		recoveryRequired: recoveryRequired,
 	}
 }
 
 // UndoAll undoes every committed entry in reverse order. Entries whose cleanup
-// cannot be verified stay in the journal so a later recovery can retry them.
+// cannot be verified, or whose cleanup reports nested uncertain ownership,
+// stay in the journal so a later recovery can retry them.
 func (j *Journal) UndoAll(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -175,12 +179,16 @@ func (j *Journal) UndoAll(ctx context.Context) error {
 	}
 	remaining, err := j.undoLocked(ctx, j.entries)
 	j.entries = remaining
-	if err != nil {
+	recoveryRequired := len(remaining) != 0 || RequiresRecovery(err)
+	if recoveryRequired {
 		j.recoveryNeeded = true
-		return &Failure{err: err, recoveryRequired: true}
+	} else {
+		j.recoveryNeeded = false
 	}
-	j.recoveryNeeded = false
-	return nil
+	if err == nil {
+		return nil
+	}
+	return &Failure{err: err, recoveryRequired: recoveryRequired}
 }
 
 // Quiesce waits until a callback which outlived its context has returned. It
@@ -219,24 +227,30 @@ func (j *Journal) undoLocked(ctx context.Context, entries []Entry) ([]Entry, err
 			cleanupErr = errors.Join(cleanupErr, err)
 			break
 		}
-		if err := j.invokeLocked(ctx, entry.Inverse); err != nil {
-			failed[index] = struct{}{}
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("undo resource %v: %w", entry.Key, err))
+		inverseErr := j.invokeLocked(ctx, entry.Inverse)
+		if inverseErr != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("undo resource %v: %w", entry.Key, inverseErr))
 			if j.pending != nil || ctx.Err() != nil {
+				failed[index] = struct{}{}
 				markRemaining(failed, index-1)
 				break
 			}
-			continue
 		}
-		if err := j.invokeLocked(ctx, func(ctx context.Context) error {
+		verifyErr := j.invokeLocked(ctx, func(ctx context.Context) error {
 			return entry.Verify(ctx, ExpectedUndone)
-		}); err != nil {
+		})
+		if verifyErr != nil {
 			failed[index] = struct{}{}
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("verify undone resource %v: %w", entry.Key, err))
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("verify undone resource %v: %w", entry.Key, verifyErr))
 			if j.pending != nil || ctx.Err() != nil {
 				markRemaining(failed, index-1)
 				break
 			}
+		} else if RequiresRecovery(inverseErr) {
+			// Independent readback proves this entry is absent, but a nested
+			// reconciliation failure can describe other uncertain ownership.
+			// Keep the entry so explicit recovery has a retry target.
+			failed[index] = struct{}{}
 		}
 	}
 	remaining := make([]Entry, 0, len(failed))
