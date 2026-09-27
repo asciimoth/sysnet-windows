@@ -589,7 +589,7 @@ defer rollback to a later milestone.
    - Complete this step when C04-C06, C13-C18 and the equivalent companion
      capability cases pass under the race detector.
 
-4. **Step 4 - Build capability snapshots and lifecycle state.**
+4. **Step 4 - Build capability snapshots and lifecycle state. (Completed)**
 
    - Build an immutable internal report from implementation support, configured
      feature switches, probe facts, active ownership and lifecycle state.

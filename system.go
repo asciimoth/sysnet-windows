@@ -1,6 +1,7 @@
 package windows
 
 import (
+	"context"
 	"errors"
 	"sync"
 
@@ -18,6 +19,8 @@ type System struct {
 	config       normalizedSystemConfig
 	dependencies systemDependencies
 	capabilities capabilityModel
+	probeFacts   capabilityProbeFacts
+	support      implementationSupport
 }
 
 // This assertion intentionally uses the selected gonnect version. In older
@@ -31,11 +34,25 @@ func (s *System) Close() error {
 	if s.state == lifecycleClosed {
 		return nil
 	}
-	s.state = lifecycleClosed
+	if s.state != lifecycleClosing {
+		if err := s.transitionLocked(lifecycleClosing); err != nil {
+			return err
+		}
+		s.rebuildCapabilitiesLocked()
+	}
+	if err := s.transitionLocked(lifecycleClosed); err != nil {
+		return err
+	}
+	s.rebuildCapabilitiesLocked()
 	return nil
 }
 
 func (s *System) Capabilities() sysnet.CapabilityReport {
+	if s == nil {
+		return capabilityModel{}.snapshot()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.capabilities.snapshot()
 }
 
@@ -45,20 +62,26 @@ func (*System) CapabilitiesForTun(tun.Tun) (sysnet.TunCapabilityReport, error) {
 
 func (s *System) CheckTunOpts(opts sysnet.TunOpts) sysnet.ValidationReport {
 	_, report := normalizeTunOpts(s.policyConfig(), opts)
+	report.CapabilityRevision = s.Capabilities().Revision
 	return report
 }
 
 func (s *System) CheckDefaultTunOpts(opts sysnet.DefaultTunOpts) sysnet.ValidationReport {
 	_, report := normalizeDefaultTunOpts(s.policyConfig(), opts)
+	report.CapabilityRevision = s.Capabilities().Revision
 	return report
 }
 
 func (s *System) CheckRule(rule sysnet.Rule, context sysnet.RuleContext) sysnet.ValidationReport {
 	_, report := normalizeRule(s.policyConfig(), rule, context)
+	report.CapabilityRevision = s.Capabilities().Revision
 	return report
 }
 
-func (*System) CompleteRule(sysnet.Rule, sysnet.RuleContext) ([]string, error) {
+func (s *System) CompleteRule(sysnet.Rule, sysnet.RuleContext) ([]string, error) {
+	if err := s.acceptingWork(); err != nil {
+		return nil, err
+	}
 	return nil, sysnet.ErrNotSupported
 }
 
@@ -76,12 +99,41 @@ func (s *System) BuildMatcher(rule sysnet.Rule) (sysnet.Matcher, error) {
 	if report := validateMatcherRule(s.policyConfig(), rule); report.Err() != nil {
 		return nil, report.Err()
 	}
+	if err := s.finalPreflight(); err != nil {
+		return nil, err
+	}
+	report := s.Capabilities()
+	var unavailable error
+	for _, family := range []sysnet.AddressFamily{sysnet.FamilyIPv4, sysnet.FamilyIPv6} {
+		profile := matcherProfile(report.Rule(rule.Type), sysnet.MatcherProfileKey{Family: family, Transport: sysnet.TransportTCP})
+		if profile.State == sysnet.CapabilityAvailable {
+			return nil, sysnet.ErrNotSupported
+		}
+		if unavailable == nil && (profile.State != sysnet.CapabilityUnknown || len(profile.Reasons) != 0) {
+			unavailable = capabilityError("Matcher", profile.Capability)
+		}
+	}
+	if unavailable != nil {
+		return nil, unavailable
+	}
 	return nil, sysnet.ErrNotSupported
 }
 
 func (s *System) BuildDefaultTun(opts sysnet.DefaultTunOpts) (sysnet.DefaultTun, error) {
-	if _, report := normalizeDefaultTunOpts(s.policyConfig(), opts); report.Err() != nil {
+	desired, report := normalizeDefaultTunOpts(s.policyConfig(), opts)
+	if report.Err() != nil {
 		return nil, report.Err()
+	}
+	if err := s.finalPreflight(); err != nil {
+		return nil, err
+	}
+	mode := sysnet.RoutingFull
+	if len(desired.excludes) != 0 {
+		mode = sysnet.RoutingExclude
+	}
+	capability := s.Capabilities().DefaultTunProfile(sysnet.RoutingProfileKey{Family: desired.family, Mode: mode}).Capability
+	if capability.State != sysnet.CapabilityAvailable {
+		return nil, capabilityError("DefaultTun.Profile", capability)
 	}
 	return nil, sysnet.ErrNotSupported
 }
@@ -89,8 +141,17 @@ func (s *System) BuildDefaultTun(opts sysnet.DefaultTunOpts) (sysnet.DefaultTun,
 func (*System) DefaultTunWarnings(sysnet.DefaultTun) []sysnet.Warning { return nil }
 
 func (s *System) BuildTun(opts sysnet.TunOpts) (tun.Tun, error) {
-	if _, report := normalizeTunOpts(s.policyConfig(), opts); report.Err() != nil {
+	desired, report := normalizeTunOpts(s.policyConfig(), opts)
+	if report.Err() != nil {
 		return nil, report.Err()
+	}
+	if err := s.finalPreflight(); err != nil {
+		return nil, err
+	}
+	family := familyForPrefixes(desired.addresses, desired.routes)
+	capability := s.Capabilities().Operation(sysnet.OperationKey{Target: sysnet.TargetTun, Operation: sysnet.OpCreate, Family: family})
+	if capability.State != sysnet.CapabilityAvailable {
+		return nil, capabilityError("Tun.Create", capability)
 	}
 	return nil, sysnet.ErrNotSupported
 }
@@ -102,12 +163,21 @@ func (s *System) SetTunMTU(_ tun.Tun, mtu int) error {
 	if err := report.Err(); err != nil {
 		return err
 	}
+	if err := s.finalPreflight(); err != nil {
+		return err
+	}
+	if capability := s.Capabilities().Operation(sysnet.OperationKey{Target: sysnet.TargetTun, Operation: sysnet.OpSetMTU, Family: sysnet.FamilyNone}); capability.State != sysnet.CapabilityAvailable {
+		return capabilityError("Tun.MTU", capability)
+	}
 	return sysnet.ErrNotSupported
 }
 
 func (s *System) SetTunAddrs(_ tun.Tun, addrs []string) error {
 	_, report := normalizePrefixes(s.policyConfig(), addrs, "Tun.TunAddrs", prefixAddress)
 	if err := report.Err(); err != nil {
+		return err
+	}
+	if err := s.finalPreflight(); err != nil {
 		return err
 	}
 	return sysnet.ErrNotSupported
@@ -117,13 +187,19 @@ func (s *System) AddTunAddr(device tun.Tun, addr string) error {
 	return s.SetTunAddrs(device, []string{addr})
 }
 
-func (*System) GetTunAddrs(tun.Tun) ([]string, error) {
+func (s *System) GetTunAddrs(tun.Tun) ([]string, error) {
+	if err := s.acceptingWork(); err != nil {
+		return nil, err
+	}
 	return nil, sysnet.ErrNotSupported
 }
 
 func (s *System) SetTunRoutes(_ tun.Tun, routes []string) error {
 	_, report := normalizePrefixes(s.policyConfig(), routes, "Tun.TunRoutes", prefixRoute)
 	if err := report.Err(); err != nil {
+		return err
+	}
+	if err := s.finalPreflight(); err != nil {
 		return err
 	}
 	return sysnet.ErrNotSupported
@@ -133,11 +209,17 @@ func (s *System) AddTunRoute(device tun.Tun, route string) error {
 	return s.SetTunRoutes(device, []string{route})
 }
 
-func (*System) GetTunRoutes(tun.Tun) ([]string, error) {
+func (s *System) GetTunRoutes(tun.Tun) ([]string, error) {
+	if err := s.acceptingWork(); err != nil {
+		return nil, err
+	}
 	return nil, sysnet.ErrNotSupported
 }
 
-func (*System) SetTunName(tun.Tun, string) error {
+func (s *System) SetTunName(tun.Tun, string) error {
+	if err := s.acceptingWork(); err != nil {
+		return err
+	}
 	return validationError(validationIssue(
 		"Tun.Name",
 		sysnet.CapabilityUnsupported,
@@ -145,6 +227,54 @@ func (*System) SetTunName(tun.Tun, string) error {
 		"renaming a TUN is not supported",
 		nil,
 	))
+}
+
+func (s *System) acceptingWork() error {
+	if s == nil {
+		return stateValidationError(sysnet.ReasonSystemClosed, "system is nil")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.acceptingWorkLocked()
+}
+
+// finalPreflight refreshes read-only dependency facts. Cached capability
+// snapshots guide callers but never authorize an operation by themselves.
+func (s *System) finalPreflight() error {
+	if err := s.acceptingWork(); err != nil {
+		return err
+	}
+	if s.dependencies.capabilityProbe == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.config.operationTimeout)
+	facts := s.dependencies.capabilityProbe.Probe(ctx)
+	cancel()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.acceptingWorkLocked(); err != nil {
+		return err
+	}
+	s.probeFacts = facts
+	s.rebuildCapabilitiesLocked()
+	return nil
+}
+
+func matcherProfile(rule sysnet.RuleCapability, key sysnet.MatcherProfileKey) sysnet.MatcherProfile {
+	for _, profile := range rule.Matchers {
+		if profile.Key == key {
+			return profile
+		}
+	}
+	return sysnet.MatcherProfile{Key: key, Capability: sysnet.Capability{State: sysnet.CapabilityUnknown}}
+}
+
+func capabilityError(path string, capability sysnet.Capability) error {
+	reason := sysnet.ReasonProbeNotRun
+	if len(capability.Reasons) != 0 {
+		reason = capability.Reasons[0]
+	}
+	return validationError(validationIssue(path, capability.State, reason, capability.Detail, nil))
 }
 
 func (s *System) policyConfig() normalizedSystemConfig {
