@@ -88,6 +88,10 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
+    # A failed rerun must not leave an earlier successful qualification in the
+    # evidence directory.
+    args.output.unlink(missing_ok=True)
+
     matrix = load_object(args.matrix)
     if matrix.get("schemaVersion") != 1:
         raise ValueError("unsupported qualification matrix schema")

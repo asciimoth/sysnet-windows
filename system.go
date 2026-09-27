@@ -141,8 +141,11 @@ func (s *System) Capabilities() sysnet.CapabilityReport {
 	return s.capabilities.snapshot()
 }
 
-func (*System) CapabilitiesForTun(tun.Tun) (sysnet.TunCapabilityReport, error) {
-	return sysnet.TunCapabilityReport{}, sysnet.ErrUnknownTun
+func (s *System) CapabilitiesForTun(device tun.Tun) (sysnet.TunCapabilityReport, error) {
+	if err := s.requireOwnedTun(device); err != nil {
+		return sysnet.TunCapabilityReport{}, err
+	}
+	return sysnet.TunCapabilityReport{}, sysnet.ErrNotSupported
 }
 
 func (s *System) CheckTunOpts(opts sysnet.TunOpts) sysnet.ValidationReport {
@@ -308,7 +311,10 @@ func (s *System) BuildTun(opts sysnet.TunOpts) (tun.Tun, error) {
 
 func (*System) TunWarnings(tun.Tun) []sysnet.Warning { return nil }
 
-func (s *System) SetTunMTU(_ tun.Tun, mtu int) error {
+func (s *System) SetTunMTU(device tun.Tun, mtu int) error {
+	if err := s.requireOwnedTun(device); err != nil {
+		return err
+	}
 	_, report := normalizeMTU(s.policyConfig(), mtu, "Tun.MTU", false)
 	if err := report.Err(); err != nil {
 		return err
@@ -331,8 +337,8 @@ func (s *System) AddTunAddr(device tun.Tun, addr string) error {
 	return s.changeTunPrefixes(device, []string{addr}, "Tun.TunAddrs", prefixAddress, sysnet.OpAddAddress)
 }
 
-func (s *System) GetTunAddrs(tun.Tun) ([]string, error) {
-	if err := s.acceptingWork(); err != nil {
+func (s *System) GetTunAddrs(device tun.Tun) ([]string, error) {
+	if err := s.requireOwnedTun(device); err != nil {
 		return nil, err
 	}
 	return nil, sysnet.ErrNotSupported
@@ -342,7 +348,10 @@ func (s *System) SetTunRoutes(device tun.Tun, routes []string) error {
 	return s.changeTunPrefixes(device, routes, "Tun.TunRoutes", prefixRoute, sysnet.OpSetRoutes)
 }
 
-func (s *System) changeTunPrefixes(_ tun.Tun, raw []string, path string, kind prefixKind, operation sysnet.Operation) error {
+func (s *System) changeTunPrefixes(device tun.Tun, raw []string, path string, kind prefixKind, operation sysnet.Operation) error {
+	if err := s.requireOwnedTun(device); err != nil {
+		return err
+	}
 	prefixes, report := normalizePrefixes(s.policyConfig(), raw, path, kind)
 	if err := report.Err(); err != nil {
 		return err
@@ -368,15 +377,15 @@ func (s *System) AddTunRoute(device tun.Tun, route string) error {
 	return s.changeTunPrefixes(device, []string{route}, "Tun.TunRoutes", prefixRoute, sysnet.OpAddRoute)
 }
 
-func (s *System) GetTunRoutes(tun.Tun) ([]string, error) {
-	if err := s.acceptingWork(); err != nil {
+func (s *System) GetTunRoutes(device tun.Tun) ([]string, error) {
+	if err := s.requireOwnedTun(device); err != nil {
 		return nil, err
 	}
 	return nil, sysnet.ErrNotSupported
 }
 
-func (s *System) SetTunName(tun.Tun, string) error {
-	if err := s.acceptingWork(); err != nil {
+func (s *System) SetTunName(device tun.Tun, _ string) error {
+	if err := s.requireOwnedTun(device); err != nil {
 		return err
 	}
 	return validationError(validationIssue(
@@ -386,6 +395,13 @@ func (s *System) SetTunName(tun.Tun, string) error {
 		"renaming a TUN is not supported",
 		nil,
 	))
+}
+
+// requireOwnedTun rejects foreign, stale, and closed handles before option or
+// capability checks. M0 cannot create a TUN, so it has no owned handles. M1
+// replaces this scaffold check with lookup in the live TUN inventory.
+func (*System) requireOwnedTun(tun.Tun) error {
+	return sysnet.ErrUnknownTun
 }
 
 func (s *System) acceptingWork() error {

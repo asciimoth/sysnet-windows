@@ -11,10 +11,14 @@ param(
 )
 $ErrorActionPreference = 'Stop'; Set-StrictMode -Version Latest
 $env:CGO_ENABLED = '0'; $env:GOTOOLCHAIN = 'local'
+New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+$ArtifactDir = (Resolve-Path $ArtifactDir).Path
+$evidenceName = if ($Flow) { 'packet-flow-suite-evidence.json' } else { 'live-driver-evidence.json' }
+$evidencePath = Join-Path $ArtifactDir $evidenceName
+Remove-Item -LiteralPath $evidencePath -Force -ErrorAction SilentlyContinue
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $identity.IsSystem) { throw 'The live-driver gate must run as SYSTEM' }
 if (-not [Environment]::Is64BitProcess) { throw 'The live-driver gate needs a 64-bit process' }
-New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
 $startedAt = (Get-Date).ToUniversalTime().ToString('o')
 . (Join-Path $SourceDir 'dev\winvm\driver.ps1')
 . (Join-Path $SourceDir 'dev\winvm\test-output.ps1')
@@ -88,7 +92,6 @@ try {
 $windows = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 $productType = if ($windows.InstallationType -like 'Server*') { 3 } else { 1 }
 $suite = if ($Flow) { 'packet-flow' } else { 'live-driver' }
-$evidenceName = if ($Flow) { 'packet-flow-suite-evidence.json' } else { 'live-driver-evidence.json' }
 [ordered]@{
     schemaVersion=1; suite=$suite; outcome='passed'; startedAt=$startedAt
     finishedAt=(Get-Date).ToUniversalTime().ToString('o')
@@ -108,4 +111,4 @@ $evidenceName = if ($Flow) { 'packet-flow-suite-evidence.json' } else { 'live-dr
         finalState=$after.state
     }
     requiredTests=$required; testResults=$testResults
-} | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $ArtifactDir $evidenceName)
+} | ConvertTo-Json -Depth 6 | Set-Content $evidencePath

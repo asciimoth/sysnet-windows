@@ -16,7 +16,9 @@ LOCKS = {"goMod": "c" * 64, "goSum": "d" * 64}
 
 
 class QualificationTest(unittest.TestCase):
-    def run_validator(self, mutate=None, driver_lock_mutate=None):
+    def run_validator(
+        self, mutate=None, driver_lock_mutate=None, preexisting_output=None
+    ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             matrix = {
@@ -118,6 +120,10 @@ class QualificationTest(unittest.TestCase):
             for name, value in values.items():
                 (root / f"{name}.json").write_text(json.dumps(value), encoding="utf-8")
             (root / "packets.json").write_text(json.dumps(packets), encoding="utf-8")
+            if preexisting_output is not None:
+                (root / "result.json").write_text(
+                    json.dumps(preexisting_output), encoding="utf-8"
+                )
             result = subprocess.run([
                 sys.executable, str(SCRIPT), "--matrix", str(root / "matrix.json"),
                 "--entry", "fixture", "--native-unit", str(root / "native.json"),
@@ -126,6 +132,37 @@ class QualificationTest(unittest.TestCase):
             ], check=False, capture_output=True, text=True)
             output = json.loads((root / "result.json").read_text()) if (root / "result.json").exists() else None
             return result, output
+
+    def test_failed_validation_removes_stale_qualification(self):
+        def bad_matrix(matrix, _values, _packets):
+            matrix["schemaVersion"] = 2
+
+        def mismatched_source(_matrix, values, _packets):
+            values["flow"]["sourceArchiveSha256"] = "e" * 64
+
+        def invalid_driver(_matrix, values, _packets):
+            values["live"]["driver"]["installedSignature"] = "HashMismatch"
+
+        def missing_packet(_matrix, _values, packets):
+            packets.pop()
+
+        cases = [
+            ("matrix", bad_matrix, None),
+            ("driver lock", None, lambda lock: lock.update(schemaVersion=2)),
+            ("suite identity", mismatched_source, None),
+            ("driver evidence", invalid_driver, None),
+            ("packet evidence", missing_packet, None),
+        ]
+        stale = {"schemaVersion": 1, "outcome": "qualified"}
+        for name, mutate, lock_mutate in cases:
+            with self.subTest(stage=name):
+                result, output = self.run_validator(
+                    mutate,
+                    driver_lock_mutate=lock_mutate,
+                    preexisting_output=stale,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIsNone(output)
 
     def test_accepts_complete_matching_evidence(self):
         result, output = self.run_validator()

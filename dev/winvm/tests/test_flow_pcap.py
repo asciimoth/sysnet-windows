@@ -13,7 +13,9 @@ SCRIPT = Path(__file__).parents[1] / "tools" / "flow-pcap.py"
 
 
 class FlowPcapTest(unittest.TestCase):
-    def run_validator(self, observations, tunnel=b"", underlay=b""):
+    def run_validator(
+        self, observations, tunnel=b"", underlay=b"", preexisting_evidence=None
+    ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             observation_path = root / "observations.jsonl"
@@ -27,6 +29,8 @@ class FlowPcapTest(unittest.TestCase):
             (root / "tunnel.pcap").write_bytes(tunnel)
             (root / "underlay.pcap").write_bytes(underlay)
             output = root / "evidence.json"
+            if preexisting_evidence is not None:
+                output.write_text(json.dumps(preexisting_evidence), encoding="utf-8")
             result = subprocess.run(
                 [
                     sys.executable,
@@ -46,6 +50,33 @@ class FlowPcapTest(unittest.TestCase):
             )
             evidence = json.loads(output.read_text(encoding="utf-8")) if output.exists() else None
             return result, evidence
+
+    def test_parse_failures_remove_stale_evidence(self):
+        cases = [
+            ("malformed JSON", "{not-json}\n"),
+            ("invalid observation", [{"token": "TOKEN", "expectedPath": "bad"}]),
+            ("duplicate token", [
+                {"token": "TOKEN", "expectedPath": "none"},
+                {"token": "TOKEN", "expectedPath": "none"},
+            ]),
+        ]
+        stale = [{"token": "OLD", "packetPathValid": True}]
+        for name, observations in cases:
+            with self.subTest(case=name):
+                result, evidence = self.run_validator(
+                    observations, preexisting_evidence=stale
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIsNone(evidence)
+
+    def test_path_failure_replaces_stale_evidence_with_failed_result(self):
+        result, evidence = self.run_validator(
+            [{"token": "NEW", "expectedPath": "tunnel"}],
+            preexisting_evidence=[{"token": "OLD", "packetPathValid": True}],
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(evidence[0]["token"], "NEW")
+        self.assertFalse(evidence[0]["packetPathValid"])
 
     def test_accepts_every_supported_path_result(self):
         observations = [

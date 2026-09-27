@@ -12,6 +12,10 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $env:CGO_ENABLED = '0'; $env:GOTOOLCHAIN = 'local'
 $sourceRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+$ArtifactDir = (Resolve-Path $ArtifactDir).Path
+$evidencePath = Join-Path $ArtifactDir 'native-unit-evidence.json'
+Remove-Item -LiteralPath $evidencePath -Force -ErrorAction SilentlyContinue
 if (-not $SysnetWindowsRevision) {
     $SysnetWindowsRevision = (& git -C $sourceRoot rev-parse HEAD 2>$null | Out-String).Trim()
 }
@@ -19,8 +23,6 @@ if (-not $SysnetWindowsRevision) { $SysnetWindowsRevision = 'unknown' }
 if ($SysnetWindowsTreeState -eq 'unknown' -and (Test-Path (Join-Path $sourceRoot '.git'))) {
     $SysnetWindowsTreeState = if (& git -C $sourceRoot status --porcelain) { 'dirty' } else { 'clean' }
 }
-New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
-$ArtifactDir = (Resolve-Path $ArtifactDir).Path
 $startedAt = (Get-Date).ToUniversalTime().ToString('o')
 Start-Transcript -Path (Join-Path $ArtifactDir 'powershell.log') -Force | Out-Null
 . (Join-Path $PSScriptRoot 'test-output.ps1')
@@ -95,5 +97,5 @@ try {
         goVersion=(& go version | Out-String).Trim()
         dependencyLocks=(Get-DependencyLockEvidence $sourceRoot)
         requiredTests=$required; testResults=$testResults
-    } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $ArtifactDir 'native-unit-evidence.json')
+    } | ConvertTo-Json -Depth 5 | Set-Content $evidencePath
 } finally { Stop-Transcript | Out-Null }

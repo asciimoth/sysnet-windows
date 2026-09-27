@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/asciimoth/gonnect/sysnet"
+	gtun "github.com/asciimoth/gonnect/tun"
 )
 
 func TestSystemContractScaffold(t *testing.T) {
@@ -22,6 +23,97 @@ func TestSystemContractScaffold(t *testing.T) {
 	}
 	if err := system.CheckTunOpts(sysnet.TunOpts{}).Err(); !errors.Is(err, sysnet.ErrCapabilityUnknown) {
 		t.Fatalf("CheckTunOpts() error = %v, want capability unknown", err)
+	}
+}
+
+func TestDynamicTunOperationsRejectUnknownHandlesFirst(t *testing.T) {
+	t.Parallel()
+
+	ready, err := newSystem(SystemConfig{}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem(ready) error = %v", err)
+	}
+	closed, err := newSystem(SystemConfig{}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem(closed) error = %v", err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	foreign, peer := gtun.Pipe(1, 1500, 0, 0)
+	t.Cleanup(func() {
+		if err := foreign.Close(); err != nil {
+			t.Errorf("foreign Close() error = %v", err)
+		}
+		if err := peer.Close(); err != nil {
+			t.Errorf("peer Close() error = %v", err)
+		}
+	})
+
+	systems := []struct {
+		name   string
+		system *System
+	}{
+		{name: "ready", system: ready},
+		{name: "closed", system: closed},
+		{name: "uninitialized", system: &System{}},
+		{name: "nil receiver"},
+	}
+	handles := []struct {
+		name   string
+		handle gtun.Tun
+	}{
+		{name: "nil"},
+		{name: "foreign", handle: foreign},
+	}
+	operations := []struct {
+		name string
+		call func(*System, gtun.Tun) error
+	}{
+		{name: "capabilities", call: func(system *System, device gtun.Tun) error {
+			_, err := system.CapabilitiesForTun(device)
+			return err
+		}},
+		{name: "set MTU", call: func(system *System, device gtun.Tun) error {
+			return system.SetTunMTU(device, maxTunMTU+1)
+		}},
+		{name: "set addresses", call: func(system *System, device gtun.Tun) error {
+			return system.SetTunAddrs(device, []string{"not-a-prefix"})
+		}},
+		{name: "add address", call: func(system *System, device gtun.Tun) error {
+			return system.AddTunAddr(device, "not-a-prefix")
+		}},
+		{name: "get addresses", call: func(system *System, device gtun.Tun) error {
+			_, err := system.GetTunAddrs(device)
+			return err
+		}},
+		{name: "set routes", call: func(system *System, device gtun.Tun) error {
+			return system.SetTunRoutes(device, []string{"not-a-prefix"})
+		}},
+		{name: "add route", call: func(system *System, device gtun.Tun) error {
+			return system.AddTunRoute(device, "not-a-prefix")
+		}},
+		{name: "get routes", call: func(system *System, device gtun.Tun) error {
+			_, err := system.GetTunRoutes(device)
+			return err
+		}},
+		{name: "set name", call: func(system *System, device gtun.Tun) error {
+			return system.SetTunName(device, "renamed")
+		}},
+	}
+
+	for _, state := range systems {
+		for _, handle := range handles {
+			for _, operation := range operations {
+				t.Run(state.name+"/"+handle.name+"/"+operation.name, func(t *testing.T) {
+					err := operation.call(state.system, handle.handle)
+					if !errors.Is(err, sysnet.ErrUnknownTun) {
+						t.Fatalf("error = %v, want ErrUnknownTun", err)
+					}
+				})
+			}
+		}
 	}
 }
 

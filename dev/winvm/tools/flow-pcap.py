@@ -43,6 +43,9 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
+    # Parse failures must not leave packet evidence from an earlier run.
+    args.output.unlink(missing_ok=True)
+
     tunnel = args.tunnel.read_bytes()
     underlay = args.underlay.read_bytes()
     results = []
