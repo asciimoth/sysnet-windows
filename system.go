@@ -1,6 +1,9 @@
 package windows
 
 import (
+	"errors"
+	"sync"
+
 	"github.com/asciimoth/gonnect"
 	"github.com/asciimoth/gonnect/dns"
 	"github.com/asciimoth/gonnect/subnet"
@@ -9,10 +12,11 @@ import (
 )
 
 // System is the Windows implementation of the gonnect system contract.
-//
-// Step 1 freezes the public method set. Later implementation steps replace the
-// unsupported results with native Windows behavior.
 type System struct {
+	mu           sync.RWMutex
+	state        lifecycleState
+	config       normalizedSystemConfig
+	dependencies systemDependencies
 	capabilities capabilityModel
 }
 
@@ -21,7 +25,15 @@ type System struct {
 // GetTunRoutes and includes capability reporting and validation in System.
 var _ sysnet.System = (*System)(nil)
 
-func (*System) Close() error { return nil }
+func (s *System) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == lifecycleClosed {
+		return nil
+	}
+	s.state = lifecycleClosed
+	return nil
+}
 
 func (s *System) Capabilities() sysnet.CapabilityReport {
 	return s.capabilities.snapshot()
@@ -31,16 +43,19 @@ func (*System) CapabilitiesForTun(tun.Tun) (sysnet.TunCapabilityReport, error) {
 	return sysnet.TunCapabilityReport{}, sysnet.ErrUnknownTun
 }
 
-func (*System) CheckTunOpts(sysnet.TunOpts) sysnet.ValidationReport {
-	return unsupportedValidation("Tun")
+func (s *System) CheckTunOpts(opts sysnet.TunOpts) sysnet.ValidationReport {
+	_, report := normalizeTunOpts(s.policyConfig(), opts)
+	return report
 }
 
-func (*System) CheckDefaultTunOpts(sysnet.DefaultTunOpts) sysnet.ValidationReport {
-	return unsupportedValidation("DefaultTun")
+func (s *System) CheckDefaultTunOpts(opts sysnet.DefaultTunOpts) sysnet.ValidationReport {
+	_, report := normalizeDefaultTunOpts(s.policyConfig(), opts)
+	return report
 }
 
-func (*System) CheckRule(sysnet.Rule, sysnet.RuleContext) sysnet.ValidationReport {
-	return unsupportedValidation("Rule")
+func (s *System) CheckRule(rule sysnet.Rule, context sysnet.RuleContext) sysnet.ValidationReport {
+	_, report := normalizeRule(s.policyConfig(), rule, context)
+	return report
 }
 
 func (*System) CompleteRule(sysnet.Rule, sysnet.RuleContext) ([]string, error) {
@@ -57,46 +72,100 @@ func (*System) OutNet() gonnect.Network { return &gonnect.RejectNetwork{} }
 
 func (*System) LocalNet() gonnect.Network { return &gonnect.RejectNetwork{} }
 
-func (*System) BuildMatcher(sysnet.Rule) (sysnet.Matcher, error) {
+func (s *System) BuildMatcher(rule sysnet.Rule) (sysnet.Matcher, error) {
+	if report := validateMatcherRule(s.policyConfig(), rule); report.Err() != nil {
+		return nil, report.Err()
+	}
 	return nil, sysnet.ErrNotSupported
 }
 
-func (*System) BuildDefaultTun(sysnet.DefaultTunOpts) (sysnet.DefaultTun, error) {
+func (s *System) BuildDefaultTun(opts sysnet.DefaultTunOpts) (sysnet.DefaultTun, error) {
+	if _, report := normalizeDefaultTunOpts(s.policyConfig(), opts); report.Err() != nil {
+		return nil, report.Err()
+	}
 	return nil, sysnet.ErrNotSupported
 }
 
 func (*System) DefaultTunWarnings(sysnet.DefaultTun) []sysnet.Warning { return nil }
 
-func (*System) BuildTun(sysnet.TunOpts) (tun.Tun, error) {
+func (s *System) BuildTun(opts sysnet.TunOpts) (tun.Tun, error) {
+	if _, report := normalizeTunOpts(s.policyConfig(), opts); report.Err() != nil {
+		return nil, report.Err()
+	}
 	return nil, sysnet.ErrNotSupported
 }
 
 func (*System) TunWarnings(tun.Tun) []sysnet.Warning { return nil }
 
-func (*System) SetTunMTU(tun.Tun, int) error { return sysnet.ErrNotSupported }
+func (s *System) SetTunMTU(_ tun.Tun, mtu int) error {
+	_, report := normalizeMTU(s.policyConfig(), mtu, "Tun.MTU", false)
+	if err := report.Err(); err != nil {
+		return err
+	}
+	return sysnet.ErrNotSupported
+}
 
-func (*System) SetTunAddrs(tun.Tun, []string) error { return sysnet.ErrNotSupported }
+func (s *System) SetTunAddrs(_ tun.Tun, addrs []string) error {
+	_, report := normalizePrefixes(s.policyConfig(), addrs, "Tun.TunAddrs", prefixAddress)
+	if err := report.Err(); err != nil {
+		return err
+	}
+	return sysnet.ErrNotSupported
+}
 
-func (*System) AddTunAddr(tun.Tun, string) error { return sysnet.ErrNotSupported }
+func (s *System) AddTunAddr(device tun.Tun, addr string) error {
+	return s.SetTunAddrs(device, []string{addr})
+}
 
 func (*System) GetTunAddrs(tun.Tun) ([]string, error) {
 	return nil, sysnet.ErrNotSupported
 }
 
-func (*System) SetTunRoutes(tun.Tun, []string) error { return sysnet.ErrNotSupported }
+func (s *System) SetTunRoutes(_ tun.Tun, routes []string) error {
+	_, report := normalizePrefixes(s.policyConfig(), routes, "Tun.TunRoutes", prefixRoute)
+	if err := report.Err(); err != nil {
+		return err
+	}
+	return sysnet.ErrNotSupported
+}
 
-func (*System) AddTunRoute(tun.Tun, string) error { return sysnet.ErrNotSupported }
+func (s *System) AddTunRoute(device tun.Tun, route string) error {
+	return s.SetTunRoutes(device, []string{route})
+}
 
 func (*System) GetTunRoutes(tun.Tun) ([]string, error) {
 	return nil, sysnet.ErrNotSupported
 }
 
-func (*System) SetTunName(tun.Tun, string) error { return sysnet.ErrNotSupported }
+func (*System) SetTunName(tun.Tun, string) error {
+	return validationError(validationIssue(
+		"Tun.Name",
+		sysnet.CapabilityUnsupported,
+		sysnet.ReasonNotImplemented,
+		"renaming a TUN is not supported",
+		nil,
+	))
+}
 
-func unsupportedValidation(path string) sysnet.ValidationReport {
-	return sysnet.ValidationReport{Issues: []sysnet.ValidationIssue{{
-		Path:   path,
-		Reason: sysnet.ReasonNotImplemented,
-		State:  sysnet.CapabilityUnsupported,
-	}}}
+func (s *System) policyConfig() normalizedSystemConfig {
+	if s == nil {
+		return defaultNormalizedSystemConfig()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.config == (normalizedSystemConfig{}) {
+		return defaultNormalizedSystemConfig()
+	}
+	return s.config
+}
+
+func validationError(issue sysnet.ValidationIssue) error {
+	return sysnet.ValidationReport{Issues: []sysnet.ValidationIssue{issue}}.Err()
+}
+
+func invalidCause(cause error) error {
+	if cause == nil {
+		return sysnet.ErrInvalidOptions
+	}
+	return errors.Join(sysnet.ErrInvalidOptions, cause)
 }

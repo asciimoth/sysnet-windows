@@ -543,7 +543,7 @@ defer rollback to a later milestone.
 
 #### M0: freeze the contract and create the implementation skeleton
 
-1. **Step 1 - Record the exact gonnect contract.**
+1. **Step 1 - Record the exact gonnect contract. (Completed)**
 
    - List each `sysnet.System`, TUN, default-TUN, `Network`, matcher and DNS
      method from the selected gonnect revision.
@@ -558,7 +558,7 @@ defer rollback to a later milestone.
    - Complete this step when Linux tests compile the root contract and both
      Windows architectures cross-compile it.
 
-2. **Step 2 - Create the package and build-tag skeleton.**
+2. **Step 2 - Create the package and build-tag skeleton. (Completed)**
 
    - Add the root `System`, `SystemConfig`, constructor and lifecycle state
      types. Add `windows` implementations and non-Windows constructor stubs.
@@ -574,7 +574,7 @@ defer rollback to a later milestone.
    - Complete this step when `just check-fast` passes with production packages
      and test packages for Windows amd64 and arm64.
 
-3. **Step 3 - Implement normalization and validation as pure policy code.**
+3. **Step 3 - Implement normalization and validation as pure policy code. (Completed)**
 
    - Convert raw TUN options, default-TUN options and rules to one normalized
      desired-state representation.

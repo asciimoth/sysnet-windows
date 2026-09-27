@@ -14,8 +14,8 @@ func TestSystemContractScaffold(t *testing.T) {
 	if err := system.Capabilities().Validate(); err != nil {
 		t.Fatalf("Capabilities().Validate() error = %v", err)
 	}
-	if err := system.CheckTunOpts(sysnet.TunOpts{}).Err(); err == nil {
-		t.Fatal("CheckTunOpts() error = nil")
+	if err := system.CheckTunOpts(sysnet.TunOpts{}).Err(); err != nil {
+		t.Fatalf("CheckTunOpts() error = %v", err)
 	}
 }
 
