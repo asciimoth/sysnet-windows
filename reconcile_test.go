@@ -120,6 +120,42 @@ func TestSystemTrackResourceLinearizesWithClose(t *testing.T) {
 	}
 }
 
+func TestSystemReleaseDuringFailedCloseRetainsResource(t *testing.T) {
+	t.Parallel()
+	system, err := newSystem(SystemConfig{}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	closeErr := errors.New("close resource")
+	var closeCalls atomic.Int32
+	release, err := system.trackResource(systemCloseFunc(func() error {
+		closeCalls.Add(1)
+		close(started)
+		<-unblock
+		return closeErr
+	}))
+	if err != nil {
+		t.Fatalf("trackResource() error = %v", err)
+	}
+
+	result := make(chan error, 1)
+	go func() { result <- system.Close() }()
+	<-started
+	release()
+	close(unblock)
+	if err := <-result; !errors.Is(err, closeErr) {
+		t.Fatalf("Close() error = %v, want resource close error", err)
+	}
+	if err := system.resources.CloseAll(context.Background()); !errors.Is(err, closeErr) {
+		t.Fatalf("resource recovery error = %v, want retained close error", err)
+	}
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("resource Close() calls = %d, want 1", got)
+	}
+}
+
 func TestSystemCloseMarksRecoveryWhenRollbackCannotBeVerified(t *testing.T) {
 	t.Parallel()
 	system, err := newSystem(SystemConfig{}, systemDependencies{})

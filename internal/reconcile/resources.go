@@ -111,11 +111,16 @@ func (r *Resources) release(id uint64) {
 	defer r.mu.Unlock()
 	for _, entry := range r.entries {
 		if entry.id == id {
+			// Tracked cleanup owns the result after Close starts. Keep the
+			// entry so concurrent and later cleanup sees its final result.
+			if entry.started {
+				return
+			}
 			entry.released = true
-			break
+			r.removeLocked(id)
+			return
 		}
 	}
-	r.removeLocked(id)
 }
 
 func (r *Resources) removeLocked(id uint64) {

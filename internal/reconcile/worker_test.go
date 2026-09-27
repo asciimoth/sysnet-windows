@@ -429,12 +429,134 @@ func TestResourcesReleaseAfterCloseStartsDoesNotStartSecondClose(t *testing.T) {
 	go func() { firstResult <- resources.CloseAll(context.Background()) }()
 	<-started
 	release()
-	if err := resources.CloseAll(context.Background()); err != nil {
-		t.Fatalf("second CloseAll() error = %v", err)
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- resources.CloseAll(context.Background()) }()
+	select {
+	case err := <-secondResult:
+		t.Fatalf("second CloseAll() returned before the in-progress close: %v", err)
+	case <-time.After(20 * time.Millisecond):
 	}
 	close(unblock)
 	if err := <-firstResult; err != nil {
 		t.Fatalf("first CloseAll() error = %v", err)
+	}
+	if err := <-secondResult; err != nil {
+		t.Fatalf("second CloseAll() error = %v", err)
+	}
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("Close() calls = %d, want 1", got)
+	}
+}
+
+func TestResourcesReleaseDuringFailedCloseRetainsFailure(t *testing.T) {
+	t.Parallel()
+	var resources Resources
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	closeErr := errors.New("close failed")
+	var closeCalls atomic.Int32
+	release, err := resources.Track(closeFunc(func() error {
+		closeCalls.Add(1)
+		close(started)
+		<-unblock
+		return closeErr
+	}))
+	if err != nil {
+		t.Fatalf("Track() error = %v", err)
+	}
+
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- resources.CloseAll(context.Background()) }()
+	<-started
+	release()
+
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- resources.CloseAll(context.Background()) }()
+	select {
+	case err := <-secondResult:
+		t.Fatalf("second CloseAll() returned before the in-progress close: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(unblock)
+	for name, result := range map[string]<-chan error{
+		"first":  firstResult,
+		"second": secondResult,
+	} {
+		if err := <-result; !errors.Is(err, closeErr) {
+			t.Fatalf("%s CloseAll() error = %v, want close failure", name, err)
+		}
+	}
+	if err := resources.CloseAll(context.Background()); !errors.Is(err, closeErr) {
+		t.Fatalf("third CloseAll() error = %v, want retained close failure", err)
+	}
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("Close() calls = %d, want 1", got)
+	}
+}
+
+func TestResourcesReleaseAfterFailedCloseRetainsFailure(t *testing.T) {
+	t.Parallel()
+	var resources Resources
+	closeErr := errors.New("close failed")
+	var closeCalls atomic.Int32
+	release, err := resources.Track(closeFunc(func() error {
+		closeCalls.Add(1)
+		return closeErr
+	}))
+	if err != nil {
+		t.Fatalf("Track() error = %v", err)
+	}
+	if err := resources.CloseAll(context.Background()); !errors.Is(err, closeErr) {
+		t.Fatalf("first CloseAll() error = %v, want close failure", err)
+	}
+	release()
+	if err := resources.CloseAll(context.Background()); !errors.Is(err, closeErr) {
+		t.Fatalf("second CloseAll() error = %v, want retained close failure", err)
+	}
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("Close() calls = %d, want 1", got)
+	}
+}
+
+func TestResourcesReleaseDuringCanceledCloseWaitsForSuccessfulClose(t *testing.T) {
+	t.Parallel()
+	var resources Resources
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	var closeCalls atomic.Int32
+	release, err := resources.Track(closeFunc(func() error {
+		closeCalls.Add(1)
+		close(started)
+		<-unblock
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("Track() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- resources.CloseAll(ctx) }()
+	<-started
+	release()
+	cancel()
+	if err := <-firstResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first CloseAll() error = %v, want canceled", err)
+	}
+
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- resources.CloseAll(context.Background()) }()
+	select {
+	case err := <-secondResult:
+		t.Fatalf("second CloseAll() returned before the in-progress close: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(unblock)
+	if err := <-secondResult; err != nil {
+		t.Fatalf("second CloseAll() error = %v", err)
+	}
+	if err := resources.CloseAll(context.Background()); err != nil {
+		t.Fatalf("third CloseAll() error = %v", err)
 	}
 	if got := closeCalls.Load(); got != 1 {
 		t.Fatalf("Close() calls = %d, want 1", got)
