@@ -190,6 +190,141 @@ func TestSystemCloseIsBoundedWhenResourceCloseBlocks(t *testing.T) {
 	}
 }
 
+func TestSystemCloseRetainsResourcesWhenWorkerDoesNotStop(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	system, err := newSystem(SystemConfig{OperationTimeout: timeout}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	resourceClosed := make(chan struct{}, 1)
+	if _, err := system.trackResource(systemCloseFunc(func() error {
+		resourceClosed <- struct{}{}
+		return nil
+	})); err != nil {
+		t.Fatalf("trackResource() error = %v", err)
+	}
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	system.worker = reconcile.NewWorker(context.Background(), system.journal, func(context.Context, []reconcile.Reason) ([]reconcile.Entry, error) {
+		close(handlerStarted)
+		<-releaseHandler
+		return nil, nil
+	}, nil)
+	if !system.worker.Enqueue("blocked") {
+		t.Fatal("Enqueue() rejected work")
+	}
+	<-handlerStarted
+
+	begin := time.Now()
+	closeErr := system.Close()
+	if !errors.Is(closeErr, context.DeadlineExceeded) {
+		t.Fatalf("Close() error = %v, want deadline exceeded", closeErr)
+	}
+	if elapsed := time.Since(begin); elapsed > time.Second {
+		t.Fatalf("Close() took %s, want bounded shutdown", elapsed)
+	}
+	select {
+	case <-resourceClosed:
+		t.Fatal("Close() closed a resource before the worker exited")
+	default:
+	}
+	close(releaseHandler)
+	if err := system.worker.Stop(context.Background()); err != nil {
+		t.Fatalf("worker Stop() after release error = %v", err)
+	}
+	if err := system.resources.CloseAll(context.Background()); err != nil {
+		t.Fatalf("resource cleanup error = %v", err)
+	}
+}
+
+func TestSystemCloseRetainsResourcesWhileJournalCallbackIsPending(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	system, err := newSystem(SystemConfig{OperationTimeout: timeout}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	resourceClosed := make(chan struct{}, 1)
+	if _, err := system.trackResource(systemCloseFunc(func() error {
+		resourceClosed <- struct{}{}
+		return nil
+	})); err != nil {
+		t.Fatalf("trackResource() error = %v", err)
+	}
+	applyStarted := make(chan struct{})
+	releaseApply := make(chan struct{})
+	applyResult := make(chan error, 1)
+	go func() {
+		applyResult <- system.applyTransaction([]reconcile.Entry{{
+			Key: reconcile.OwnershipKey{Kind: reconcile.KindRoute, ID: "blocked"},
+			Apply: func(context.Context) error {
+				close(applyStarted)
+				<-releaseApply
+				return nil
+			},
+			Inverse: func(context.Context) error { return nil },
+			Verify:  func(context.Context, reconcile.ExpectedState) error { return nil },
+		}})
+	}()
+	<-applyStarted
+	if err := <-applyResult; !errors.Is(err, context.DeadlineExceeded) || !reconcile.RequiresRecovery(err) {
+		t.Fatalf("applyTransaction() error = %v, want recovery deadline", err)
+	}
+
+	closeErr := system.Close()
+	if !errors.Is(closeErr, context.DeadlineExceeded) {
+		t.Fatalf("Close() error = %v, want deadline exceeded", closeErr)
+	}
+	select {
+	case <-resourceClosed:
+		t.Fatal("Close() closed a resource while a journal callback was pending")
+	default:
+	}
+	if got := system.journal.Len(); got != 1 {
+		t.Fatalf("journal length = %d, want uncertain ownership retained", got)
+	}
+	close(releaseApply)
+	if err := system.journal.Quiesce(context.Background()); err != nil {
+		t.Fatalf("journal Quiesce() after release error = %v", err)
+	}
+	if err := system.resources.CloseAll(context.Background()); err != nil {
+		t.Fatalf("resource cleanup error = %v", err)
+	}
+}
+
+func TestSystemConcurrentCloseSharesBoundedFailure(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	system, err := newSystem(SystemConfig{OperationTimeout: timeout}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	blocked := make(chan struct{})
+	started := make(chan struct{})
+	if _, err := system.trackResource(systemCloseFunc(func() error {
+		close(started)
+		<-blocked
+		return nil
+	})); err != nil {
+		t.Fatalf("trackResource() error = %v", err)
+	}
+	results := make(chan error, 8)
+	for range 8 {
+		go func() { results <- system.Close() }()
+	}
+	<-started
+	for range 8 {
+		select {
+		case err := <-results:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("concurrent Close() error = %v, want deadline exceeded", err)
+			}
+		case <-time.After(time.Second):
+			close(blocked)
+			t.Fatal("concurrent Close() did not return")
+		}
+	}
+	close(blocked)
+}
+
 type systemCloseFunc func() error
 
 func (f systemCloseFunc) Close() error { return f() }

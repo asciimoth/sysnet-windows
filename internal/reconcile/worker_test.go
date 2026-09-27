@@ -194,6 +194,46 @@ func TestWorkerParentCancellationReleasesSubmitter(t *testing.T) {
 	}
 }
 
+func TestWorkerSubmitPreservesRecoveryFailureAfterDeadline(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	journal := NewJournal(timeout)
+	worker := NewWorker(context.Background(), journal, nil, nil)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- worker.Submit(ctx, []Entry{{
+			Key: OwnershipKey{Kind: KindRoute, ID: "blocked"},
+			Apply: func(context.Context) error {
+				close(started)
+				<-release
+				return nil
+			},
+			Inverse: func(context.Context) error { return nil },
+			Verify:  func(context.Context, ExpectedState) error { return nil },
+		}})
+	}()
+	<-started
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) || !RequiresRecovery(err) {
+			t.Fatalf("Submit() error = %v, want recovery deadline", err)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("Submit() did not return the bounded journal result")
+	}
+	close(release)
+	if err := journal.Quiesce(context.Background()); err != nil {
+		t.Fatalf("Quiesce() error = %v", err)
+	}
+	if err := worker.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+}
+
 func TestResourcesCloseInReverseAndRejectLateTrack(t *testing.T) {
 	t.Parallel()
 	var resources Resources

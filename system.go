@@ -61,20 +61,29 @@ func (s *System) close() error {
 		stopErr = s.worker.Stop(stopCtx)
 		cancelStop()
 	}
-	resourceCtx, cancelResources := context.WithTimeout(context.Background(), s.config.operationTimeout)
-	resourceErr := s.resources.CloseAll(resourceCtx)
-	cancelResources()
+	var quiesceErr error
+	if stopErr == nil && s.journal != nil {
+		quiesceCtx, cancelQuiesce := context.WithTimeout(context.Background(), s.config.operationTimeout)
+		quiesceErr = s.journal.Quiesce(quiesceCtx)
+		cancelQuiesce()
+	}
+	var resourceErr error
+	if stopErr == nil && quiesceErr == nil {
+		resourceCtx, cancelResources := context.WithTimeout(context.Background(), s.config.operationTimeout)
+		resourceErr = s.resources.CloseAll(resourceCtx)
+		cancelResources()
+	}
 	var cleanupErr error
-	if stopErr == nil && resourceErr == nil && s.journal != nil {
+	if stopErr == nil && quiesceErr == nil && resourceErr == nil && s.journal != nil {
 		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), s.config.operationTimeout)
 		cleanupErr = s.journal.UndoAll(cleanupCtx)
 		cancelCleanup()
 	}
-	result := errors.Join(stopErr, resourceErr, cleanupErr)
+	result := errors.Join(stopErr, quiesceErr, resourceErr, cleanupErr)
 
 	s.mu.Lock()
 	next := lifecycleClosed
-	if stopErr != nil || resourceErr != nil || reconcile.RequiresRecovery(cleanupErr) {
+	if stopErr != nil || quiesceErr != nil || resourceErr != nil || reconcile.RequiresRecovery(cleanupErr) {
 		next = lifecycleRecoveryRequired
 	}
 	transitionErr := s.transitionLocked(next)
@@ -92,8 +101,8 @@ func (s *System) applyTransaction(entries []reconcile.Entry) error {
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.operationTimeout)
 	defer cancel()
 	err := s.worker.Submit(ctx, entries)
-	recoveryRequired := reconcile.RequiresRecovery(err)
 	active := s.journal.Len() != 0
+	recoveryRequired := reconcile.RequiresRecovery(err) || s.journal.RecoveryRequired()
 	return errors.Join(err, s.finishApply(active, recoveryRequired))
 }
 

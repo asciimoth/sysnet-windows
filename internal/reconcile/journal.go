@@ -57,6 +57,12 @@ type Journal struct {
 	mu             sync.Mutex
 	entries        []Entry
 	cleanupTimeout time.Duration
+	pending        *pendingOperation
+	recoveryNeeded bool
+}
+
+type pendingOperation struct {
+	done chan struct{}
 }
 
 // NewJournal creates an ownership journal with a bounded rollback timeout.
@@ -67,9 +73,18 @@ func NewJournal(cleanupTimeout time.Duration) *Journal {
 // Apply performs and verifies all entries. It undoes this transaction in exact
 // reverse order if an operation fails. Previously committed entries remain.
 func (j *Journal) Apply(ctx context.Context, entries []Entry) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
+	if err := j.awaitPendingLocked(ctx); err != nil {
+		return &Failure{err: err, recoveryRequired: true}
+	}
+	if j.recoveryNeeded {
+		return &Failure{err: ErrRecoveryRequired, recoveryRequired: true}
+	}
 	if err := validateEntries(j.entries, entries); err != nil {
 		return err
 	}
@@ -81,13 +96,15 @@ func (j *Journal) Apply(ctx context.Context, entries []Entry) error {
 		// An OS call can change native state before it reports an error. Include
 		// the current entry before Apply so every uncertain mutation is undone.
 		completed = append(completed, entry)
-		if err := entry.Apply(ctx); err != nil {
+		if err := j.invokeLocked(ctx, entry.Apply); err != nil {
 			return j.fail(ctx, fmt.Errorf("apply resource %v: %w", entry.Key, err), completed)
 		}
 		if err := ctx.Err(); err != nil {
 			return j.fail(ctx, err, completed)
 		}
-		if err := entry.Verify(ctx, ExpectedApplied); err != nil {
+		if err := j.invokeLocked(ctx, func(ctx context.Context) error {
+			return entry.Verify(ctx, ExpectedApplied)
+		}); err != nil {
 			return j.fail(ctx, fmt.Errorf("verify applied resource %v: %w", entry.Key, err), completed)
 		}
 		if err := ctx.Err(); err != nil {
@@ -99,6 +116,11 @@ func (j *Journal) Apply(ctx context.Context, entries []Entry) error {
 }
 
 func (j *Journal) fail(ctx context.Context, primary error, completed []Entry) error {
+	if j.pending != nil {
+		j.entries = append(j.entries, completed...)
+		j.recoveryNeeded = true
+		return &Failure{err: primary, recoveryRequired: true}
+	}
 	// Request cancellation stops forward progress, but it must not also disable
 	// rollback. Preserve context values and give cleanup its own bounded time.
 	timeout := j.cleanupTimeout
@@ -107,13 +129,14 @@ func (j *Journal) fail(ctx context.Context, primary error, completed []Entry) er
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
-	remaining, cleanupErr := undo(cleanupCtx, completed)
+	remaining, cleanupErr := j.undoLocked(cleanupCtx, completed)
 	if len(remaining) != 0 {
 		j.entries = append(j.entries, remaining...)
 	}
 	if cleanupErr == nil {
 		return &Failure{err: primary}
 	}
+	j.recoveryNeeded = true
 	return &Failure{
 		err:              errors.Join(primary, cleanupErr),
 		recoveryRequired: true,
@@ -123,14 +146,33 @@ func (j *Journal) fail(ctx context.Context, primary error, completed []Entry) er
 // UndoAll undoes every committed entry in reverse order. Entries whose cleanup
 // cannot be verified stay in the journal so a later recovery can retry them.
 func (j *Journal) UndoAll(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	remaining, err := undo(ctx, j.entries)
-	j.entries = remaining
-	if err != nil {
+	if err := j.awaitPendingLocked(ctx); err != nil {
 		return &Failure{err: err, recoveryRequired: true}
 	}
+	remaining, err := j.undoLocked(ctx, j.entries)
+	j.entries = remaining
+	if err != nil {
+		j.recoveryNeeded = true
+		return &Failure{err: err, recoveryRequired: true}
+	}
+	j.recoveryNeeded = false
 	return nil
+}
+
+// Quiesce waits until a callback which outlived its context has returned. It
+// does not retry or verify the uncertain operation.
+func (j *Journal) Quiesce(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.awaitPendingLocked(ctx)
 }
 
 // Len returns the count of entries which can still own native state.
@@ -140,19 +182,42 @@ func (j *Journal) Len() int {
 	return len(j.entries)
 }
 
-func undo(ctx context.Context, entries []Entry) ([]Entry, error) {
+// RecoveryRequired reports whether an uncertain callback or failed cleanup
+// left journal ownership which must be recovered before new policy work.
+func (j *Journal) RecoveryRequired() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.recoveryNeeded
+}
+
+func (j *Journal) undoLocked(ctx context.Context, entries []Entry) ([]Entry, error) {
 	failed := make(map[int]struct{})
 	var cleanupErr error
 	for index := len(entries) - 1; index >= 0; index-- {
 		entry := entries[index]
-		if err := entry.Inverse(ctx); err != nil {
+		if err := ctx.Err(); err != nil {
+			markRemaining(failed, index)
+			cleanupErr = errors.Join(cleanupErr, err)
+			break
+		}
+		if err := j.invokeLocked(ctx, entry.Inverse); err != nil {
 			failed[index] = struct{}{}
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("undo resource %v: %w", entry.Key, err))
+			if j.pending != nil || ctx.Err() != nil {
+				markRemaining(failed, index-1)
+				break
+			}
 			continue
 		}
-		if err := entry.Verify(ctx, ExpectedUndone); err != nil {
+		if err := j.invokeLocked(ctx, func(ctx context.Context) error {
+			return entry.Verify(ctx, ExpectedUndone)
+		}); err != nil {
 			failed[index] = struct{}{}
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("verify undone resource %v: %w", entry.Key, err))
+			if j.pending != nil || ctx.Err() != nil {
+				markRemaining(failed, index-1)
+				break
+			}
 		}
 	}
 	remaining := make([]Entry, 0, len(failed))
@@ -163,6 +228,54 @@ func undo(ctx context.Context, entries []Entry) ([]Entry, error) {
 	}
 	return remaining, cleanupErr
 }
+
+func (j *Journal) invokeLocked(ctx context.Context, operation Operation) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	pending := &pendingOperation{done: make(chan struct{})}
+	result := make(chan error, 1)
+	go func() {
+		result <- operation(ctx)
+		close(pending.done)
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		// Prefer a completed call when completion raced the deadline.
+		select {
+		case err := <-result:
+			return err
+		default:
+		}
+		j.pending = pending
+		return ctx.Err()
+	}
+}
+
+func (j *Journal) awaitPendingLocked(ctx context.Context) error {
+	if j.pending == nil {
+		return nil
+	}
+	select {
+	case <-j.pending.done:
+		j.pending = nil
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func markRemaining(failed map[int]struct{}, last int) {
+	for index := 0; index <= last; index++ {
+		failed[index] = struct{}{}
+	}
+}
+
+// ErrRecoveryRequired means uncertain journal ownership must be undone before
+// another transaction can start.
+var ErrRecoveryRequired = errors.New("journal recovery is required")
 
 func validateEntries(committed, pending []Entry) error {
 	keys := make(map[OwnershipKey]struct{}, len(committed)+len(pending))

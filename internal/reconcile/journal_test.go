@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestJournalFailurePointsUndoExactResourcesInReverse(t *testing.T) {
@@ -179,6 +180,220 @@ func TestJournalRejectsDuplicateOwnershipWithoutMutation(t *testing.T) {
 	}
 	if got := host.applyNames(); !reflect.DeepEqual(got, []string{"owned"}) {
 		t.Fatalf("apply operations = %v, want one mutation", got)
+	}
+}
+
+func TestJournalBoundsEveryBlockingCallbackAndRetainsOwnership(t *testing.T) {
+	for _, phase := range []string{"apply", "verify-applied", "inverse", "verify-undone"} {
+		t.Run(phase, func(t *testing.T) {
+			const timeout = 20 * time.Millisecond
+			started := make(chan struct{})
+			release := make(chan struct{})
+			var startOnce sync.Once
+			block := func() {
+				startOnce.Do(func() { close(started) })
+				<-release
+			}
+			applyErr := errors.New("injected apply failure")
+			entry := Entry{
+				Key: OwnershipKey{Kind: KindRoute, ID: phase},
+				Apply: func(context.Context) error {
+					if phase == "apply" {
+						block()
+					}
+					if phase == "inverse" || phase == "verify-undone" {
+						return applyErr
+					}
+					return nil
+				},
+				Inverse: func(context.Context) error {
+					if phase == "inverse" {
+						block()
+					}
+					return nil
+				},
+				Verify: func(_ context.Context, expected ExpectedState) error {
+					if phase == "verify-applied" && expected == ExpectedApplied ||
+						phase == "verify-undone" && expected == ExpectedUndone {
+						block()
+					}
+					return nil
+				},
+			}
+			journal := NewJournal(timeout)
+			requestCtx := context.Background()
+			cancel := func() {}
+			if phase == "apply" || phase == "verify-applied" {
+				requestCtx, cancel = context.WithTimeout(context.Background(), timeout)
+			}
+			defer cancel()
+			result := make(chan error, 1)
+			go func() { result <- journal.Apply(requestCtx, []Entry{entry}) }()
+			<-started
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("Apply() error = %v, want deadline exceeded", err)
+				}
+				if !RequiresRecovery(err) {
+					t.Fatalf("RequiresRecovery() = false for %v", err)
+				}
+			case <-time.After(time.Second):
+				close(release)
+				t.Fatal("Apply() did not honor the operation timeout")
+			}
+			if got := journal.Len(); got != 1 {
+				t.Fatalf("journal length = %d, want uncertain entry retained", got)
+			}
+			if !journal.RecoveryRequired() {
+				t.Fatal("RecoveryRequired() = false with uncertain ownership")
+			}
+			quiesceCtx, cancelQuiesce := context.WithTimeout(context.Background(), timeout)
+			if err := journal.Quiesce(quiesceCtx); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Quiesce() error = %v, want deadline exceeded", err)
+			}
+			cancelQuiesce()
+			close(release)
+			if err := journal.Quiesce(context.Background()); err != nil {
+				t.Fatalf("Quiesce() after release error = %v", err)
+			}
+			if err := journal.UndoAll(context.Background()); err != nil {
+				t.Fatalf("UndoAll() recovery error = %v", err)
+			}
+			if got := journal.Len(); got != 0 {
+				t.Fatalf("journal length after recovery = %d, want 0", got)
+			}
+			if journal.RecoveryRequired() {
+				t.Fatal("RecoveryRequired() = true after verified recovery")
+			}
+		})
+	}
+}
+
+func TestJournalDoesNotStartNewMutationWhileCallbackIsPending(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	started := make(chan struct{})
+	release := make(chan struct{})
+	journal := &Journal{}
+	firstCtx, cancelFirst := context.WithTimeout(context.Background(), timeout)
+	defer cancelFirst()
+	firstResult := make(chan error, 1)
+	go func() {
+		firstResult <- journal.Apply(firstCtx, []Entry{{
+			Key: OwnershipKey{Kind: KindRoute, ID: "first"},
+			Apply: func(context.Context) error {
+				close(started)
+				<-release
+				return nil
+			},
+			Inverse: func(context.Context) error { return nil },
+			Verify:  func(context.Context, ExpectedState) error { return nil },
+		}})
+	}()
+	<-started
+	if err := <-firstResult; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Apply() error = %v, want deadline exceeded", err)
+	}
+	secondCalled := false
+	secondCtx, cancelSecond := context.WithTimeout(context.Background(), timeout)
+	err := journal.Apply(secondCtx, []Entry{{
+		Key: OwnershipKey{Kind: KindRoute, ID: "second"},
+		Apply: func(context.Context) error {
+			secondCalled = true
+			return nil
+		},
+		Inverse: func(context.Context) error { return nil },
+		Verify:  func(context.Context, ExpectedState) error { return nil },
+	}})
+	cancelSecond()
+	if !errors.Is(err, context.DeadlineExceeded) || !RequiresRecovery(err) {
+		t.Fatalf("second Apply() error = %v, want recovery deadline", err)
+	}
+	if secondCalled {
+		t.Fatal("second mutation started while the first callback was pending")
+	}
+	close(release)
+	if err := journal.Quiesce(context.Background()); err != nil {
+		t.Fatalf("Quiesce() error = %v", err)
+	}
+	if err := journal.Apply(context.Background(), []Entry{{
+		Key: OwnershipKey{Kind: KindRoute, ID: "third"},
+		Apply: func(context.Context) error {
+			secondCalled = true
+			return nil
+		},
+		Inverse: func(context.Context) error { return nil },
+		Verify:  func(context.Context, ExpectedState) error { return nil },
+	}}); !errors.Is(err, ErrRecoveryRequired) || !RequiresRecovery(err) {
+		t.Fatalf("Apply() before recovery error = %v, want recovery required", err)
+	}
+	if secondCalled {
+		t.Fatal("new mutation started before uncertain ownership was recovered")
+	}
+	if err := journal.UndoAll(context.Background()); err != nil {
+		t.Fatalf("UndoAll() error = %v", err)
+	}
+}
+
+func TestJournalStopsRollbackOrderAtPendingInverse(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	blockedStarted := make(chan struct{})
+	releaseBlocked := make(chan struct{})
+	var blockedOnce sync.Once
+	var mu sync.Mutex
+	var undoOrder []string
+	entry := func(name string, block bool, failVerify bool) Entry {
+		return Entry{
+			Key:   OwnershipKey{Kind: KindRoute, ID: name},
+			Apply: func(context.Context) error { return nil },
+			Inverse: func(context.Context) error {
+				mu.Lock()
+				undoOrder = append(undoOrder, name)
+				mu.Unlock()
+				if block {
+					blockedOnce.Do(func() { close(blockedStarted) })
+					<-releaseBlocked
+				}
+				return nil
+			},
+			Verify: func(_ context.Context, expected ExpectedState) error {
+				if failVerify && expected == ExpectedApplied {
+					return errors.New("injected readback failure")
+				}
+				return nil
+			},
+		}
+	}
+	journal := NewJournal(timeout)
+	result := make(chan error, 1)
+	go func() {
+		result <- journal.Apply(context.Background(), []Entry{
+			entry("first", false, false),
+			entry("second", true, true),
+		})
+	}()
+	<-blockedStarted
+	if err := <-result; !errors.Is(err, context.DeadlineExceeded) || !RequiresRecovery(err) {
+		t.Fatalf("Apply() error = %v, want recovery deadline", err)
+	}
+	mu.Lock()
+	gotBeforeRecovery := append([]string(nil), undoOrder...)
+	mu.Unlock()
+	if !reflect.DeepEqual(gotBeforeRecovery, []string{"second"}) {
+		t.Fatalf("undo order before recovery = %v, want [second]", gotBeforeRecovery)
+	}
+	close(releaseBlocked)
+	if err := journal.Quiesce(context.Background()); err != nil {
+		t.Fatalf("Quiesce() error = %v", err)
+	}
+	if err := journal.UndoAll(context.Background()); err != nil {
+		t.Fatalf("UndoAll() error = %v", err)
+	}
+	mu.Lock()
+	got := append([]string(nil), undoOrder...)
+	mu.Unlock()
+	if !reflect.DeepEqual(got, []string{"second", "second", "first"}) {
+		t.Fatalf("complete undo order = %v, want [second second first]", got)
 	}
 }
 

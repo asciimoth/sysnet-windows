@@ -85,14 +85,9 @@ func (w *Worker) Submit(ctx context.Context, entries []Entry) error {
 		return ctx.Err()
 	case w.requests <- req:
 	}
-	select {
-	case err := <-result:
-		return err
-	case <-w.ctx.Done():
-		return w.ctx.Err()
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	// The unbuffered send means the worker accepted this transaction. Wait for
+	// its bounded journal result so cancellation cannot hide recovery status.
+	return <-result
 }
 
 // Enqueue queues a callback reason without waiting. A full queue coalesces the
