@@ -48,8 +48,27 @@ func (e *Failure) RecoveryRequired() bool { return e.recoveryRequired }
 // RequiresRecovery reports whether err contains a reconciliation failure whose
 // cleanup could not prove a safe state.
 func RequiresRecovery(err error) bool {
-	var failure *Failure
-	return errors.As(err, &failure) && failure.RecoveryRequired()
+	if err == nil {
+		return false
+	}
+	// errors.As cannot be used here because it stops at the first Failure,
+	// which can be a non-recovery sibling or wrapper of a recovery failure.
+	switch wrapped := err.(type) { //nolint:errorlint // Walk each error tree node.
+	case *Failure:
+		if wrapped.RecoveryRequired() {
+			return true
+		}
+		return RequiresRecovery(wrapped.Unwrap())
+	case interface{ Unwrap() []error }:
+		for _, child := range wrapped.Unwrap() {
+			if RequiresRecovery(child) {
+				return true
+			}
+		}
+	case interface{ Unwrap() error }:
+		return RequiresRecovery(wrapped.Unwrap())
+	}
+	return false
 }
 
 // Journal stores only mutations which can still own native state.

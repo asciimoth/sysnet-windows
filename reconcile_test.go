@@ -370,6 +370,46 @@ func TestSystemCloseRetainsResourcesWhileJournalCallbackIsPending(t *testing.T) 
 	}
 }
 
+func TestSystemHandlesRecoveryFailureAfterNonRecoveryFailure(t *testing.T) {
+	t.Parallel()
+	makeFailure := func(id string, inverseErr error) error {
+		journal := &reconcile.Journal{}
+		return journal.Apply(context.Background(), []reconcile.Entry{{
+			Key:   reconcile.OwnershipKey{Kind: reconcile.KindRoute, ID: id},
+			Apply: func(context.Context) error { return errors.New("apply failed") },
+			Inverse: func(context.Context) error {
+				return inverseErr
+			},
+			Verify: func(_ context.Context, expected reconcile.ExpectedState) error {
+				if expected != reconcile.ExpectedUndone {
+					return errors.New("unexpected verification state")
+				}
+				return nil
+			},
+		}})
+	}
+	nonRecovery := makeFailure("verified", nil)
+	recovery := makeFailure("uncertain", errors.New("undo failed"))
+	if reconcile.RequiresRecovery(nonRecovery) {
+		t.Fatalf("first failure unexpectedly requires recovery: %v", nonRecovery)
+	}
+	if !reconcile.RequiresRecovery(recovery) {
+		t.Fatalf("second failure does not require recovery: %v", recovery)
+	}
+
+	system, err := newSystem(SystemConfig{}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	system.handleReconcileFailure(errors.Join(nonRecovery, recovery))
+	if system.state != lifecycleRecoveryRequired {
+		t.Fatalf("lifecycle state = %s, want %s", system.state, lifecycleRecoveryRequired)
+	}
+	if err := system.acceptingWork(); !errors.Is(err, sysnet.ErrUnavailable) {
+		t.Fatalf("acceptingWork() error = %v, want unavailable", err)
+	}
+}
+
 func TestSystemConcurrentCloseSharesBoundedFailure(t *testing.T) {
 	const timeout = 20 * time.Millisecond
 	system, err := newSystem(SystemConfig{OperationTimeout: timeout}, systemDependencies{})

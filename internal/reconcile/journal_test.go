@@ -167,6 +167,71 @@ func TestJournalJoinsCleanupFailureAndRetainsOwnership(t *testing.T) {
 	}
 }
 
+func TestRequiresRecoverySearchesCompleteErrorTree(t *testing.T) {
+	t.Parallel()
+	plain := errors.New("plain failure")
+	nonRecovery := &Failure{err: errors.New("verified rollback")}
+	recovery := &Failure{err: errors.New("uncertain native state"), recoveryRequired: true}
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil"},
+		{name: "plain", err: plain},
+		{name: "direct non-recovery", err: nonRecovery},
+		{name: "direct recovery", err: recovery, want: true},
+		{name: "wrapped recovery", err: fmt.Errorf("operation: %w", recovery), want: true},
+		{name: "recovery first in join", err: errors.Join(recovery, nonRecovery), want: true},
+		{name: "recovery last in join", err: errors.Join(nonRecovery, recovery), want: true},
+		{name: "only non-recovery failures", err: errors.Join(nonRecovery, plain)},
+		{
+			name: "nested join and wrap",
+			err: fmt.Errorf("outer: %w", errors.Join(
+				fmt.Errorf("first: %w", nonRecovery),
+				fmt.Errorf("second: %w", recovery),
+			)),
+			want: true,
+		},
+		{
+			name: "non-recovery failure wraps recovery failure",
+			err:  &Failure{err: recovery},
+			want: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := RequiresRecovery(test.err); got != test.want {
+				t.Fatalf("RequiresRecovery() = %t, want %t for %v", got, test.want, test.err)
+			}
+		})
+	}
+}
+
+func TestJournalPreservesNestedRecoveryRequirementAfterVerifiedRollback(t *testing.T) {
+	t.Parallel()
+	inner := &Failure{err: errors.New("dependency owns uncertain state"), recoveryRequired: true}
+	entry := Entry{
+		Key:     OwnershipKey{Kind: KindRoute, ID: "nested-recovery"},
+		Apply:   func(context.Context) error { return inner },
+		Inverse: func(context.Context) error { return nil },
+		Verify: func(_ context.Context, expected ExpectedState) error {
+			if expected != ExpectedUndone {
+				return errors.New("unexpected verification state")
+			}
+			return nil
+		},
+	}
+	err := (&Journal{}).Apply(context.Background(), []Entry{entry})
+	if !errors.Is(err, inner) {
+		t.Fatalf("Apply() error = %v, want nested failure", err)
+	}
+	if !RequiresRecovery(err) {
+		t.Fatalf("RequiresRecovery() = false for nested failure: %v", err)
+	}
+}
+
 func TestJournalRejectsDuplicateOwnershipWithoutMutation(t *testing.T) {
 	t.Parallel()
 	host := newFakeHost("foreign")
