@@ -6,6 +6,7 @@ param(
     [string]$GoExecutable = 'go',
     [string]$SysnetWindowsRevision = $env:GITHUB_SHA,
     [ValidateSet('clean', 'dirty', 'unknown')][string]$SysnetWindowsTreeState = 'unknown',
+    [string]$SourceArchiveSHA256 = $env:SYSNET_WINDOWS_SOURCE_ARCHIVE_SHA256,
     [switch]$Flow
 )
 $ErrorActionPreference = 'Stop'; Set-StrictMode -Version Latest
@@ -17,6 +18,7 @@ New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
 $startedAt = (Get-Date).ToUniversalTime().ToString('o')
 . (Join-Path $SourceDir 'dev\winvm\driver.ps1')
 . (Join-Path $SourceDir 'dev\winvm\test-output.ps1')
+$SourceArchiveSHA256 = Resolve-SourceArchiveSHA256 $SourceDir $SourceArchiveSHA256
 $manifest = Get-Content $ImageManifest -Raw | ConvertFrom-Json
 if ($manifest.driverVersion -ne '1.3.0.0' -or $manifest.upstreamCommit -ne '0a0eb97f67d1dbcb3d08bda66d3b24f465d95475') { throw 'Driver identity does not match the split-driver ABI' }
 $nativeArchitecture = switch ($env:PROCESSOR_ARCHITECTURE) { 'AMD64' { 'amd64' } 'ARM64' { 'arm64' } default { throw "Unsupported native architecture: $env:PROCESSOR_ARCHITECTURE" } }
@@ -69,9 +71,7 @@ try {
     if ($testManifest.schemaVersion -ne 1) { throw 'Unsupported test manifest schema' }
     $suiteName = if ($Flow) { 'packet-flow' } else { 'live-driver' }
     $required = @($testManifest.suites.$suiteName.requiredTests)
-    foreach ($test in $required) {
-        if (-not ($events | Where-Object { $_.PSObject.Properties['Test'] -and $_.Test -eq $test -and $_.Action -eq 'pass' })) { throw "$test has no pass event" }
-    }
+    $testResults = Get-RequiredTestResults $events $required
     if (-not $Flow) {
         & $GoExecutable tool cover "-func=$coverProfile" | Set-Content (Join-Path $ArtifactDir 'e2e-coverage.txt')
         if ($LASTEXITCODE -ne 0) { throw "coverage report failed with exit code $LASTEXITCODE" }
@@ -93,16 +93,18 @@ $evidenceName = if ($Flow) { 'packet-flow-suite-evidence.json' } else { 'live-dr
     schemaVersion=1; suite=$suite; outcome='passed'; startedAt=$startedAt
     finishedAt=(Get-Date).ToUniversalTime().ToString('o')
     sysnetWindowsRevision=$SysnetWindowsRevision; sysnetWindowsTreeState=$SysnetWindowsTreeState
+    sourceArchiveSha256=$SourceArchiveSHA256.ToLowerInvariant()
     architecture=$nativeArchitecture
     os=[ordered]@{
         caption=$windows.ProductName; version=[Environment]::OSVersion.Version.ToString()
         build=$windows.CurrentBuildNumber; productType=$productType
     }
     goVersion=$goVersion
+    dependencyLocks=(Get-DependencyLockEvidence $SourceDir)
     driver=[ordered]@{
         version=$manifest.driverVersion; upstreamCommit=$manifest.upstreamCommit
         files=$manifest.driverFiles; packageSigner=$manifest.driverSigner
         installedSigner=$after.signer; finalState=$after.state
     }
-    requiredTests=$required
+    requiredTests=$required; testResults=$testResults
 } | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $ArtifactDir $evidenceName)

@@ -3,21 +3,29 @@
   "suites": {
     "native-unit": {
       "requiredTests": [
-        "TestPackageScaffold"
+        "TestNativeNoResourceSmoke"
+      ],
+      "plannedCases": [
+        "M1 native Wintun and NetIO cases",
+        "M2 native socket and underlay cases",
+        "M3 native DNS cases",
+        "M4 native owner lookup cases"
       ]
     },
     "live-driver": {
-      "requiredTests": [
-        "TestDriverLifecycle",
-        "TestOwnedNetworkingCleanup",
-        "TestDNSConfigurationRestoration",
-        "TestSystemCloseAfterSplitResetFailure"
+      "requiredTests": [],
+      "plannedCases": [
+        "M1 owned networking cleanup",
+        "M3 DNS configuration restoration",
+        "M5 split-driver lifecycle and reset recovery"
       ]
     },
     "packet-flow": {
-      "requiredTests": [
-        "TestPacketFlowPublicAPI",
-        "TestPacketFlowUnderlayBypass"
+      "requiredTests": [],
+      "plannedCases": [
+        "M2 public API underlay bypass",
+        "M3 managed DNS packet paths",
+        "M5 executable exclusion packet paths"
       ]
     }
   }

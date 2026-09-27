@@ -8,7 +8,13 @@ tmp=$(mktemp -d)
 trap 'find "$tmp" -depth -delete' EXIT
 export PYTHONPYCACHEPREFIX="$tmp/pycache"
 "$script_dir/doctor.sh" --validate >/dev/null
-jq -e '.schemaVersion==1 and (.suites | keys==["live-driver","native-unit","packet-flow"]) and ([.suites[].requiredTests[]]|all(type=="string" and length>0))' "$script_dir/test-manifest.json" >/dev/null
+jq -e '.schemaVersion==1 and (.suites | keys==["live-driver","native-unit","packet-flow"]) and ([.suites[].requiredTests[]]|all(type=="string" and length>0)) and ([.suites[].plannedCases[]]|all(type=="string" and length>0))' "$script_dir/test-manifest.json" >/dev/null
+while IFS= read -r test_name; do
+    rg -q "^func ${test_name}\\(t \\*testing\\.T\\)" "$root" --glob '*_test.go' || {
+        printf 'required test does not exist: %s\n' "$test_name" >&2
+        exit 1
+    }
+done < <(jq -r '.suites[].requiredTests[]' "$script_dir/test-manifest.json")
 python3 -m py_compile "$script_dir/tools/qga.py"
 python3 -m py_compile "$script_dir/tools/flow-pcap.py"
 python3 -m py_compile "$script_dir/tools/wintun-input.py"
@@ -32,6 +38,9 @@ grep -Fq "'test-manifest.json'" "$script_dir/e2e.ps1"
 grep -Fq 'SYSNET_FLOW_EXE' "$script_dir/e2e.ps1"
 grep -Fq 'wintun-input.py' "$script_dir/run.sh"
 grep -Fq 'wintunLockHash' "$script_dir/run.sh"
+grep -Fq 'SourceArchiveSHA256' "$script_dir/run.sh"
+grep -Fq 'sourceArchiveSha256' "$script_dir/test.ps1"
+grep -Fq 'sourceArchiveSha256' "$script_dir/e2e.ps1"
 
 # Hash checks fail closed.
 printf data >"$tmp/input"

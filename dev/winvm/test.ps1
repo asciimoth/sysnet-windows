@@ -5,6 +5,7 @@ param(
     [string]$ExpectedGoVersion = $env:GO_EXPECTED_VERSION,
     [string]$SysnetWindowsRevision = $env:GITHUB_SHA,
     [ValidateSet('clean', 'dirty', 'unknown')][string]$SysnetWindowsTreeState = 'unknown',
+    [string]$SourceArchiveSHA256 = $env:SYSNET_WINDOWS_SOURCE_ARCHIVE_SHA256,
     [switch]$RequireStandardUser
 )
 $ErrorActionPreference = 'Stop'
@@ -23,6 +24,7 @@ $ArtifactDir = (Resolve-Path $ArtifactDir).Path
 $startedAt = (Get-Date).ToUniversalTime().ToString('o')
 Start-Transcript -Path (Join-Path $ArtifactDir 'powershell.log') -Force | Out-Null
 . (Join-Path $PSScriptRoot 'test-output.ps1')
+$SourceArchiveSHA256 = Resolve-SourceArchiveSHA256 $sourceRoot $SourceArchiveSHA256
 function Invoke-Logged([string]$Name, [string]$Command, [string[]]$Arguments) {
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -75,10 +77,7 @@ try {
     $testManifest = Get-Content (Join-Path $PSScriptRoot 'test-manifest.json') -Raw | ConvertFrom-Json
     if ($testManifest.schemaVersion -ne 1) { throw 'Unsupported test manifest schema' }
     $required = @($testManifest.suites.'native-unit'.requiredTests)
-    foreach ($test in $required) {
-        if ($parsed | Where-Object { $_.PSObject.Properties['Test'] -and $_.Test -eq $test -and $_.Action -eq 'skip' }) { throw "$test was skipped" }
-        if (-not ($parsed | Where-Object { $_.PSObject.Properties['Test'] -and $_.Test -eq $test -and $_.Action -eq 'pass' })) { throw "$test has no pass event" }
-    }
+    $testResults = Get-RequiredTestResults $parsed $required
     $parsed | Where-Object Action -eq output | ForEach-Object Output | Set-Content (Join-Path $ArtifactDir 'tests.log')
     Invoke-Logged 'go-build' 'go' @('build', './...')
     $windows = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
@@ -87,11 +86,14 @@ try {
         schemaVersion=1; suite='native-unit'; outcome='passed'; startedAt=$startedAt
         finishedAt=(Get-Date).ToUniversalTime().ToString('o')
         sysnetWindowsRevision=$SysnetWindowsRevision; sysnetWindowsTreeState=$SysnetWindowsTreeState
+        sourceArchiveSha256=$SourceArchiveSHA256.ToLowerInvariant()
         architecture=$nativeArchitecture
         os=[ordered]@{
             caption=$windows.ProductName; version=[Environment]::OSVersion.Version.ToString()
             build=$windows.CurrentBuildNumber; productType=$productType
         }
-        goVersion=(& go version | Out-String).Trim(); requiredTests=$required
+        goVersion=(& go version | Out-String).Trim()
+        dependencyLocks=(Get-DependencyLockEvidence $sourceRoot)
+        requiredTests=$required; testResults=$testResults
     } | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $ArtifactDir 'native-unit-evidence.json')
 } finally { Stop-Transcript | Out-Null }

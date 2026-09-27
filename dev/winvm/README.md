@@ -46,16 +46,19 @@ just test-total
 ```
 
 The baseline runs module verification, tidy, vet, tests, and build as the
-standard user. The live gate starts the verified driver, runs only the
-`windows && winintegration` package serially as `SYSTEM`, checks cleanup, and
-stops the service. The flow gate adds a second disposable endpoint guest and two
-isolated links. It validates packet markers in a capture from each link. The
-live and flow gates require named tests and fail if a test is absent or skipped.
-They cannot pass until the related implementation milestones are complete.
-`just test-total` runs the local Go and fuzz tests, then builds or reuses the
-base image and runs all three VM gates. `just check` adds all formatting,
-linting, vetting, builds, and host-harness checks around `test-total`.
-Linux-only VM recipes skip on Windows.
+standard user. Its required native smoke test creates no network resource and
+does not load Wintun or the split driver. The live gate starts the verified
+driver, runs only the `windows && winintegration` package serially as `SYSTEM`,
+checks cleanup, and stops the service. The flow gate adds a second disposable
+endpoint guest and two isolated links. It validates packet markers in a capture
+from each link. The manifest lists only existing package tests as required
+tests. Future live and flow coverage is listed as planned cases, not as optional
+passes. A required test fails the gate if it is absent or skipped. The live and
+flow gates cannot pass release qualification until their planned milestone tests
+become required and pass. `just test-total` runs the local Go and fuzz tests,
+then builds or reuses the base image and runs all three VM gates. `just check`
+adds all formatting, linting, vetting, builds, and host-harness checks around
+`test-total`. Linux-only VM recipes skip on Windows.
 
 The harness serializes VM processes on one host. Image creation has an exclusive
 content-key lock. Test runs hold a shared image lock and use a unique overlay,
@@ -87,11 +90,12 @@ records the SHA-256 of `worktree.tar`, so the retained source can be matched to
 the test evidence.
 
 Native runs also write suite evidence with the exact Windows build,
-architecture, sysnet-windows revision, Go version, required tests, and driver
-identity. Use `just qualify-windows MATRIX EVIDENCE_DIR` to combine the
-native-unit, live-driver, packet-flow, and independent capture results. The
-matrix names are in `qualification-matrix.json`. The qualifier rejects dirty or
-mismatched revisions.
+architecture, sysnet-windows revision, source archive SHA-256, Go version,
+dependency lock hashes, required test results, and driver identity. Use
+`just qualify-windows MATRIX EVIDENCE_DIR` to combine the native-unit,
+live-driver, packet-flow, and independent capture results. The matrix names are
+in `qualification-matrix.json`. The qualifier rejects dirty or mismatched
+revisions.
 
 The diagnostic shell starts with the retained disk overlay and OVMF variable
 store. It does not replace either file with base-image state.

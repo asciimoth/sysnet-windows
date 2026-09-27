@@ -34,6 +34,7 @@ $resultFile = Join-Path $work 'result.txt'
 $service = 'mullvad-split-tunnel'
 $installedDriver = Join-Path $env:SystemRoot 'System32\drivers\mullvad-split-tunnel.sys'
 $taskName = "mullvad-split-tunnel-e2e-$PID"
+$sourceArchive = Join-Path $work 'source.tar'
 
 if (Get-Service $service -ErrorAction SilentlyContinue) {
     throw "Refusing to replace existing service $service"
@@ -79,6 +80,9 @@ try {
     } | ConvertTo-Json -Depth 4 | Set-Content $manifestPath
 
     $goExecutable = (Get-Command go).Source
+    & git -C $SourceDir archive --format=tar --output=$sourceArchive HEAD
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot create the source identity archive' }
+    $sourceArchiveSHA256 = (Get-FileHash $sourceArchive -Algorithm SHA256).Hash.ToLowerInvariant()
     $goModCache = Join-Path $work 'gomodcache'
     New-Item -ItemType Directory -Force -Path $goModCache | Out-Null
     $savedGoModCache = $env:GOMODCACHE
@@ -100,6 +104,7 @@ try {
         '-GoModCache', ('"' + $goModCache + '"'),
         '-SysnetWindowsRevision', ('"' + $sysnetWindowsRevision + '"'),
         '-SysnetWindowsTreeState', $sysnetWindowsTreeState,
+        '-SourceArchiveSHA256', $sourceArchiveSHA256,
         '-ResultFile', ('"' + $resultFile + '"')
     ) -join ' '
     $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments

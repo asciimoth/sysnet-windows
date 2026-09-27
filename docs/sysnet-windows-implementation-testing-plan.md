@@ -620,7 +620,7 @@ defer rollback to a later milestone.
      operation and proves exact reverse cleanup, foreign-resource preservation
      and bounded close.
 
-6. **Step 6 - Make the harness enforce the new contract.**
+6. **Step 6 - Make the harness enforce the new contract. (Completed)**
 
    - Add package-level test names to `dev/winvm/test-manifest.json` only when
      they exist. Mark later milestone cases as planned, not optional passes.

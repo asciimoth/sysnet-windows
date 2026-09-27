@@ -319,7 +319,7 @@ printf 'Running the Windows %s gate with a %d-minute timeout...\n' "$mode" "$((t
 if [[ $mode == baseline ]]; then
     tree_state=clean
     [[ $dirty == false ]] || tree_state=dirty
-    command="Set-Location '$remote/source'; & './dev/winvm/test.ps1' -ArtifactDir '$remote/artifacts' -ImageManifest 'C:/winvm/manifest.json' -SysnetWindowsRevision '$revision' -SysnetWindowsTreeState '$tree_state' -RequireStandardUser"
+    command="Set-Location '$remote/source'; & './dev/winvm/test.ps1' -ArtifactDir '$remote/artifacts' -ImageManifest 'C:/winvm/manifest.json' -SysnetWindowsRevision '$revision' -SysnetWindowsTreeState '$tree_state' -SourceArchiveSHA256 '$payload_hash' -RequireStandardUser"
     timeout --foreground --kill-after=30 "${test_timeout}s" ssh "${ssh_opts[@]}" "$target" "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command \"$command\"" 2>&1 | tee "$run_dir/windows-console.log"
     test_status=${PIPESTATUS[0]}
 else
@@ -327,7 +327,7 @@ else
     [[ $mode == flow ]] && flow_argument=' -Flow'
     tree_state=clean
     [[ $dirty == false ]] || tree_state=dirty
-    command="& '$remote/source/dev/winvm/e2e.ps1' -SourceDir '$remote/source' -ArtifactDir '$remote/artifacts' -SysnetWindowsRevision '$revision' -SysnetWindowsTreeState '$tree_state'$flow_argument"
+    command="& '$remote/source/dev/winvm/e2e.ps1' -SourceDir '$remote/source' -ArtifactDir '$remote/artifacts' -SysnetWindowsRevision '$revision' -SysnetWindowsTreeState '$tree_state' -SourceArchiveSHA256 '$payload_hash'$flow_argument"
     timeout --foreground --kill-after=30 "${test_timeout}s" "$script_dir/tools/qga.py" --socket "$qga" --timeout "$test_timeout" exec powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$command" 2>&1 | tee "$run_dir/windows-console.log"
     test_status=${PIPESTATUS[0]}
 fi

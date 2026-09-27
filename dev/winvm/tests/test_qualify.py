@@ -11,6 +11,8 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).parents[1] / "tools" / "qualify.py"
 REVISION = "a" * 40
+SOURCE_HASH = "b" * 64
+LOCKS = {"goMod": "c" * 64, "goSum": "d" * 64}
 
 
 class QualificationTest(unittest.TestCase):
@@ -32,11 +34,17 @@ class QualificationTest(unittest.TestCase):
             common = {
                 "schemaVersion": 1, "outcome": "passed",
                 "sysnetWindowsRevision": REVISION, "sysnetWindowsTreeState": "clean",
+                "sourceArchiveSha256": SOURCE_HASH,
                 "architecture": "arm64",
+                "goVersion": "go version go1.25.5 windows/arm64",
+                "dependencyLocks": LOCKS,
                 "os": {"caption": "Fixture Windows", "version": "1.2.42", "build": "42", "productType": 1},
             }
             values = {
-                "native": {**common, "suite": "native-unit", "requiredTests": ["native"]},
+                "native": {
+                    **common, "suite": "native-unit", "requiredTests": ["native"],
+                    "testResults": {"native": "pass"},
+                },
                 "live": {
                     **common,
                     "suite": "live-driver",
@@ -46,6 +54,12 @@ class QualificationTest(unittest.TestCase):
                         "TestDNSConfigurationRestoration",
                         "TestSystemCloseAfterSplitResetFailure",
                     ],
+                    "testResults": {
+                        "TestDriverLifecycle": "pass",
+                        "TestOwnedNetworkingCleanup": "pass",
+                        "TestDNSConfigurationRestoration": "pass",
+                        "TestSystemCloseAfterSplitResetFailure": "pass",
+                    },
                 },
                 "flow": {
                     **common,
@@ -54,6 +68,10 @@ class QualificationTest(unittest.TestCase):
                         "TestPacketFlowPublicAPI",
                         "TestPacketFlowUnderlayBypass",
                     ],
+                    "testResults": {
+                        "TestPacketFlowPublicAPI": "pass",
+                        "TestPacketFlowUnderlayBypass": "pass",
+                    },
                 },
             }
             for name in ("live", "flow"):
@@ -107,13 +125,41 @@ class QualificationTest(unittest.TestCase):
         self.assertEqual(output["outcome"], "qualified")
         self.assertEqual(output["packetObservations"], 2)
         self.assertEqual(len(output["evidenceSha256"]), 7)
+        self.assertEqual(output["sourceArchiveSha256"], SOURCE_HASH)
+
+    def test_rejects_missing_required_case(self):
+        def mutate(_matrix, values, _packets):
+            values["native"]["requiredTests"] = []
+            values["native"]["testResults"] = {}
+
+        result, output = self.run_validator(mutate)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(output)
+
+    def test_rejects_skipped_required_case(self):
+        def mutate(_matrix, values, _packets):
+            values["native"]["testResults"]["native"] = "skip"
+
+        result, output = self.run_validator(mutate)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("was skipped", result.stderr)
+        self.assertIsNone(output)
+
+    def test_rejects_mismatched_source_identity(self):
+        def mutate(_matrix, values, _packets):
+            values["flow"]["sourceArchiveSha256"] = "e" * 64
+
+        result, output = self.run_validator(mutate)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("source archive identities do not match", result.stderr)
+        self.assertIsNone(output)
 
     def test_rejects_mismatched_or_incomplete_evidence(self):
         cases = [
             lambda _m, values, _p: values["flow"].update(architecture="amd64"),
             lambda _m, values, _p: values["live"].update(sysnetWindowsRevision="b" * 40),
             lambda _m, values, _p: values["live"].update(sysnetWindowsTreeState="dirty"),
-            lambda _m, values, _p: values["live"].update(requiredTests=[]),
+            lambda _m, values, _p: values["live"].update(dependencyLocks={"goMod": "e" * 64}),
             lambda _m, values, _p: values["flow"]["driver"].update(version="wrong"),
             lambda _m, _v, packets: packets.clear(),
             lambda _m, _v, packets: packets[0].update(packetPathValid=False),

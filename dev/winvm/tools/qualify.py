@@ -30,6 +30,23 @@ def check_evidence(path, value, suite, entry, revision):
         raise ValueError(f"{path}: sysnet-windows revision does not match")
     if value.get("sysnetWindowsTreeState") != "clean":
         raise ValueError(f"{path}: sysnet-windows worktree was not clean")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(value.get("sourceArchiveSha256", ""))):
+        raise ValueError(f"{path}: source archive SHA-256 is absent or invalid")
+    dependency_locks = value.get("dependencyLocks")
+    if not isinstance(dependency_locks, dict) or not dependency_locks:
+        raise ValueError(f"{path}: dependency lock identity is absent")
+    if not all(
+        isinstance(name, str)
+        and isinstance(digest, str)
+        and re.fullmatch(r"[0-9a-fA-F]{64}", digest)
+        for name, digest in dependency_locks.items()
+    ):
+        raise ValueError(f"{path}: dependency lock identity is invalid")
+    if not re.fullmatch(
+        rf"go version go\S+ windows/{re.escape(entry['architecture'])}",
+        str(value.get("goVersion", "")),
+    ):
+        raise ValueError(f"{path}: Go version or architecture is invalid")
     operating_system = value.get("os")
     if not isinstance(operating_system, dict):
         raise ValueError(f"{path}: OS identity is absent")
@@ -89,6 +106,14 @@ def main():
         )
     if any(value != os_identities[0] for value in os_identities[1:]):
         raise ValueError("suite OS identities do not match")
+    source_hashes = {
+        value["sourceArchiveSha256"].lower() for value in evidence.values()
+    }
+    if len(source_hashes) != 1:
+        raise ValueError("suite source archive identities do not match")
+    dependency_locks = [value["dependencyLocks"] for value in evidence.values()]
+    if any(value != dependency_locks[0] for value in dependency_locks[1:]):
+        raise ValueError("suite dependency lock identities do not match")
 
     driver_lock = matrix["driver"]
     for suite in ("live-driver", "packet-flow"):
@@ -109,6 +134,12 @@ def main():
             raise ValueError(f"test manifest has no required {suite} tests")
         if not required_tests.issubset(evidence[suite].get("requiredTests", [])):
             raise ValueError(f"{suite}: required tests did not pass")
+        test_results = evidence[suite].get("testResults", {})
+        for test in required_tests:
+            if test_results.get(test) == "skip":
+                raise ValueError(f"{suite}: required test {test} was skipped")
+            if test_results.get(test) != "pass":
+                raise ValueError(f"{suite}: required test {test} has no pass result")
 
     packet_results = json.loads(args.packet_evidence.read_text(encoding="utf-8"))
     if not isinstance(packet_results, list):
@@ -134,10 +165,12 @@ def main():
         "matrixEntry": entry["id"],
         "outcome": "qualified",
         "sysnetWindowsRevision": revision.lower(),
+        "sourceArchiveSha256": next(iter(source_hashes)),
         "architecture": entry["architecture"],
         "os": os_identities[0],
         "driver": driver_lock,
         "driverFiles": locked_architecture["files"],
+        "dependencyLocks": dependency_locks[0],
         "packetObservations": len(packet_results),
         "packetCases": sorted(observed_packet_cases),
         "evidenceSha256": {
