@@ -19,6 +19,24 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def signer_has_identity(value, expected_identities):
+    signer = str(value)
+    return any(
+        re.search(rf"(?:^|,\s*){re.escape(identity)}(?:,|$)", signer)
+        for identity in expected_identities
+    )
+
+
+def expected_installed_signer(value):
+    return signer_has_identity(
+        value,
+        (
+            "CN=Mullvad VPN AB",
+            "CN=Microsoft Windows Hardware Compatibility Publisher",
+        )
+    )
+
+
 def check_evidence(path, value, suite, entry, revision):
     if value.get("schemaVersion") != 1:
         raise ValueError(f"{path}: unsupported evidence schema")
@@ -79,6 +97,8 @@ def main():
     entry = entries[0]
     lock_path = args.matrix.parent / matrix["driverLock"]
     driver_file_lock = load_object(lock_path)
+    if driver_file_lock.get("schemaVersion") != 1:
+        raise ValueError("unsupported driver lock schema")
     test_manifest_path = args.matrix.parent / matrix["testManifest"]
     test_manifest = load_object(test_manifest_path)
     if test_manifest.get("schemaVersion") != 1:
@@ -124,8 +144,14 @@ def main():
             raise ValueError(f"{suite}: driver upstream commit does not match")
         if driver.get("files") != locked_architecture["files"]:
             raise ValueError(f"{suite}: driver file hashes do not match")
-        if "CN=Mullvad VPN AB" not in str(driver.get("packageSigner", "")):
+        if not signer_has_identity(
+            driver.get("packageSigner", ""), ("CN=Mullvad VPN AB",)
+        ):
             raise ValueError(f"{suite}: staged package signer does not match")
+        if not expected_installed_signer(driver.get("installedSigner", "")):
+            raise ValueError(f"{suite}: installed driver signer does not match")
+        if driver.get("installedSignature") != "Valid":
+            raise ValueError(f"{suite}: installed driver signature is not valid")
         if driver.get("finalState") != "Stopped":
             raise ValueError(f"{suite}: driver service was not stopped")
     for suite in ("native-unit", "live-driver", "packet-flow"):

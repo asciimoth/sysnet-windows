@@ -16,7 +16,7 @@ LOCKS = {"goMod": "c" * 64, "goSum": "d" * 64}
 
 
 class QualificationTest(unittest.TestCase):
-    def run_validator(self, mutate=None):
+    def run_validator(self, mutate=None, driver_lock_mutate=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             matrix = {
@@ -79,6 +79,8 @@ class QualificationTest(unittest.TestCase):
                     "version": "1.3.0.0", "upstreamCommit": "upstream",
                     "finalState": "Stopped", "files": {"driver.sys": "hash"},
                     "packageSigner": "CN=Mullvad VPN AB",
+                    "installedSigner": "CN=Mullvad VPN AB",
+                    "installedSignature": "Valid",
                 }
             packets = [
                 {"case": "tcp4", "packetPathValid": True},
@@ -87,10 +89,16 @@ class QualificationTest(unittest.TestCase):
             if mutate:
                 mutate(matrix, values, packets)
             (root / "matrix.json").write_text(json.dumps(matrix), encoding="utf-8")
-            (root / "driver-lock.json").write_text(json.dumps({
+            driver_lock = {
+                "schemaVersion": 1,
                 "version": "1.3.0.0", "upstreamCommit": "upstream",
-                "architectures": {"arm64": {"files": {"driver.sys": "hash"}}}
-            }), encoding="utf-8")
+                "architectures": {"arm64": {"files": {"driver.sys": "hash"}}},
+            }
+            if driver_lock_mutate:
+                driver_lock_mutate(driver_lock)
+            (root / "driver-lock.json").write_text(
+                json.dumps(driver_lock), encoding="utf-8"
+            )
             (root / "test-manifest.json").write_text(json.dumps({
                 "schemaVersion": 1,
                 "suites": {
@@ -152,6 +160,78 @@ class QualificationTest(unittest.TestCase):
         result, output = self.run_validator(mutate)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("source archive identities do not match", result.stderr)
+        self.assertIsNone(output)
+
+    def test_accepts_expected_installed_driver_signers(self):
+        def mutate(_matrix, values, _packets):
+            for name in ("live", "flow"):
+                values[name]["driver"]["installedSigner"] = (
+                    "CN=Microsoft Windows Hardware Compatibility Publisher"
+                )
+
+        result, output = self.run_validator(mutate)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output["outcome"], "qualified")
+
+    def test_rejects_missing_or_unexpected_driver_signatures(self):
+        cases = [
+            (
+                "missing installed signer",
+                lambda driver: driver.pop("installedSigner"),
+                "installed driver signer does not match",
+            ),
+            (
+                "unexpected installed signer",
+                lambda driver: driver.update(installedSigner="CN=Unexpected Publisher"),
+                "installed driver signer does not match",
+            ),
+            (
+                "installed signer substring",
+                lambda driver: driver.update(
+                    installedSigner="CN=Unexpected CN=Mullvad VPN AB"
+                ),
+                "installed driver signer does not match",
+            ),
+            (
+                "missing signature status",
+                lambda driver: driver.pop("installedSignature"),
+                "installed driver signature is not valid",
+            ),
+            (
+                "invalid signature status",
+                lambda driver: driver.update(installedSignature="HashMismatch"),
+                "installed driver signature is not valid",
+            ),
+            (
+                "missing package signer",
+                lambda driver: driver.pop("packageSigner"),
+                "staged package signer does not match",
+            ),
+            (
+                "package signer substring",
+                lambda driver: driver.update(
+                    packageSigner="CN=Unexpected CN=Mullvad VPN AB"
+                ),
+                "staged package signer does not match",
+            ),
+        ]
+        for suite in ("live", "flow"):
+            for name, change, message in cases:
+                with self.subTest(suite=suite, case=name):
+                    def mutate(_matrix, values, _packets, suite=suite, change=change):
+                        change(values[suite]["driver"])
+
+                    result, output = self.run_validator(mutate)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stderr)
+                    self.assertIsNone(output)
+
+    def test_rejects_unsupported_driver_lock_schema(self):
+        result, output = self.run_validator(
+            driver_lock_mutate=lambda lock: lock.update(schemaVersion=2)
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported driver lock schema", result.stderr)
         self.assertIsNone(output)
 
     def test_rejects_mismatched_or_incomplete_evidence(self):

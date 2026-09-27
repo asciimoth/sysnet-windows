@@ -41,6 +41,7 @@ grep -Fq 'wintunLockHash' "$script_dir/run.sh"
 grep -Fq 'SourceArchiveSHA256' "$script_dir/run.sh"
 grep -Fq 'sourceArchiveSha256' "$script_dir/test.ps1"
 grep -Fq 'sourceArchiveSha256' "$script_dir/e2e.ps1"
+grep -Fq "installedSignature=\$after.signature" "$script_dir/e2e.ps1"
 
 # Hash checks fail closed.
 printf data >"$tmp/input"

@@ -141,6 +141,77 @@ func TestDisabledFamilyStillIgnoresLoopback(t *testing.T) {
 	}
 }
 
+func TestRouteLoopbackFilteringUsesNormalizedNetwork(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string
+		want []netip.Prefix
+	}{
+		{
+			name: "IPv4 default with loopback host bits",
+			raw:  "127.0.0.1/0",
+			want: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")},
+		},
+		{
+			name: "IPv4 wider than loopback block",
+			raw:  "127.0.0.1/7",
+			want: []netip.Prefix{netip.MustParsePrefix("126.0.0.0/7")},
+		},
+		{name: "IPv4 loopback block", raw: "127.0.0.1/8"},
+		{name: "IPv4 loopback subnet", raw: "127.20.30.40/24"},
+		{
+			name: "IPv6 default with loopback host bits",
+			raw:  "::1/0",
+			want: []netip.Prefix{netip.MustParsePrefix("::/0")},
+		},
+		{
+			name: "IPv6 network containing loopback",
+			raw:  "::1/64",
+			want: []netip.Prefix{netip.MustParsePrefix("::/64")},
+		},
+		{name: "IPv6 loopback host route", raw: "::1/128"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			routes, report := normalizePrefixes(
+				defaultNormalizedSystemConfig(),
+				[]string{test.raw},
+				"Tun.TunRoutes",
+				prefixRoute,
+			)
+			if err := report.Err(); err != nil {
+				t.Fatalf("normalizePrefixes() error = %v", err)
+			}
+			if len(routes) != len(test.want) {
+				t.Fatalf("routes = %v, want %v", routes, test.want)
+			}
+			for index := range routes {
+				if routes[index] != test.want[index] {
+					t.Fatalf("routes = %v, want %v", routes, test.want)
+				}
+			}
+		})
+	}
+}
+
+func TestAddressLoopbackFilteringStillUsesAssignedAddress(t *testing.T) {
+	t.Parallel()
+	addresses, report := normalizePrefixes(
+		defaultNormalizedSystemConfig(),
+		[]string{"127.0.0.1/0", "::1/0"},
+		"Tun.TunAddrs",
+		prefixAddress,
+	)
+	if err := report.Err(); err != nil {
+		t.Fatalf("normalizePrefixes() error = %v", err)
+	}
+	if len(addresses) != 0 {
+		t.Fatalf("loopback addresses were not ignored: %v", addresses)
+	}
+}
+
 func TestDefaultTunRejectsAllFamiliesDisabled(t *testing.T) {
 	t.Parallel()
 	config, err := normalizeSystemConfig(SystemConfig{Features: FeatureConfig{

@@ -104,7 +104,8 @@ $evidenceName = if ($Flow) { 'packet-flow-suite-evidence.json' } else { 'live-dr
     driver=[ordered]@{
         version=$manifest.driverVersion; upstreamCommit=$manifest.upstreamCommit
         files=$manifest.driverFiles; packageSigner=$manifest.driverSigner
-        installedSigner=$after.signer; finalState=$after.state
+        installedSigner=$after.signer; installedSignature=$after.signature
+        finalState=$after.state
     }
     requiredTests=$required; testResults=$testResults
 } | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $ArtifactDir $evidenceName)

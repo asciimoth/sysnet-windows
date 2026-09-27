@@ -154,15 +154,18 @@ func normalizePrefixes(config normalizedSystemConfig, raw []string, path string,
 			))
 			continue
 		}
+		// A route describes its masked destination network, not the host bits
+		// supplied in the prefix text. Mask it before loopback filtering so a
+		// value such as 127.0.0.1/0 remains the IPv4 default route.
+		if kind == prefixRoute {
+			prefix = prefix.Masked()
+		}
 		if prefix.Addr().IsLoopback() {
 			continue
 		}
 		if issue := validateFamily(config, prefix.Addr(), itemPath); issue != nil {
 			report.Issues = append(report.Issues, *issue)
 			continue
-		}
-		if kind == prefixRoute {
-			prefix = prefix.Masked()
 		}
 		if _, exists := seen[prefix]; exists {
 			continue
