@@ -1,0 +1,66 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.5"
+          cache: true
+      - run: go mod verify
+      - run: go mod tidy -diff
+      - name: Check Go formatting
+        shell: bash
+        run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race -count=1 -timeout 2m ./...
+      - run: dev/run-fuzz.sh
+      - name: Install VM harness test tools
+        run: sudo apt-get update && sudo apt-get install -y jq qemu-utils shellcheck
+      - run: dev/winvm/tests/host-scripts.sh
+
+  windows-cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.5"
+          cache: true
+      - run: dev/build-windows.sh
+
+  windows-native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            architecture: amd64
+          - runner: windows-11-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.5"
+          cache: true
+      - name: Run native baseline
+        shell: pwsh
+        env:
+          GO_EXPECTED_VERSION: 1.25.5
+        run: ./dev/winvm/test.ps1 -ArtifactDir "$env:RUNNER_TEMP\native-unit-artifacts"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-unit-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/native-unit-artifacts

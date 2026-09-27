@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "suites": {
+    "native-unit": {
+      "requiredTests": [
+        "TestPackageScaffold"
+      ]
+    },
+    "live-driver": {
+      "requiredTests": [
+        "TestDriverLifecycle",
+        "TestOwnedNetworkingCleanup",
+        "TestDNSConfigurationRestoration",
+        "TestSystemCloseAfterSplitResetFailure"
+      ]
+    },
+    "packet-flow": {
+      "requiredTests": [
+        "TestPacketFlowPublicAPI",
+        "TestPacketFlowUnderlayBypass"
+      ]
+    }
+  }
+}

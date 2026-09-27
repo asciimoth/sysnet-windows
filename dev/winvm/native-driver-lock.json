@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "version": "1.3.0.0",
+  "upstreamCommit": "0a0eb97f67d1dbcb3d08bda66d3b24f465d95475",
+  "binariesRevision": "5b6f46cde692acb77ee74b37b9fd3f1678c45a52",
+  "architectures": {
+    "amd64": {
+      "source": "x86_64-pc-windows-msvc",
+      "files": {
+        "mullvad-split-tunnel.sys": "10cf25bbcfe51fd663a1fec88a98e9b858f3a579589bb2ec496b66e4fdd1b201",
+        "mullvad-split-tunnel.inf": "3dd5905e5fb98d61a942a33e8c9a5ba07c3a2de1e4f319e1fec3e54df6591608",
+        "mullvad-split-tunnel.cat": "c599926a0327d7ae06b534f4cd039db30392e1897bb9d03e4fec3631744a4e6d"
+      }
+    },
+    "arm64": {
+      "source": "aarch64-pc-windows-msvc",
+      "files": {
+        "mullvad-split-tunnel.sys": "6af8b3bfe5aa095d5276187558c7c7d3a3e0c174b34406cd6c4b3f8e6ffa6534",
+        "mullvad-split-tunnel.inf": "0bfdb044e40535dabbeb3620b655c1563714b3a6f3231d3492c972c6e8dea6f1",
+        "mullvad-split-tunnel.cat": "c3d27636739ebaa7dde369d113347de83e3e2173b8a512bb8863d11b148de7ce"
+      }
+    }
+  }
+}

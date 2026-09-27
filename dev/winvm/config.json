@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "architecture": "amd64",
+  "windowsImageName": "Windows Server 2022 SERVERSTANDARDCORE",
+  "machine": {
+    "cpus": 4,
+    "memoryMiB": 8192,
+    "diskGiB": 80,
+    "type": "q35,accel=kvm",
+    "bootTimeoutSeconds": 1200,
+    "installTimeoutSeconds": 5400,
+    "testTimeoutSeconds": 1800,
+    "shutdownTimeoutSeconds": 90
+  },
+  "ssh": {"user": "winvm", "portMinimum": 22000, "portMaximum": 22999},
+  "artifacts": {"directory": ".artifacts/winvm", "retainFailedOverlay": true},
+  "test": {"script": "dev/winvm/test.ps1", "e2eScript": "dev/winvm/e2e.ps1"}
+}

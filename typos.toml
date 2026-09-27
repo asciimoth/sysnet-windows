@@ -1,0 +1,4 @@
+[default.extend-words]
+NetIO = "NetIO"
+Wintun = "Wintun"
+winipcfg = "winipcfg"

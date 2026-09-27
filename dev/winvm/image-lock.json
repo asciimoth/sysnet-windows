@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "windows": {
+    "version": "Windows Server 2022 Standard Evaluation Server Core amd64 (20348.587)",
+    "environment": "WINVM_WINDOWS_ISO",
+    "sha256": "3e4fa6d8507b554856fc9ca6079cc402df11a8b79344871669f0251535255325"
+  },
+  "virtio": {
+    "version": "virtio-win-0.1.285",
+    "environment": "WINVM_VIRTIO_ISO",
+    "source": "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.285-1/virtio-win-0.1.285.iso",
+    "sha256": "e14cf2b94492c3e925f0070ba7fdfedeb2048c91eea9c5a5afb30232a3976331"
+  },
+  "go": {
+    "version": "1.25.5",
+    "file": "go1.25.5.windows-amd64.zip",
+    "source": "https://go.dev/dl/go1.25.5.windows-amd64.zip",
+    "sha256": "ae756cce1cb80c819b4fe01b0353807178f532211b47f72d7fa77949de054ebb"
+  },
+  "openssh": {
+    "version": "9.8.3.0p2-Preview",
+    "file": "OpenSSH-Win64.zip",
+    "source": "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip",
+    "sha256": "0ca131f3a78f404dc819a6336606caec0db1663a692ccc3af1e90232706ada54"
+  },
+  "driver": {
+    "version": "1.3.0.0",
+    "upstreamCommit": "0a0eb97f67d1dbcb3d08bda66d3b24f465d95475",
+    "binariesRevision": "5b6f46cde692acb77ee74b37b9fd3f1678c45a52",
+    "serviceName": "mullvad-split-tunnel",
+    "files": {
+      "mullvad-split-tunnel.sys": "10cf25bbcfe51fd663a1fec88a98e9b858f3a579589bb2ec496b66e4fdd1b201",
+      "mullvad-split-tunnel.inf": "3dd5905e5fb98d61a942a33e8c9a5ba07c3a2de1e4f319e1fec3e54df6591608",
+      "mullvad-split-tunnel.cat": "c599926a0327d7ae06b534f4cd039db30392e1897bb9d03e4fec3631744a4e6d"
+    }
+  }
+}

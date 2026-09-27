@@ -399,9 +399,9 @@ Read-only validation may inspect executable paths but must be bounded. A path
 that cannot be inspected is not automatically syntactically invalid. Snapshot
 queries do not enumerate arbitrary filesystem trees for rule completion.
 
-`Verify*` can delegate to detailed validation and `Err()`. `RuleVerify` remains a
-context-free syntax hint; true does not mean usable for routing or on this host.
-Document this explicitly. New UIs use `CheckRule` with a context.
+`Verify*` can delegate to detailed validation and `Err()`. `RuleVerify` remains
+a context-free syntax hint; true does not mean usable for routing or on this
+host. Document this explicitly. New UIs use `CheckRule` with a context.
 
 A capability snapshot can be unknown while an actual operation would work. A
 caller may attempt construction after an indeterminate validation result. Build
