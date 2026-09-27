@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/asciimoth/gonnect/sysnet"
 )
@@ -17,8 +18,47 @@ func TestSystemContractScaffold(t *testing.T) {
 	if err := system.Capabilities().Validate(); err != nil {
 		t.Fatalf("Capabilities().Validate() error = %v", err)
 	}
-	if err := system.CheckTunOpts(sysnet.TunOpts{}).Err(); err != nil {
+	if err := system.CheckTunOpts(sysnet.TunOpts{}).Err(); !errors.Is(err, sysnet.ErrCapabilityUnknown) {
+		t.Fatalf("CheckTunOpts() error = %v, want capability unknown", err)
+	}
+}
+
+func TestValidationReportsExactCapabilityAndLifecycle(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	system, err := newSystem(SystemConfig{}, systemDependencies{
+		capabilityCode: implementationSupport{
+			regularTun: true,
+			defaultTun: true,
+		},
+		capabilityProbe: &sequenceCapabilityProbe{facts: []capabilityProbeFacts{{
+			netIO: available, split: available,
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	if err := system.CheckTunOpts(sysnet.TunOpts{TunAddrs: []string{"192.0.2.1/24"}}).Err(); err != nil {
 		t.Fatalf("CheckTunOpts() error = %v", err)
+	}
+	if err := system.CheckDefaultTunOpts(sysnet.DefaultTunOpts{}).Err(); err != nil {
+		t.Fatalf("CheckDefaultTunOpts() error = %v", err)
+	}
+	if err := system.CheckTunOpts(sysnet.TunOpts{Name: "named"}).Err(); !errors.Is(err, sysnet.ErrNotSupported) {
+		t.Fatalf("named CheckTunOpts() error = %v, want not supported", err)
+	}
+	if got := system.Capabilities().Operation(operationKey(sysnet.TargetTun, sysnet.OpCreateNamed, sysnet.FamilyNone)); got.State != sysnet.CapabilityUnsupported {
+		t.Fatalf("named create capability = %+v, want unsupported", got)
+	}
+	if err := system.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	report := system.CheckTunOpts(sysnet.TunOpts{TunAddrs: []string{"192.0.2.1/24"}})
+	if err := report.Err(); !errors.Is(err, sysnet.ErrUnavailable) {
+		t.Fatalf("CheckTunOpts() after Close error = %v, want unavailable", err)
+	}
+	if report.CapabilityRevision != system.Capabilities().Revision {
+		t.Fatalf("validation revision = %d, capability revision = %d", report.CapabilityRevision, system.Capabilities().Revision)
 	}
 }
 
@@ -242,6 +282,26 @@ func TestCapabilityFinalPreflightRefreshesStaleFacts(t *testing.T) {
 	}
 }
 
+func TestCapabilityProbeCannotReportAvailableAfterDeadline(t *testing.T) {
+	t.Parallel()
+	system, err := newSystem(SystemConfig{OperationTimeout: time.Millisecond}, systemDependencies{
+		capabilityCode: implementationSupport{regularTun: true},
+		capabilityProbe: capabilityProbeFunc(func(ctx context.Context) capabilityProbeFacts {
+			<-ctx.Done()
+			available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+			return capabilityProbeFacts{netIO: available, split: available}
+		}),
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	capability := system.Capabilities().Operation(operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4))
+	if capability.State != sysnet.CapabilityUnknown || !containsReason(capability.Reasons, sysnet.ReasonProbeFailed) {
+		t.Fatalf("create capability = %+v, want failed probe", capability)
+	}
+}
+
 func TestLifecycleTransitionsAndClose(t *testing.T) {
 	t.Parallel()
 	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
@@ -332,6 +392,10 @@ type sequenceCapabilityProbe struct {
 	facts []capabilityProbeFacts
 	next  int
 }
+
+type capabilityProbeFunc func(context.Context) capabilityProbeFacts
+
+func (f capabilityProbeFunc) Probe(ctx context.Context) capabilityProbeFacts { return f(ctx) }
 
 func (p *sequenceCapabilityProbe) Probe(context.Context) capabilityProbeFacts {
 	p.mu.Lock()

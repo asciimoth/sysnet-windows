@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/asciimoth/gonnect"
@@ -54,22 +55,24 @@ func (s *System) close() error {
 	}
 	s.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), s.config.operationTimeout)
-	defer cancel()
 	var stopErr error
 	if s.worker != nil {
-		stopErr = s.worker.Stop(ctx)
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), s.config.operationTimeout)
+		stopErr = s.worker.Stop(stopCtx)
+		cancelStop()
 	}
 	resourceErr := s.resources.CloseAll()
 	var cleanupErr error
 	if stopErr == nil && s.journal != nil {
-		cleanupErr = s.journal.UndoAll(ctx)
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), s.config.operationTimeout)
+		cleanupErr = s.journal.UndoAll(cleanupCtx)
+		cancelCleanup()
 	}
 	result := errors.Join(stopErr, resourceErr, cleanupErr)
 
 	s.mu.Lock()
 	next := lifecycleClosed
-	if stopErr != nil || reconcile.RequiresRecovery(cleanupErr) {
+	if stopErr != nil || resourceErr != nil || reconcile.RequiresRecovery(cleanupErr) {
 		next = lifecycleRecoveryRequired
 	}
 	transitionErr := s.transitionLocked(next)
@@ -126,21 +129,67 @@ func (*System) CapabilitiesForTun(tun.Tun) (sysnet.TunCapabilityReport, error) {
 }
 
 func (s *System) CheckTunOpts(opts sysnet.TunOpts) sysnet.ValidationReport {
-	_, report := normalizeTunOpts(s.policyConfig(), opts)
-	report.CapabilityRevision = s.Capabilities().Revision
-	return report
+	desired, result := normalizeTunOpts(s.policyConfig(), opts)
+	report := s.Capabilities()
+	result.CapabilityRevision = report.Revision
+	operation := sysnet.OpCreate
+	if desired.name != "" {
+		operation = sysnet.OpCreateNamed
+	}
+	appendCapabilityIssue(&result, "Tun.Create", report.Operation(sysnet.OperationKey{
+		Target: sysnet.TargetTun, Operation: operation,
+		Family: familyForPrefixes(desired.addresses, desired.routes),
+	}))
+	return result
 }
 
 func (s *System) CheckDefaultTunOpts(opts sysnet.DefaultTunOpts) sysnet.ValidationReport {
-	_, report := normalizeDefaultTunOpts(s.policyConfig(), opts)
-	report.CapabilityRevision = s.Capabilities().Revision
-	return report
+	desired, result := normalizeDefaultTunOpts(s.policyConfig(), opts)
+	report := s.Capabilities()
+	result.CapabilityRevision = report.Revision
+	operation := sysnet.OpCreate
+	if desired.tun.name != "" {
+		operation = sysnet.OpCreateNamed
+	}
+	appendCapabilityIssue(&result, "DefaultTun.Create", report.Operation(sysnet.OperationKey{
+		Target: sysnet.TargetDefaultTun, Operation: operation, Family: desired.family,
+	}))
+	mode := sysnet.RoutingFull
+	if len(opts.Exclude) != 0 {
+		mode = sysnet.RoutingExclude
+	} else if len(opts.Include) != 0 {
+		mode = sysnet.RoutingInclude
+	}
+	appendCapabilityIssue(&result, "DefaultTun.Profile", report.DefaultTunProfile(sysnet.RoutingProfileKey{
+		Family: desired.family, Mode: mode, Strict: opts.Strict,
+	}).Capability)
+	return result
 }
 
 func (s *System) CheckRule(rule sysnet.Rule, context sysnet.RuleContext) sysnet.ValidationReport {
-	_, report := normalizeRule(s.policyConfig(), rule, context)
-	report.CapabilityRevision = s.Capabilities().Revision
-	return report
+	_, result := normalizeRule(s.policyConfig(), rule, context)
+	report := s.Capabilities()
+	result.CapabilityRevision = report.Revision
+	if len(result.Issues) != 0 {
+		return result
+	}
+	ruleCapability := report.Rule(strings.TrimSpace(rule.Type))
+	appendCapabilityIssue(&result, "Rule.Type", ruleCapability.Validation)
+	if context.Routing != nil {
+		profile := report.DefaultTunProfile(*context.Routing)
+		appendCapabilityIssue(&result, "Rule.Context", profile.Capability)
+		binding := sysnet.Capability{State: sysnet.CapabilityUnknown}
+		for _, candidate := range profile.Rules {
+			if candidate.Type == strings.TrimSpace(rule.Type) {
+				binding = candidate.Capability
+				break
+			}
+		}
+		appendCapabilityIssue(&result, "Rule.Type", binding)
+	} else if context.Matcher != nil {
+		appendCapabilityIssue(&result, "Rule.Context", matcherProfile(ruleCapability, *context.Matcher).Capability)
+	}
+	return result
 }
 
 func (s *System) CompleteRule(sysnet.Rule, sysnet.RuleContext) ([]string, error) {
@@ -170,12 +219,14 @@ func (s *System) BuildMatcher(rule sysnet.Rule) (sysnet.Matcher, error) {
 	report := s.Capabilities()
 	var unavailable error
 	for _, family := range []sysnet.AddressFamily{sysnet.FamilyIPv4, sysnet.FamilyIPv6} {
-		profile := matcherProfile(report.Rule(rule.Type), sysnet.MatcherProfileKey{Family: family, Transport: sysnet.TransportTCP})
-		if profile.State == sysnet.CapabilityAvailable {
-			return nil, sysnet.ErrNotSupported
-		}
-		if unavailable == nil && (profile.State != sysnet.CapabilityUnknown || len(profile.Reasons) != 0) {
-			unavailable = capabilityError("Matcher", profile.Capability)
+		for _, transport := range []sysnet.Transport{sysnet.TransportTCP, sysnet.TransportUDP} {
+			profile := matcherProfile(report.Rule(rule.Type), sysnet.MatcherProfileKey{Family: family, Transport: transport})
+			if profile.State == sysnet.CapabilityAvailable {
+				return nil, sysnet.ErrNotSupported
+			}
+			if unavailable == nil && (profile.State != sysnet.CapabilityUnknown || len(profile.Reasons) != 0) {
+				unavailable = capabilityError("Matcher", profile.Capability)
+			}
 		}
 	}
 	if unavailable != nil {
@@ -191,6 +242,16 @@ func (s *System) BuildDefaultTun(opts sysnet.DefaultTunOpts) (sysnet.DefaultTun,
 	}
 	if err := s.finalPreflight(); err != nil {
 		return nil, err
+	}
+	operation := sysnet.OpCreate
+	if desired.tun.name != "" {
+		operation = sysnet.OpCreateNamed
+	}
+	create := s.Capabilities().Operation(sysnet.OperationKey{
+		Target: sysnet.TargetDefaultTun, Operation: operation, Family: desired.family,
+	})
+	if create.State != sysnet.CapabilityAvailable {
+		return nil, capabilityError("DefaultTun.Create", create)
 	}
 	mode := sysnet.RoutingFull
 	if len(desired.excludes) != 0 {
@@ -214,7 +275,11 @@ func (s *System) BuildTun(opts sysnet.TunOpts) (tun.Tun, error) {
 		return nil, err
 	}
 	family := familyForPrefixes(desired.addresses, desired.routes)
-	capability := s.Capabilities().Operation(sysnet.OperationKey{Target: sysnet.TargetTun, Operation: sysnet.OpCreate, Family: family})
+	operation := sysnet.OpCreate
+	if desired.name != "" {
+		operation = sysnet.OpCreateNamed
+	}
+	capability := s.Capabilities().Operation(sysnet.OperationKey{Target: sysnet.TargetTun, Operation: operation, Family: family})
 	if capability.State != sysnet.CapabilityAvailable {
 		return nil, capabilityError("Tun.Create", capability)
 	}
@@ -237,19 +302,12 @@ func (s *System) SetTunMTU(_ tun.Tun, mtu int) error {
 	return sysnet.ErrNotSupported
 }
 
-func (s *System) SetTunAddrs(_ tun.Tun, addrs []string) error {
-	_, report := normalizePrefixes(s.policyConfig(), addrs, "Tun.TunAddrs", prefixAddress)
-	if err := report.Err(); err != nil {
-		return err
-	}
-	if err := s.finalPreflight(); err != nil {
-		return err
-	}
-	return sysnet.ErrNotSupported
+func (s *System) SetTunAddrs(device tun.Tun, addrs []string) error {
+	return s.changeTunPrefixes(device, addrs, "Tun.TunAddrs", prefixAddress, sysnet.OpSetAddresses)
 }
 
 func (s *System) AddTunAddr(device tun.Tun, addr string) error {
-	return s.SetTunAddrs(device, []string{addr})
+	return s.changeTunPrefixes(device, []string{addr}, "Tun.TunAddrs", prefixAddress, sysnet.OpAddAddress)
 }
 
 func (s *System) GetTunAddrs(tun.Tun) ([]string, error) {
@@ -259,19 +317,33 @@ func (s *System) GetTunAddrs(tun.Tun) ([]string, error) {
 	return nil, sysnet.ErrNotSupported
 }
 
-func (s *System) SetTunRoutes(_ tun.Tun, routes []string) error {
-	_, report := normalizePrefixes(s.policyConfig(), routes, "Tun.TunRoutes", prefixRoute)
+func (s *System) SetTunRoutes(device tun.Tun, routes []string) error {
+	return s.changeTunPrefixes(device, routes, "Tun.TunRoutes", prefixRoute, sysnet.OpSetRoutes)
+}
+
+func (s *System) changeTunPrefixes(_ tun.Tun, raw []string, path string, kind prefixKind, operation sysnet.Operation) error {
+	prefixes, report := normalizePrefixes(s.policyConfig(), raw, path, kind)
 	if err := report.Err(); err != nil {
 		return err
 	}
 	if err := s.finalPreflight(); err != nil {
 		return err
 	}
+	family := familyForPrefixes(prefixes)
+	if family == sysnet.FamilyNone {
+		family = defaultTunFamily(s.policyConfig())
+	}
+	capability := s.Capabilities().Operation(sysnet.OperationKey{
+		Target: sysnet.TargetTun, Operation: operation, Family: family,
+	})
+	if capability.State != sysnet.CapabilityAvailable {
+		return capabilityError(path, capability)
+	}
 	return sysnet.ErrNotSupported
 }
 
 func (s *System) AddTunRoute(device tun.Tun, route string) error {
-	return s.SetTunRoutes(device, []string{route})
+	return s.changeTunPrefixes(device, []string{route}, "Tun.TunRoutes", prefixRoute, sysnet.OpAddRoute)
 }
 
 func (s *System) GetTunRoutes(tun.Tun) ([]string, error) {
@@ -314,6 +386,9 @@ func (s *System) finalPreflight() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.operationTimeout)
 	facts := s.dependencies.capabilityProbe.Probe(ctx)
+	if err := ctx.Err(); err != nil {
+		facts = failedProbeFacts(err)
+	}
 	cancel()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -340,6 +415,17 @@ func capabilityError(path string, capability sysnet.Capability) error {
 		reason = capability.Reasons[0]
 	}
 	return validationError(validationIssue(path, capability.State, reason, capability.Detail, nil))
+}
+
+func appendCapabilityIssue(report *sysnet.ValidationReport, path string, capability sysnet.Capability) {
+	if capability.State == sysnet.CapabilityAvailable {
+		return
+	}
+	reason := sysnet.ReasonProbeNotRun
+	if len(capability.Reasons) != 0 {
+		reason = capability.Reasons[0]
+	}
+	report.Issues = append(report.Issues, validationIssue(path, capability.State, reason, capability.Detail, nil))
 }
 
 func (s *System) policyConfig() normalizedSystemConfig {

@@ -35,7 +35,11 @@ type Worker struct {
 	once   sync.Once
 
 	requests chan request
-	reasons  chan Reason
+	reasons  chan struct{}
+
+	reasonMu       sync.Mutex
+	pendingReasons []Reason
+	pendingSet     map[Reason]struct{}
 }
 
 // NewWorker starts one policy worker. A nil handler is valid when the caller
@@ -49,15 +53,16 @@ func NewWorker(parent context.Context, journal *Journal, handler Handler, onFail
 	}
 	ctx, cancel := context.WithCancel(parent)
 	worker := &Worker{
-		journal:   journal,
-		handler:   handler,
-		onFailure: onFailure,
-		ctx:       ctx,
-		cancel:    cancel,
-		stop:      make(chan struct{}),
-		done:      make(chan struct{}),
-		requests:  make(chan request),
-		reasons:   make(chan Reason, 1),
+		journal:    journal,
+		handler:    handler,
+		onFailure:  onFailure,
+		ctx:        ctx,
+		cancel:     cancel,
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
+		requests:   make(chan request),
+		reasons:    make(chan struct{}, 1),
+		pendingSet: make(map[Reason]struct{}),
 	}
 	go worker.run()
 	return worker
@@ -93,8 +98,19 @@ func (w *Worker) Enqueue(reason Reason) bool {
 		return false
 	default:
 	}
+	w.reasonMu.Lock()
+	if _, exists := w.pendingSet[reason]; !exists {
+		w.pendingSet[reason] = struct{}{}
+		w.pendingReasons = append(w.pendingReasons, reason)
+	}
+	w.reasonMu.Unlock()
 	select {
-	case w.reasons <- reason:
+	case <-w.stop:
+		return false
+	default:
+	}
+	select {
+	case w.reasons <- struct{}{}:
 	default:
 	}
 	return true
@@ -124,32 +140,37 @@ func (w *Worker) run() {
 			ctx, cancel := mergeContext(w.ctx, req.ctx)
 			req.result <- w.journal.Apply(ctx, req.entries)
 			cancel()
-		case reason := <-w.reasons:
-			w.handleReasons(reason)
+		case <-w.reasons:
+			w.handleReasons()
 		}
 	}
 }
 
-func (w *Worker) handleReasons(first Reason) {
+func (w *Worker) handleReasons() {
 	if w.handler == nil {
+		w.takeReasons()
 		return
 	}
-	reasons := []Reason{first}
-	for {
-		select {
-		case reason := <-w.reasons:
-			reasons = append(reasons, reason)
-		default:
-			entries, err := w.handler(w.ctx, reasons)
-			if err == nil {
-				err = w.journal.Apply(w.ctx, entries)
-			}
-			if err != nil && w.onFailure != nil {
-				w.onFailure(err)
-			}
-			return
-		}
+	reasons := w.takeReasons()
+	if len(reasons) == 0 {
+		return
 	}
+	entries, err := w.handler(w.ctx, reasons)
+	if err == nil {
+		err = w.journal.Apply(w.ctx, entries)
+	}
+	if err != nil && w.onFailure != nil {
+		w.onFailure(err)
+	}
+}
+
+func (w *Worker) takeReasons() []Reason {
+	w.reasonMu.Lock()
+	defer w.reasonMu.Unlock()
+	reasons := append([]Reason(nil), w.pendingReasons...)
+	w.pendingReasons = nil
+	clear(w.pendingSet)
+	return reasons
 }
 
 func mergeContext(worker, request context.Context) (context.Context, context.CancelFunc) {

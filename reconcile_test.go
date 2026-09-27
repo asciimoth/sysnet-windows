@@ -17,6 +17,9 @@ func TestSystemCloseOrdersResourcesBeforeHostRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newSystem() error = %v", err)
 	}
+	if system.worker != nil {
+		t.Fatal("newSystem() started a policy worker")
+	}
 	var mu sync.Mutex
 	var events []string
 	appendEvent := func(event string) {
@@ -105,6 +108,27 @@ func TestSystemCloseMarksRecoveryWhenRollbackCannotBeVerified(t *testing.T) {
 	}
 	if got := system.journal.Len(); got != 1 {
 		t.Fatalf("journal length = %d, want retained ownership", got)
+	}
+}
+
+func TestSystemCloseMarksRecoveryWhenResourceCloseFails(t *testing.T) {
+	t.Parallel()
+	system, err := newSystem(SystemConfig{}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	closeErr := errors.New("close resource")
+	if _, err := system.trackResource(systemCloseFunc(func() error { return closeErr })); err != nil {
+		t.Fatalf("trackResource() error = %v", err)
+	}
+	if err := system.Close(); !errors.Is(err, closeErr) {
+		t.Fatalf("Close() error = %v, want resource close error", err)
+	}
+	system.mu.RLock()
+	state := system.state
+	system.mu.RUnlock()
+	if state != lifecycleRecoveryRequired {
+		t.Fatalf("lifecycle state = %s, want recovery-required", state)
 	}
 }
 

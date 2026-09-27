@@ -49,8 +49,10 @@ func (m *capabilityModel) replace(next sysnet.CapabilityReport) bool {
 type implementationSupport struct {
 	regularTun              bool
 	regularTunDual          bool
+	regularTunNamed         bool
 	defaultTun              bool
 	defaultTunDual          bool
+	defaultTunNamed         bool
 	exclusions              bool
 	exclusionsDual          bool
 	matchers                bool
@@ -80,6 +82,19 @@ func initialProbeFacts() capabilityProbeFacts {
 	return capabilityProbeFacts{netIO: unknown.Clone(), split: unknown.Clone()}
 }
 
+func failedProbeFacts(err error) capabilityProbeFacts {
+	detail := "capability probe exceeded its deadline"
+	if err != nil {
+		detail = err.Error()
+	}
+	unknown := sysnet.Capability{
+		State:   sysnet.CapabilityUnknown,
+		Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeFailed},
+		Detail:  detail,
+	}
+	return capabilityProbeFacts{netIO: unknown.Clone(), split: unknown.Clone()}
+}
+
 func buildCapabilityReport(
 	config normalizedSystemConfig,
 	support implementationSupport,
@@ -101,6 +116,14 @@ func buildCapabilityReport(
 		}
 		report.Operations = append(report.Operations, operationCapability(
 			sysnet.TargetTun, sysnet.OpCreate, family, lifecycleCapability(capability, state),
+		))
+		named := implementedCapability(implemented && support.regularTunNamed)
+		if family != sysnet.FamilyNone {
+			named = familyCapability(named, config, family)
+			named = dependentCapability(named, facts.netIO)
+		}
+		report.Operations = append(report.Operations, operationCapability(
+			sysnet.TargetTun, sysnet.OpCreateNamed, family, lifecycleCapability(named, state),
 		))
 	}
 	report.Operations = append(report.Operations,
@@ -136,6 +159,8 @@ func buildCapabilityReport(
 		)
 		report.Operations = append(report.Operations,
 			operationCapability(sysnet.TargetDefaultTun, sysnet.OpCreate, family, base),
+			operationCapability(sysnet.TargetDefaultTun, sysnet.OpCreateNamed, family,
+				lifecycleCapability(dependentCapability(familyCapability(implementedCapability(implemented && support.defaultTunNamed), config, family), facts.netIO), state)),
 			operationCapability(sysnet.TargetDefaultTun, sysnet.OpSourceRoutes, family,
 				unsupported(sysnet.ReasonNotImplemented, "preferred-source routes are not implemented")),
 		)

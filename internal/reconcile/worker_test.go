@@ -52,7 +52,7 @@ func TestWorkerSerializesMutations(t *testing.T) {
 
 func TestWorkerCallbackDoesNotWaitAndCoalesces(t *testing.T) {
 	t.Parallel()
-	received := make(chan []Reason, 1)
+	received := make(chan []Reason, 2)
 	release := make(chan struct{})
 	worker := NewWorker(context.Background(), nil, func(_ context.Context, reasons []Reason) ([]Entry, error) {
 		received <- reasons
@@ -60,17 +60,27 @@ func TestWorkerCallbackDoesNotWaitAndCoalesces(t *testing.T) {
 		return nil, nil
 	}, nil)
 
+	if !worker.Enqueue("initial") {
+		t.Fatal("Enqueue() rejected initial work")
+	}
+	first := <-received
+	if !reflect.DeepEqual(first, []Reason{"initial"}) {
+		t.Fatalf("first reasons = %v, want initial", first)
+	}
 	start := time.Now()
-	for range 1000 {
-		if !worker.Enqueue("route-change") {
+	for _, reason := range []Reason{"route-change", "address-change", "route-change"} {
+		if !worker.Enqueue(reason) {
 			t.Fatal("Enqueue() rejected work before stop")
 		}
 	}
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
 		t.Fatalf("callback enqueue took %s", elapsed)
 	}
-	<-received
 	close(release)
+	second := <-received
+	if !reflect.DeepEqual(second, []Reason{"route-change", "address-change"}) {
+		t.Fatalf("coalesced reasons = %v", second)
+	}
 	if err := worker.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}

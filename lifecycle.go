@@ -1,9 +1,11 @@
 package windows
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/asciimoth/gonnect/sysnet"
+	"github.com/asciimoth/sysnet-windows/internal/reconcile"
 )
 
 type lifecycleState uint8
@@ -83,6 +85,9 @@ func (s *System) beginApply() error {
 	defer s.mu.Unlock()
 	if err := s.acceptingWorkLocked(); err != nil {
 		return err
+	}
+	if s.worker == nil {
+		s.worker = reconcile.NewWorker(context.Background(), s.journal, nil, s.handleReconcileFailure)
 	}
 	if err := s.transitionLocked(lifecycleApplying); err != nil {
 		return err

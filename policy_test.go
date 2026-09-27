@@ -25,9 +25,6 @@ func TestNormalizeTunOptions(t *testing.T) {
 		TunRoutes: []string{"127.0.0.0/8", "10.20.1.4/16"},
 		MTU:       100,
 	}
-	if report := system.CheckTunOpts(opts); report.Err() != nil {
-		t.Fatalf("CheckTunOpts() error = %v", report.Err())
-	}
 	desired, report := normalizeTunOpts(system.policyConfig(), opts)
 	if err := report.Err(); err != nil {
 		t.Fatal(err)
@@ -56,6 +53,7 @@ func TestDefaultTunDNSNormalization(t *testing.T) {
 	}{
 		{name: "owned", raw: "10.0.0.3", want: netip.MustParseAddr("10.0.0.3")},
 		{name: "unowned is ignored", raw: "192.0.2.1", want: netip.MustParseAddr("10.0.0.2")},
+		{name: "unassigned subnet address is ignored", raw: "10.0.0.99", want: netip.MustParseAddr("10.0.0.2")},
 		{name: "empty selects first", want: netip.MustParseAddr("10.0.0.2")},
 	}
 	for _, test := range tests {
@@ -119,7 +117,40 @@ func TestOneFamilyValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report := system.CheckTunOpts(sysnet.TunOpts{TunAddrs: []string{"2001:db8::2/64"}})
+	_, report := normalizeTunOpts(system.policyConfig(), sysnet.TunOpts{TunAddrs: []string{"2001:db8::2/64"}})
+	if len(report.Issues) != 1 || report.Issues[0].Reason != sysnet.ReasonAddressFamilyUnavailable {
+		t.Fatalf("issues = %+v", report.Issues)
+	}
+}
+
+func TestDisabledFamilyStillIgnoresLoopback(t *testing.T) {
+	t.Parallel()
+	config, err := normalizeSystemConfig(SystemConfig{Features: FeatureConfig{DisableIPv4: true}})
+	if err != nil {
+		t.Fatalf("normalizeSystemConfig() error = %v", err)
+	}
+	desired, report := normalizeTunOpts(config, sysnet.TunOpts{
+		TunAddrs:  []string{"127.0.0.1/8"},
+		TunRoutes: []string{"127.0.0.0/8"},
+	})
+	if err := report.Err(); err != nil {
+		t.Fatalf("normalizeTunOpts() error = %v", err)
+	}
+	if len(desired.addresses) != 0 || len(desired.routes) != 0 {
+		t.Fatalf("loopback options were not ignored: %+v", desired)
+	}
+}
+
+func TestDefaultTunRejectsAllFamiliesDisabled(t *testing.T) {
+	t.Parallel()
+	config, err := normalizeSystemConfig(SystemConfig{Features: FeatureConfig{
+		DisableIPv4: true,
+		DisableIPv6: true,
+	}})
+	if err != nil {
+		t.Fatalf("normalizeSystemConfig() error = %v", err)
+	}
+	_, report := normalizeDefaultTunOpts(config, sysnet.DefaultTunOpts{})
 	if len(report.Issues) != 1 || report.Issues[0].Reason != sysnet.ReasonAddressFamilyUnavailable {
 		t.Fatalf("issues = %+v", report.Issues)
 	}
@@ -149,7 +180,8 @@ func TestRuleContexts(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := system.CheckRule(test.rule, test.context).Err()
+			_, report := normalizeRule(system.policyConfig(), test.rule, test.context)
+			err := report.Err()
 			if (err == nil) != test.valid {
 				t.Fatalf("CheckRule() error = %v, valid = %v", err, test.valid)
 			}

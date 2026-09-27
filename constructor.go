@@ -21,15 +21,17 @@ func newSystem(config SystemConfig, dependencies systemDependencies) (*System, e
 		dependencies: dependencies,
 		probeFacts:   initialProbeFacts(),
 		support:      dependencies.capabilityCode,
-		journal:      &reconcile.Journal{},
+		journal:      reconcile.NewJournal(normalized.operationTimeout),
 	}
-	system.worker = reconcile.NewWorker(context.Background(), system.journal, nil, system.handleReconcileFailure)
 	if system.support == (implementationSupport{}) {
 		system.support = currentImplementationSupport()
 	}
 	if dependencies.capabilityProbe != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), normalized.operationTimeout)
 		system.probeFacts = dependencies.capabilityProbe.Probe(ctx)
+		if err := ctx.Err(); err != nil {
+			system.probeFacts = failedProbeFacts(err)
+		}
 		cancel()
 	}
 	if err := system.transitionLocked(lifecycleReady); err != nil {

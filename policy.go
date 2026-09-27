@@ -103,7 +103,16 @@ func normalizeDefaultTunOpts(config normalizedSystemConfig, opts sysnet.DefaultT
 
 	family := familyForPrefixes(tunState.addresses, tunState.routes)
 	if family == sysnet.FamilyNone {
-		family = enabledFamily(config)
+		family = defaultTunFamily(config)
+		if family == sysnet.FamilyNone {
+			report.Issues = append(report.Issues, validationIssue(
+				"DefaultTun.TunAddrs",
+				sysnet.CapabilityUnsupported,
+				sysnet.ReasonAddressFamilyUnavailable,
+				"no address family is enabled",
+				nil,
+			))
+		}
 	}
 	routingKey := sysnet.RoutingProfileKey{Family: family, Mode: sysnet.RoutingExclude}
 	excludes := make([]normalizedRule, 0, len(opts.Exclude))
@@ -145,11 +154,11 @@ func normalizePrefixes(config normalizedSystemConfig, raw []string, path string,
 			))
 			continue
 		}
-		if issue := validateFamily(config, prefix.Addr(), itemPath); issue != nil {
-			report.Issues = append(report.Issues, *issue)
+		if prefix.Addr().IsLoopback() {
 			continue
 		}
-		if prefix.Addr().IsLoopback() {
+		if issue := validateFamily(config, prefix.Addr(), itemPath); issue != nil {
+			report.Issues = append(report.Issues, *issue)
 			continue
 		}
 		if kind == prefixRoute {
@@ -185,7 +194,7 @@ func normalizeDNSIP(raw string, addresses []netip.Prefix) (netip.Addr, sysnet.Va
 		address, err := netip.ParseAddr(strings.TrimSpace(raw))
 		if err == nil {
 			for _, prefix := range addresses {
-				if prefix.Contains(address) {
+				if prefix.Addr() == address {
 					return address, sysnet.ValidationReport{}
 				}
 			}
@@ -195,6 +204,16 @@ func normalizeDNSIP(raw string, addresses []netip.Prefix) (netip.Addr, sysnet.Va
 		return addresses[0].Addr(), sysnet.ValidationReport{}
 	}
 	return netip.Addr{}, sysnet.ValidationReport{}
+}
+
+func defaultTunFamily(config normalizedSystemConfig) sysnet.AddressFamily {
+	if config.ipv4 {
+		return sysnet.FamilyIPv4
+	}
+	if config.ipv6 {
+		return sysnet.FamilyIPv6
+	}
+	return sysnet.FamilyNone
 }
 
 func normalizeRule(config normalizedSystemConfig, rule sysnet.Rule, context sysnet.RuleContext) (normalizedRule, sysnet.ValidationReport) {
@@ -352,19 +371,6 @@ func familyForPrefixes(groups ...[]netip.Prefix) sysnet.AddressFamily {
 	case hasIPv4:
 		return sysnet.FamilyIPv4
 	case hasIPv6:
-		return sysnet.FamilyIPv6
-	default:
-		return sysnet.FamilyNone
-	}
-}
-
-func enabledFamily(config normalizedSystemConfig) sysnet.AddressFamily {
-	switch {
-	case config.ipv4 && config.ipv6:
-		return sysnet.FamilyDual
-	case config.ipv4:
-		return sysnet.FamilyIPv4
-	case config.ipv6:
 		return sysnet.FamilyIPv6
 	default:
 		return sysnet.FamilyNone

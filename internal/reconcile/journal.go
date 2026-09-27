@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
+
+const rollbackTimeout = 30 * time.Second
 
 // ExpectedState tells a verification operation which exact state to read back.
 type ExpectedState uint8
@@ -21,7 +24,8 @@ type Operation func(context.Context) error
 // Verification reads native state independently of the mutation operation.
 type Verification func(context.Context, ExpectedState) error
 
-// Entry is one reversible resource mutation. Inverse must affect only Key.
+// Entry is one reversible resource mutation. Inverse must affect only Key and
+// must restore the pre-apply state even when Apply returns an error.
 type Entry struct {
 	Key     OwnershipKey
 	Apply   Operation
@@ -50,8 +54,14 @@ func RequiresRecovery(err error) bool {
 
 // Journal stores only mutations which can still own native state.
 type Journal struct {
-	mu      sync.Mutex
-	entries []Entry
+	mu             sync.Mutex
+	entries        []Entry
+	cleanupTimeout time.Duration
+}
+
+// NewJournal creates an ownership journal with a bounded rollback timeout.
+func NewJournal(cleanupTimeout time.Duration) *Journal {
+	return &Journal{cleanupTimeout: cleanupTimeout}
 }
 
 // Apply performs and verifies all entries. It undoes this transaction in exact
@@ -68,10 +78,12 @@ func (j *Journal) Apply(ctx context.Context, entries []Entry) error {
 		if err := ctx.Err(); err != nil {
 			return j.fail(ctx, err, completed)
 		}
+		// An OS call can change native state before it reports an error. Include
+		// the current entry before Apply so every uncertain mutation is undone.
+		completed = append(completed, entry)
 		if err := entry.Apply(ctx); err != nil {
 			return j.fail(ctx, fmt.Errorf("apply resource %v: %w", entry.Key, err), completed)
 		}
-		completed = append(completed, entry)
 		if err := entry.Verify(ctx, ExpectedApplied); err != nil {
 			return j.fail(ctx, fmt.Errorf("verify applied resource %v: %w", entry.Key, err), completed)
 		}
@@ -81,7 +93,15 @@ func (j *Journal) Apply(ctx context.Context, entries []Entry) error {
 }
 
 func (j *Journal) fail(ctx context.Context, primary error, completed []Entry) error {
-	remaining, cleanupErr := undo(ctx, completed)
+	// Request cancellation stops forward progress, but it must not also disable
+	// rollback. Preserve context values and give cleanup its own bounded time.
+	timeout := j.cleanupTimeout
+	if timeout <= 0 {
+		timeout = rollbackTimeout
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	remaining, cleanupErr := undo(cleanupCtx, completed)
 	if len(remaining) != 0 {
 		j.entries = append(j.entries, remaining...)
 	}

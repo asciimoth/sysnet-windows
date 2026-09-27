@@ -37,9 +37,7 @@ func TestJournalFailurePointsUndoExactResourcesInReverse(t *testing.T) {
 					t.Fatalf("journal length = %d, want 0", got)
 				}
 				completed := failIndex
-				if failPhase == "verify" {
-					completed++
-				}
+				completed++
 				var wantUndo []string
 				for index := completed - 1; index >= 0; index-- {
 					wantUndo = append(wantUndo, fmt.Sprintf("owned-%d", index))
@@ -49,6 +47,67 @@ func TestJournalFailurePointsUndoExactResourcesInReverse(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestJournalRollsBackApplyThatMutatesBeforeFailure(t *testing.T) {
+	t.Parallel()
+	host := newFakeHost("foreign")
+	entry := host.entry("owned", "", -1, 0)
+	applyErr := errors.New("apply failed after mutation")
+	entry.Apply = func(context.Context) error {
+		host.mu.Lock()
+		defer host.mu.Unlock()
+		host.events = append(host.events, "apply:owned")
+		host.resources["owned"] = true
+		return applyErr
+	}
+
+	journal := &Journal{}
+	err := journal.Apply(context.Background(), []Entry{entry})
+	if !errors.Is(err, applyErr) {
+		t.Fatalf("Apply() error = %v, want apply failure", err)
+	}
+	if RequiresRecovery(err) {
+		t.Fatalf("RequiresRecovery() = true after verified rollback: %v", err)
+	}
+	if got := host.resourceNames(); !reflect.DeepEqual(got, []string{"foreign"}) {
+		t.Fatalf("host resources = %v, want foreign sentinel only", got)
+	}
+}
+
+func TestJournalRollbackHasFreshBoundedContext(t *testing.T) {
+	t.Parallel()
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	cleanupContextActive := false
+	entry := Entry{
+		Key: OwnershipKey{Kind: KindRoute, ID: "owned"},
+		Apply: func(context.Context) error {
+			cancelRequest()
+			return context.Canceled
+		},
+		Inverse: func(ctx context.Context) error {
+			cleanupContextActive = ctx.Err() == nil
+			_, hasDeadline := ctx.Deadline()
+			if !hasDeadline {
+				return errors.New("cleanup context has no deadline")
+			}
+			return nil
+		},
+		Verify: func(ctx context.Context, expected ExpectedState) error {
+			if expected != ExpectedUndone || ctx.Err() != nil {
+				return errors.New("cleanup verification context is canceled")
+			}
+			return nil
+		},
+	}
+
+	err := (&Journal{}).Apply(requestCtx, []Entry{entry})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Apply() error = %v, want canceled", err)
+	}
+	if !cleanupContextActive {
+		t.Fatal("rollback received a canceled context")
 	}
 }
 
