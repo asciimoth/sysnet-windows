@@ -355,6 +355,134 @@ func TestJournalRetainsNestedRecoveryAfterSuccessfulReadback(t *testing.T) {
 	}
 }
 
+func TestJournalRetainsPrimaryRecoveryForExplicitRetry(t *testing.T) {
+	t.Parallel()
+	for _, phase := range []string{"apply", "verify-applied"} {
+		phase := phase
+		for _, wrap := range []string{"direct", "wrapped", "joined"} {
+			wrap := wrap
+			t.Run(phase+"/"+wrap, func(t *testing.T) {
+				t.Parallel()
+				nested := error(&Failure{
+					err:              errors.New("dependent ownership is uncertain"),
+					recoveryRequired: true,
+				})
+				switch wrap {
+				case "wrapped":
+					nested = fmt.Errorf("dependency operation: %w", nested)
+				case "joined":
+					nested = errors.Join(errors.New("primary operation failed"), nested)
+				}
+
+				applied := false
+				inverseCalls := 0
+				verifyUndoneCalls := 0
+				journal := &Journal{}
+				entry := Entry{
+					Key: OwnershipKey{Kind: KindRoute, ID: phase + "-" + wrap},
+					Apply: func(context.Context) error {
+						applied = true
+						if phase == "apply" {
+							return nested
+						}
+						return nil
+					},
+					Inverse: func(context.Context) error {
+						inverseCalls++
+						applied = false
+						return nil
+					},
+					Verify: func(_ context.Context, expected ExpectedState) error {
+						if expected == ExpectedApplied && phase == "verify-applied" {
+							return nested
+						}
+						if expected == ExpectedUndone {
+							verifyUndoneCalls++
+							if applied {
+								return errors.New("resource remains applied")
+							}
+						}
+						return nil
+					},
+				}
+
+				err := journal.Apply(context.Background(), []Entry{entry})
+				if !RequiresRecovery(err) || !journal.RecoveryRequired() {
+					t.Fatalf("Apply() error = %v, want retained recovery state", err)
+				}
+				if got := journal.Len(); got != 1 {
+					t.Fatalf("journal length = %d, want one retry target", got)
+				}
+
+				next := entry
+				next.Key.ID += "-blocked"
+				next.Apply = func(context.Context) error {
+					t.Fatal("blocked transaction applied")
+					return nil
+				}
+				if err := journal.Apply(context.Background(), []Entry{next}); !errors.Is(err, ErrRecoveryRequired) || !RequiresRecovery(err) {
+					t.Fatalf("blocked Apply() error = %v, want recovery required", err)
+				}
+
+				if err := journal.UndoAll(context.Background()); err != nil {
+					t.Fatalf("UndoAll() retry error = %v", err)
+				}
+				if inverseCalls != 2 || verifyUndoneCalls != 2 {
+					t.Fatalf("retry calls = inverse %d, verify %d; want 2 each", inverseCalls, verifyUndoneCalls)
+				}
+				if journal.RecoveryRequired() || journal.Len() != 0 {
+					t.Fatalf("successful retry left recovery state or ownership")
+				}
+			})
+		}
+	}
+}
+
+func TestJournalRetainsWholeTransactionAfterPrimaryRecovery(t *testing.T) {
+	t.Parallel()
+	nested := &Failure{err: errors.New("dependency state is uncertain"), recoveryRequired: true}
+	resources := map[string]bool{}
+	var events []string
+	entry := func(name string, applyErr error) Entry {
+		return Entry{
+			Key: OwnershipKey{Kind: KindRoute, ID: name},
+			Apply: func(context.Context) error {
+				resources[name] = true
+				return applyErr
+			},
+			Inverse: func(context.Context) error {
+				events = append(events, "undo:"+name)
+				delete(resources, name)
+				return nil
+			},
+			Verify: func(_ context.Context, expected ExpectedState) error {
+				if resources[name] != (expected == ExpectedApplied) {
+					return errors.New("readback mismatch")
+				}
+				return nil
+			},
+		}
+	}
+	journal := &Journal{}
+	err := journal.Apply(context.Background(), []Entry{
+		entry("first", nil),
+		entry("second", nested),
+	})
+	if !RequiresRecovery(err) || journal.Len() != 2 {
+		t.Fatalf("Apply() error = %v, journal length = %d; want two recovery targets", err, journal.Len())
+	}
+	if !reflect.DeepEqual(events, []string{"undo:second", "undo:first"}) {
+		t.Fatalf("initial rollback events = %v", events)
+	}
+	events = nil
+	if err := journal.UndoAll(context.Background()); err != nil {
+		t.Fatalf("UndoAll() error = %v", err)
+	}
+	if !reflect.DeepEqual(events, []string{"undo:second", "undo:first"}) {
+		t.Fatalf("retry events = %v", events)
+	}
+}
+
 func TestRequiresRecoverySearchesCompleteErrorTree(t *testing.T) {
 	t.Parallel()
 	plain := errors.New("plain failure")

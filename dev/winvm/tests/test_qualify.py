@@ -13,11 +13,26 @@ SCRIPT = Path(__file__).parents[1] / "tools" / "qualify.py"
 REVISION = "a" * 40
 SOURCE_HASH = "b" * 64
 LOCKS = {"goMod": "c" * 64, "goSum": "d" * 64}
+NATIVE_TEST = "example.test/native::TestNative"
+LIVE_TESTS = [
+    "example.test/integration::TestDriverLifecycle",
+    "example.test/integration::TestOwnedNetworkingCleanup",
+    "example.test/integration::TestDNSConfigurationRestoration",
+    "example.test/integration::TestSystemCloseAfterSplitResetFailure",
+]
+FLOW_TESTS = [
+    "example.test/integration::TestPacketFlowPublicAPI",
+    "example.test/integration::TestPacketFlowUnderlayBypass",
+]
 
 
 class QualificationTest(unittest.TestCase):
     def run_validator(
-        self, mutate=None, driver_lock_mutate=None, preexisting_output=None
+        self,
+        mutate=None,
+        driver_lock_mutate=None,
+        manifest_mutate=None,
+        preexisting_output=None,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -44,36 +59,20 @@ class QualificationTest(unittest.TestCase):
             }
             values = {
                 "native": {
-                    **common, "suite": "native-unit", "requiredTests": ["native"],
-                    "testResults": {"native": "pass"},
+                    **common, "suite": "native-unit", "requiredTests": [NATIVE_TEST],
+                    "testResults": {NATIVE_TEST: "pass"},
                 },
                 "live": {
                     **common,
                     "suite": "live-driver",
-                    "requiredTests": [
-                        "TestDriverLifecycle",
-                        "TestOwnedNetworkingCleanup",
-                        "TestDNSConfigurationRestoration",
-                        "TestSystemCloseAfterSplitResetFailure",
-                    ],
-                    "testResults": {
-                        "TestDriverLifecycle": "pass",
-                        "TestOwnedNetworkingCleanup": "pass",
-                        "TestDNSConfigurationRestoration": "pass",
-                        "TestSystemCloseAfterSplitResetFailure": "pass",
-                    },
+                    "requiredTests": LIVE_TESTS,
+                    "testResults": dict.fromkeys(LIVE_TESTS, "pass"),
                 },
                 "flow": {
                     **common,
                     "suite": "packet-flow",
-                    "requiredTests": [
-                        "TestPacketFlowPublicAPI",
-                        "TestPacketFlowUnderlayBypass",
-                    ],
-                    "testResults": {
-                        "TestPacketFlowPublicAPI": "pass",
-                        "TestPacketFlowUnderlayBypass": "pass",
-                    },
+                    "requiredTests": FLOW_TESTS,
+                    "testResults": dict.fromkeys(FLOW_TESTS, "pass"),
                 },
             }
             for name in ("live", "flow"):
@@ -101,22 +100,19 @@ class QualificationTest(unittest.TestCase):
             (root / "driver-lock.json").write_text(
                 json.dumps(driver_lock), encoding="utf-8"
             )
-            (root / "test-manifest.json").write_text(json.dumps({
+            test_manifest = {
                 "schemaVersion": 1,
                 "suites": {
-                    "native-unit": {"requiredTests": ["native"]},
-                    "live-driver": {"requiredTests": [
-                        "TestDriverLifecycle",
-                        "TestOwnedNetworkingCleanup",
-                        "TestDNSConfigurationRestoration",
-                        "TestSystemCloseAfterSplitResetFailure",
-                    ]},
-                    "packet-flow": {"requiredTests": [
-                        "TestPacketFlowPublicAPI",
-                        "TestPacketFlowUnderlayBypass",
-                    ]},
+                    "native-unit": {"requiredTests": [NATIVE_TEST]},
+                    "live-driver": {"requiredTests": LIVE_TESTS},
+                    "packet-flow": {"requiredTests": FLOW_TESTS},
                 },
-            }), encoding="utf-8")
+            }
+            if manifest_mutate:
+                manifest_mutate(test_manifest)
+            (root / "test-manifest.json").write_text(
+                json.dumps(test_manifest), encoding="utf-8"
+            )
             for name, value in values.items():
                 (root / f"{name}.json").write_text(json.dumps(value), encoding="utf-8")
             (root / "packets.json").write_text(json.dumps(packets), encoding="utf-8")
@@ -183,12 +179,29 @@ class QualificationTest(unittest.TestCase):
 
     def test_rejects_skipped_required_case(self):
         def mutate(_matrix, values, _packets):
-            values["native"]["testResults"]["native"] = "skip"
+            values["native"]["testResults"][NATIVE_TEST] = "skip"
 
         result, output = self.run_validator(mutate)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("was skipped", result.stderr)
         self.assertIsNone(output)
+
+    def test_rejects_invalid_or_duplicate_required_test_identity(self):
+        cases = [
+            ["TestNative"],
+            ["example.test/native::not-a-test"],
+            ["example.test/native package::TestNative"],
+            [NATIVE_TEST, NATIVE_TEST],
+        ]
+        for required_tests in cases:
+            with self.subTest(required_tests=required_tests):
+                def manifest_mutate(manifest):
+                    manifest["suites"]["native-unit"]["requiredTests"] = required_tests
+
+                result, output = self.run_validator(manifest_mutate=manifest_mutate)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("required native-unit test identity", result.stderr)
+                self.assertIsNone(output)
 
     def test_rejects_mismatched_source_identity(self):
         def mutate(_matrix, values, _packets):

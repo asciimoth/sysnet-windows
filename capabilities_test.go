@@ -255,6 +255,81 @@ func TestCapabilityConfigAndNetIOFacts(t *testing.T) {
 	}
 }
 
+func TestCapabilityReportContainsExactRoutingProfileMatrix(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	report := buildCapabilityReport(
+		defaultNormalizedSystemConfig(),
+		implementationSupport{
+			defaultTun: true, defaultTunDual: true,
+			exclusions: true, exclusionsDual: true,
+		},
+		capabilityProbeFacts{netIO: available, split: available},
+		lifecycleReady,
+	)
+	if err := report.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	families := []sysnet.AddressFamily{sysnet.FamilyIPv4, sysnet.FamilyIPv6, sysnet.FamilyDual}
+	modes := []sysnet.RoutingMode{sysnet.RoutingFull, sysnet.RoutingExclude, sysnet.RoutingInclude}
+	if got, want := len(report.DefaultTunProfiles), len(families)*len(modes)*2; got != want {
+		t.Fatalf("profile count = %d, want %d", got, want)
+	}
+	for _, family := range families {
+		for _, mode := range modes {
+			for _, strict := range []bool{false, true} {
+				key := sysnet.RoutingProfileKey{Family: family, Mode: mode, Strict: strict}
+				profile := report.DefaultTunProfile(key)
+				if profile.Key != key {
+					t.Errorf("profile lookup for %+v returned key %+v", key, profile.Key)
+					continue
+				}
+				want := sysnet.CapabilityAvailable
+				if strict || mode == sysnet.RoutingInclude {
+					want = sysnet.CapabilityUnsupported
+				}
+				if profile.State != want {
+					t.Errorf("profile %+v state = %v, want %v", key, profile.State, want)
+				}
+				if strict && !containsReason(profile.Reasons, sysnet.ReasonNotImplemented) {
+					t.Errorf("strict profile %+v reasons = %v, want not implemented", key, profile.Reasons)
+				}
+			}
+		}
+	}
+}
+
+func TestStrictProfileValidationIsNeverUnknown(t *testing.T) {
+	t.Parallel()
+	system, err := newSystem(SystemConfig{}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	for _, test := range []struct {
+		name string
+		opts sysnet.DefaultTunOpts
+	}{
+		{name: "full", opts: sysnet.DefaultTunOpts{Strict: true}},
+		{name: "exclude", opts: sysnet.DefaultTunOpts{Strict: true, Exclude: []sysnet.Rule{{Type: ruleExecutableTree, Rule: `C:\app.exe`}}}},
+		{name: "include", opts: sysnet.DefaultTunOpts{Strict: true, Include: []sysnet.Rule{{Type: ruleExecutableTree, Rule: `C:\app.exe`}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			report := system.CheckDefaultTunOpts(test.opts)
+			if err := report.Err(); !errors.Is(err, sysnet.ErrNotSupported) {
+				t.Fatalf("validation error = %v, want not supported", err)
+			}
+			if errors.Is(report.Err(), sysnet.ErrCapabilityUnknown) {
+				t.Fatalf("validation error = %v, must not contain capability unknown", report.Err())
+			}
+			for _, issue := range report.Issues {
+				if issue.Path == "DefaultTun.Profile" && issue.State != sysnet.CapabilityUnsupported {
+					t.Errorf("profile issue = %+v, want unsupported", issue)
+				}
+			}
+		})
+	}
+}
+
 func TestCapabilitySnapshotCopyRevisionAndConcurrency(t *testing.T) {
 	t.Parallel()
 	available := sysnet.Capability{State: sysnet.CapabilityAvailable}

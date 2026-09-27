@@ -182,6 +182,7 @@
                     jq
                     openssh
                     python3
+                    powershell
                     qemu-utils
                     shellcheck
                     util-linux
@@ -246,6 +247,7 @@
                 openssh
                 OVMF
                 python3
+                powershell
                 qemu
                 util-linux
                 xorriso

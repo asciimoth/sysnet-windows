@@ -10,8 +10,15 @@ export PYTHONPYCACHEPREFIX="$tmp/pycache"
 "$script_dir/doctor.sh" --validate >/dev/null
 jq -e '.schemaVersion==1 and (.suites | keys==["live-driver","native-unit","packet-flow"]) and ([.suites[].requiredTests[]]|all(type=="string" and length>0)) and ([.suites[].plannedCases[]]|all(type=="string" and length>0))' "$script_dir/test-manifest.json" >/dev/null
 while IFS= read -r test_name; do
-    rg -q "^func ${test_name}\\(t \\*testing\\.T\\)" "$root" --glob '*_test.go' || {
-        printf 'required test does not exist: %s\n' "$test_name" >&2
+    [[ $test_name =~ ^([^[:space:]:]+)::(Test[[:alnum:]_]+)$ ]] || {
+        printf 'required test identity is invalid: %s\n' "$test_name" >&2
+        exit 1
+    }
+    package_path=${BASH_REMATCH[1]}
+    function_name=${BASH_REMATCH[2]}
+    package_dir=$(cd -- "$root" && go list -f '{{.Dir}}' "$package_path")
+    rg -q --max-depth 1 "^func ${function_name}\\(t \\*testing\\.T\\)" "$package_dir" --glob '*_test.go' || {
+        printf 'required test does not exist in %s: %s\n' "$package_path" "$function_name" >&2
         exit 1
     }
 done < <(jq -r '.suites[].requiredTests[]' "$script_dir/test-manifest.json")
@@ -22,6 +29,7 @@ python3 -m py_compile "$script_dir/tools/qualify.py"
 python3 "$script_dir/tests/test_flow_pcap.py"
 python3 "$script_dir/tests/test_wintun_input.py"
 python3 "$script_dir/tests/test_qualify.py"
+pwsh -NoLogo -NoProfile -NonInteractive -File "$script_dir/tests/test-output.tests.ps1"
 shellcheck "$script_dir"/*.sh "$script_dir/tests"/*.sh
 
 # Test commands retain JSON events while formatting their console output.

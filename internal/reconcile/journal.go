@@ -149,10 +149,17 @@ func (j *Journal) fail(ctx context.Context, primary error, completed []Entry) er
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
 	remaining, cleanupErr := j.undoLocked(cleanupCtx, completed)
+	primaryRecovery := RequiresRecovery(primary)
+	if primaryRecovery {
+		// The primary failure can describe uncertain ownership outside the
+		// current operation. Keep this transaction as an exact retry target even
+		// when readback proved its direct mutations were undone.
+		remaining = append([]Entry(nil), completed...)
+	}
 	if len(remaining) != 0 {
 		j.entries = append(j.entries, remaining...)
 	}
-	recoveryRequired := len(remaining) != 0 || RequiresRecovery(cleanupErr)
+	recoveryRequired := primaryRecovery || len(remaining) != 0 || RequiresRecovery(cleanupErr)
 	if recoveryRequired {
 		j.recoveryNeeded = true
 	}

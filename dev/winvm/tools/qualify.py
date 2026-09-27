@@ -37,6 +37,21 @@ def expected_installed_signer(value):
     )
 
 
+def required_test_identities(test_manifest, suite):
+    identities = test_manifest["suites"][suite]["requiredTests"]
+    if not isinstance(identities, list) or not identities:
+        raise ValueError(f"test manifest has no required {suite} tests")
+    if not all(
+        isinstance(identity, str)
+        and re.fullmatch(r"[^:\s]+::Test[0-9A-Za-z_]+", identity)
+        for identity in identities
+    ):
+        raise ValueError(f"test manifest has an invalid required {suite} test identity")
+    if len(set(identities)) != len(identities):
+        raise ValueError(f"test manifest duplicates a required {suite} test identity")
+    return set(identities)
+
+
 def check_evidence(path, value, suite, entry, revision):
     if value.get("schemaVersion") != 1:
         raise ValueError(f"{path}: unsupported evidence schema")
@@ -159,9 +174,7 @@ def main():
         if driver.get("finalState") != "Stopped":
             raise ValueError(f"{suite}: driver service was not stopped")
     for suite in ("native-unit", "live-driver", "packet-flow"):
-        required_tests = set(test_manifest["suites"][suite]["requiredTests"])
-        if not required_tests:
-            raise ValueError(f"test manifest has no required {suite} tests")
+        required_tests = required_test_identities(test_manifest, suite)
         if not required_tests.issubset(evidence[suite].get("requiredTests", [])):
             raise ValueError(f"{suite}: required tests did not pass")
         test_results = evidence[suite].get("testResults", {})

@@ -61,18 +61,29 @@ function Get-DependencyLockEvidence([string]$SourceRoot) {
 
 function Get-RequiredTestResults([object[]]$Events, [string[]]$RequiredTests) {
     $results = [ordered]@{}
-    foreach ($test in $RequiredTests) {
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($identity in $RequiredTests) {
+        if ($identity -notmatch '^(?<Package>[^:\s]+)::(?<Test>Test[A-Za-z0-9_]+)$') {
+            throw "Required test identity is invalid: $identity"
+        }
+        if (-not $seen.Add($identity)) {
+            throw "Required test identity is duplicated: $identity"
+        }
+        $package = $Matches.Package
+        $test = $Matches.Test
         if ($Events | Where-Object {
+                $_.PSObject.Properties['Package'] -and $_.Package -eq $package -and
                 $_.PSObject.Properties['Test'] -and $_.Test -eq $test -and $_.Action -eq 'skip'
             }) {
-            throw "$test was skipped"
+            throw "$identity was skipped"
         }
         if (-not ($Events | Where-Object {
+                    $_.PSObject.Properties['Package'] -and $_.Package -eq $package -and
                     $_.PSObject.Properties['Test'] -and $_.Test -eq $test -and $_.Action -eq 'pass'
                 })) {
-            throw "$test has no pass event"
+            throw "$identity has no pass event"
         }
-        $results[$test] = 'pass'
+        $results[$identity] = 'pass'
     }
     return $results
 }

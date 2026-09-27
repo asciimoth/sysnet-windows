@@ -178,6 +178,14 @@ func buildCapabilityReport(
 				Key:        sysnet.RoutingProfileKey{Family: family, Mode: sysnet.RoutingFull, Strict: true},
 				Capability: unsupported(sysnet.ReasonNotImplemented, "strict routing is not implemented"),
 			},
+			sysnet.DefaultTunProfile{
+				Key:        sysnet.RoutingProfileKey{Family: family, Mode: sysnet.RoutingExclude, Strict: true},
+				Capability: unsupported(sysnet.ReasonNotImplemented, "strict routing is not implemented"),
+			},
+			sysnet.DefaultTunProfile{
+				Key:        sysnet.RoutingProfileKey{Family: family, Mode: sysnet.RoutingInclude, Strict: true},
+				Capability: unsupported(sysnet.ReasonNotImplemented, "strict routing is not implemented"),
+			},
 		)
 	}
 

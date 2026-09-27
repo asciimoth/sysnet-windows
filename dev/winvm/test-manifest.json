@@ -3,7 +3,7 @@
   "suites": {
     "native-unit": {
       "requiredTests": [
-        "TestNativeNoResourceSmoke"
+        "github.com/asciimoth/sysnet-windows::TestNativeNoResourceSmoke"
       ],
       "plannedCases": [
         "M1 native Wintun and NetIO cases",
