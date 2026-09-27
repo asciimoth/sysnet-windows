@@ -28,7 +28,9 @@ func Decode(datagram []byte) ([]byte, error) {
 }
 
 // Reply creates the controlled peer's reply to a TCP or UDP IP packet.
-// It supports packets without IP fragmentation or IPv6 extension headers.
+// It supports standard TCP handshake, data, and close packets. It does not
+// support TCP Fast Open, simultaneous open, IP fragmentation, or IPv6
+// extension headers.
 func Reply(packet []byte) ([]byte, bool) {
 	result := append([]byte(nil), packet...)
 	transport, protocol, pseudo, ok := prepareIPReply(result)
@@ -81,6 +83,9 @@ func prepareIPReply(packet []byte) ([]byte, byte, []byte, bool) {
 		packet[15], packet[19] = packet[19], packet[15]
 		packet[8] = 64
 		packet[10], packet[11] = 0, 0
+		for index := 20; index < headerLength; index++ {
+			packet[index] = 1 // NOP disables untrusted IPv4 options.
+		}
 		binary.BigEndian.PutUint16(packet[10:12], checksum(nil, packet[:headerLength]))
 		transport := packet[headerLength:]
 		pseudo := make([]byte, 12)
@@ -133,33 +138,44 @@ func replyTCP(packet []byte) bool {
 		return false
 	}
 	flags := packet[13]
-	if flags&0x04 != 0 {
+	payload := append([]byte(nil), packet[headerLength:]...)
+	hasSYN := flags&0x02 != 0
+	hasFIN := flags&0x01 != 0
+	// The controlled peer does not implement simultaneous open or TCP Fast
+	// Open. Reject those packets instead of returning a SYN reply with invalid
+	// sequence accounting or unintended payload.
+	if flags&0x04 != 0 || hasSYN && (flags&0x10 != 0 || hasFIN || len(payload) != 0) {
 		return false
 	}
 	sequence := binary.BigEndian.Uint32(packet[4:8])
 	acknowledgment := binary.BigEndian.Uint32(packet[8:12])
-	payload := append([]byte(nil), packet[headerLength:]...)
 	packet[0], packet[2] = packet[2], packet[0]
 	packet[1], packet[3] = packet[3], packet[1]
 	packet[12] = byte(headerLength/4) << 4
 	binary.BigEndian.PutUint16(packet[14:16], 0xffff)
+	for index := 20; index < headerLength; index++ {
+		packet[index] = 1 // NOP disables untrusted client options.
+	}
 	switch {
-	case flags&0x02 != 0 && flags&0x10 == 0:
-		for index := 20; index < headerLength; index++ {
-			packet[index] = 1 // NOP disables untrusted client options.
-		}
+	case hasSYN:
 		binary.BigEndian.PutUint32(packet[4:8], 0x10203040)
 		binary.BigEndian.PutUint32(packet[8:12], sequence+1)
 		packet[13] = 0x12
-	case len(payload) != 0:
+	case len(payload) != 0 || hasFIN:
+		sequenceAdvance := uint32(len(payload))
+		if hasFIN {
+			sequenceAdvance++
+		}
 		binary.BigEndian.PutUint32(packet[4:8], acknowledgment)
-		binary.BigEndian.PutUint32(packet[8:12], sequence+uint32(len(payload)))
-		packet[13] = 0x18
+		binary.BigEndian.PutUint32(packet[8:12], sequence+sequenceAdvance)
+		packet[13] = 0x10
+		if len(payload) != 0 {
+			packet[13] |= 0x08
+		}
+		if hasFIN {
+			packet[13] |= 0x01
+		}
 		copy(packet[headerLength:], payload)
-	case flags&0x01 != 0:
-		binary.BigEndian.PutUint32(packet[4:8], acknowledgment)
-		binary.BigEndian.PutUint32(packet[8:12], sequence+1)
-		packet[13] = 0x11
 	default:
 		return false
 	}
