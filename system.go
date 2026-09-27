@@ -17,18 +17,19 @@ import (
 
 // System is the Windows implementation of the gonnect system contract.
 type System struct {
-	mu           sync.RWMutex
-	state        lifecycleState
-	config       normalizedSystemConfig
-	dependencies systemDependencies
-	capabilities capabilityModel
-	probeFacts   capabilityProbeFacts
-	support      implementationSupport
-	journal      *reconcile.Journal
-	worker       *reconcile.Worker
-	resources    reconcile.Resources
-	closeOnce    sync.Once
-	closeErr     error
+	mu              sync.RWMutex
+	state           lifecycleState
+	config          normalizedSystemConfig
+	dependencies    systemDependencies
+	capabilities    capabilityModel
+	probeFacts      capabilityProbeFacts
+	support         implementationSupport
+	journal         *reconcile.Journal
+	worker          *reconcile.Worker
+	resources       reconcile.Resources
+	closeOnce       sync.Once
+	closeErr        error
+	probeGeneration uint64
 }
 
 // This assertion intentionally uses the selected gonnect version. In older
@@ -405,6 +406,15 @@ func (s *System) finalPreflight() (sysnet.CapabilityReport, error) {
 		}
 		return s.capabilities.snapshot(), nil
 	}
+	s.mu.Lock()
+	if err := s.acceptingWorkLocked(); err != nil {
+		s.mu.Unlock()
+		return sysnet.CapabilityReport{}, err
+	}
+	s.probeGeneration++
+	probeGeneration := s.probeGeneration
+	s.mu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.operationTimeout)
 	facts := runCapabilityProbe(ctx, s.dependencies.capabilityProbe)
 	cancel()
@@ -412,6 +422,15 @@ func (s *System) finalPreflight() (sysnet.CapabilityReport, error) {
 	defer s.mu.Unlock()
 	if err := s.acceptingWorkLocked(); err != nil {
 		return sysnet.CapabilityReport{}, err
+	}
+	if probeGeneration != s.probeGeneration {
+		return sysnet.CapabilityReport{}, validationError(validationIssue(
+			"System.CapabilityProbe",
+			sysnet.CapabilityUnavailable,
+			sysnet.ReasonResourceBusy,
+			"capability probe was superseded by a newer preflight",
+			nil,
+		))
 	}
 	s.probeFacts = facts
 	s.rebuildCapabilitiesLocked()

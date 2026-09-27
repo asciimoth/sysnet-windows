@@ -341,7 +341,7 @@ func TestCapabilityProbeDeadlineDoesNotDependOnProbeCooperation(t *testing.T) {
 	}
 }
 
-func TestFinalPreflightReturnsItsOwnCapabilitySnapshot(t *testing.T) {
+func TestFinalPreflightRejectsSupersededResult(t *testing.T) {
 	t.Parallel()
 	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
 	busy := unavailableCapability(sysnet.ReasonResourceBusy)
@@ -353,9 +353,10 @@ func TestFinalPreflightReturnsItsOwnCapabilitySnapshot(t *testing.T) {
 		case 1:
 			return capabilityProbeFacts{netIO: available, split: available}
 		case 2:
+			facts := capabilityProbeFacts{netIO: available, split: available}
 			close(firstStarted)
 			<-releaseFirst
-			return capabilityProbeFacts{netIO: available, split: available}
+			return facts
 		default:
 			return capabilityProbeFacts{netIO: busy, split: available}
 		}
@@ -367,11 +368,9 @@ func TestFinalPreflightReturnsItsOwnCapabilitySnapshot(t *testing.T) {
 		t.Fatalf("newSystem() error = %v", err)
 	}
 	t.Cleanup(func() { _ = system.Close() })
-	firstResult := make(chan sysnet.CapabilityReport, 1)
 	firstErr := make(chan error, 1)
 	go func() {
-		report, err := system.finalPreflight()
-		firstResult <- report
+		_, err := system.finalPreflight()
 		firstErr <- err
 	}()
 	<-firstStarted
@@ -380,19 +379,221 @@ func TestFinalPreflightReturnsItsOwnCapabilitySnapshot(t *testing.T) {
 		t.Fatalf("second finalPreflight() error = %v", err)
 	}
 	close(releaseFirst)
-	first := <-firstResult
-	if err := <-firstErr; err != nil {
-		t.Fatalf("first finalPreflight() error = %v", err)
+	if err := <-firstErr; !isSupersededProbeError(err) {
+		t.Fatalf("first finalPreflight() error = %v, want superseded probe", err)
 	}
 
 	key := operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4)
-	if got := first.Operation(key).State; got != sysnet.CapabilityAvailable {
-		t.Fatalf("first snapshot state = %v, want available", got)
-	}
 	secondCapability := second.Operation(key)
 	if secondCapability.State != sysnet.CapabilityUnavailable || !containsReason(secondCapability.Reasons, sysnet.ReasonResourceBusy) {
 		t.Fatalf("second snapshot capability = %+v, want busy", secondCapability)
 	}
+	capability := system.Capabilities().Operation(key)
+	if capability.State != sysnet.CapabilityUnavailable || !containsReason(capability.Reasons, sysnet.ReasonResourceBusy) {
+		t.Fatalf("capability after newer busy probe = %+v, want busy", capability)
+	}
+}
+
+func TestBuildTunRejectsSupersededPreflight(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	busy := unavailableCapability(sysnet.ReasonResourceBusy)
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var calls atomic.Int32
+	probe := capabilityProbeFunc(func(context.Context) capabilityProbeFacts {
+		switch calls.Add(1) {
+		case 1:
+			return capabilityProbeFacts{netIO: available, split: available}
+		case 2:
+			facts := capabilityProbeFacts{netIO: available, split: available}
+			close(firstStarted)
+			<-releaseFirst
+			return facts
+		default:
+			return capabilityProbeFacts{netIO: busy, split: available}
+		}
+	})
+	system, err := newSystem(SystemConfig{}, systemDependencies{
+		capabilityCode: implementationSupport{regularTun: true}, capabilityProbe: probe,
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	opts := sysnet.TunOpts{TunAddrs: []string{"192.0.2.1/24"}}
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := system.BuildTun(opts)
+		firstErr <- err
+	}()
+	<-firstStarted
+	if _, err := system.BuildTun(opts); !errors.Is(err, sysnet.ErrUnavailable) {
+		t.Fatalf("newer BuildTun() error = %v, want unavailable", err)
+	}
+	close(releaseFirst)
+	if err := <-firstErr; !isSupersededProbeError(err) {
+		t.Fatalf("older BuildTun() error = %v, want superseded probe", err)
+	}
+}
+
+func TestFinalPreflightRejectsOldResultWhileNewProbeIsPending(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	busy := unavailableCapability(sysnet.ReasonResourceBusy)
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var calls atomic.Int32
+	probe := capabilityProbeFunc(func(context.Context) capabilityProbeFacts {
+		switch calls.Add(1) {
+		case 1:
+			return capabilityProbeFacts{netIO: available, split: available}
+		case 2:
+			facts := capabilityProbeFacts{netIO: busy, split: available}
+			close(firstStarted)
+			<-releaseFirst
+			return facts
+		default:
+			facts := capabilityProbeFacts{netIO: available, split: available}
+			close(secondStarted)
+			<-releaseSecond
+			return facts
+		}
+	})
+	system, err := newSystem(SystemConfig{}, systemDependencies{
+		capabilityCode: implementationSupport{regularTun: true}, capabilityProbe: probe,
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := system.finalPreflight()
+		firstErr <- err
+	}()
+	<-firstStarted
+	secondErr := make(chan error, 1)
+	go func() {
+		_, err := system.finalPreflight()
+		secondErr <- err
+	}()
+	<-secondStarted
+	close(releaseFirst)
+	if err := <-firstErr; !isSupersededProbeError(err) {
+		t.Fatalf("first finalPreflight() error = %v, want superseded probe", err)
+	}
+
+	key := operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4)
+	if got := system.Capabilities().Operation(key).State; got != sysnet.CapabilityAvailable {
+		t.Fatalf("capability while newer probe is pending = %v, want initial available", got)
+	}
+	close(releaseSecond)
+	if err := <-secondErr; err != nil {
+		t.Fatalf("second finalPreflight() error = %v", err)
+	}
+	if got := system.Capabilities().Operation(key).State; got != sysnet.CapabilityAvailable {
+		t.Fatalf("capability after newer probe = %v, want available", got)
+	}
+}
+
+func TestFinalPreflightCloseSupersedesPendingProbe(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	probe := capabilityProbeFunc(func(context.Context) capabilityProbeFacts {
+		if calls.Add(1) == 1 {
+			return capabilityProbeFacts{netIO: available, split: available}
+		}
+		close(started)
+		<-release
+		return capabilityProbeFacts{netIO: available, split: available}
+	})
+	system, err := newSystem(SystemConfig{}, systemDependencies{
+		capabilityCode: implementationSupport{regularTun: true}, capabilityProbe: probe,
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	probeErr := make(chan error, 1)
+	go func() {
+		_, err := system.finalPreflight()
+		probeErr <- err
+	}()
+	<-started
+	if err := system.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	close(release)
+	if err := <-probeErr; !errors.Is(err, sysnet.ErrUnavailable) {
+		t.Fatalf("finalPreflight() error = %v, want unavailable", err)
+	}
+	key := operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4)
+	capability := system.Capabilities().Operation(key)
+	if capability.State != sysnet.CapabilityUnavailable || !containsReason(capability.Reasons, sysnet.ReasonSystemClosed) {
+		t.Fatalf("capability after close = %+v, want system closed", capability)
+	}
+}
+
+func TestFinalPreflightTimeoutCannotReplaceNewerProbeFacts(t *testing.T) {
+	t.Parallel()
+	const timeout = 20 * time.Millisecond
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	busy := unavailableCapability(sysnet.ReasonResourceBusy)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	probe := capabilityProbeFunc(func(context.Context) capabilityProbeFacts {
+		switch calls.Add(1) {
+		case 1:
+			return capabilityProbeFacts{netIO: available, split: available}
+		case 2:
+			close(started)
+			<-release
+			return capabilityProbeFacts{netIO: available, split: available}
+		default:
+			return capabilityProbeFacts{netIO: busy, split: available}
+		}
+	})
+	system, err := newSystem(SystemConfig{OperationTimeout: timeout}, systemDependencies{
+		capabilityCode: implementationSupport{regularTun: true}, capabilityProbe: probe,
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+
+	oldErr := make(chan error, 1)
+	go func() {
+		_, err := system.finalPreflight()
+		oldErr <- err
+	}()
+	<-started
+	if _, err := system.finalPreflight(); err != nil {
+		t.Fatalf("newer finalPreflight() error = %v", err)
+	}
+	if err := <-oldErr; !isSupersededProbeError(err) {
+		t.Fatalf("old finalPreflight() error = %v, want superseded probe", err)
+	}
+	close(release)
+
+	key := operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4)
+	capability := system.Capabilities().Operation(key)
+	if capability.State != sysnet.CapabilityUnavailable || !containsReason(capability.Reasons, sysnet.ReasonResourceBusy) {
+		t.Fatalf("capability after old probe timeout = %+v, want busy", capability)
+	}
+}
+
+func isSupersededProbeError(err error) bool {
+	var validationErr *sysnet.ValidationError
+	return errors.Is(err, sysnet.ErrUnavailable) && errors.As(err, &validationErr) &&
+		validationErr.Issue.Path == "System.CapabilityProbe" &&
+		validationErr.Issue.Reason == sysnet.ReasonResourceBusy
 }
 
 func TestFinalPreflightBoundsUncooperativeProbe(t *testing.T) {
