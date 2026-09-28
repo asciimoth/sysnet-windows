@@ -9,6 +9,8 @@
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT25HostAwareAllocation",
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT26ConcurrentAllocation",
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT27EnumerationFailureAfterSelection",
+        "github.com/asciimoth/sysnet-windows/internal/allocator::TestReplaceOwnedIPsAllowsDerivedOwnedRoutes",
+        "github.com/asciimoth/sysnet-windows/internal/allocator::TestReplaceOwnedIPsRejectsForeignRoutesInsideOwnedPrefix",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT04T06ExactManagerOwnedDeltaPreservesForeignRows",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT04T06ExactManagerRechecksValueImmediatelyBeforeDelete",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT04T06ExactManagerRejectsForeignDuplicateAndChangedOwnedValue",
@@ -35,7 +37,9 @@
         "github.com/asciimoth/sysnet-windows/integration::TestT07T09NativeNetIOMTUReadbackAndPacketBoundary",
         "github.com/asciimoth/sysnet-windows/integration::TestT10T12NativeWintunPacketContractAndMTUReport",
         "github.com/asciimoth/sysnet-windows/integration::TestT13T15NativeWintunCloseContract",
-        "github.com/asciimoth/sysnet-windows/integration::TestT16T24NativeRegularTunPublicLifecycle"
+        "github.com/asciimoth/sysnet-windows/integration::TestT16T24NativeRegularTunPublicLifecycle",
+        "github.com/asciimoth/sysnet-windows/integration::TestNativeRegularTunEnabledFamilyFloorCoversIPv6Mutations",
+        "github.com/asciimoth/sysnet-windows/integration::TestNativeRegularTunMutatesAddressesWithinOwnedSubnet"
       ],
       "plannedCases": [
         "M3 DNS configuration restoration",

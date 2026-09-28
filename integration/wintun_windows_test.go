@@ -486,6 +486,94 @@ func TestNativeRegularTunEnabledFamilyFloorCoversIPv6Mutations(t *testing.T) {
 	}
 }
 
+func TestNativeRegularTunMutatesAddressesWithinOwnedSubnet(t *testing.T) {
+	tests := []struct {
+		name     string
+		initial  string
+		mutate   func(*sysnetwindows.System, gtun.Tun) error
+		wantAddr []string
+	}{
+		{
+			name:    "add IPv4 address",
+			initial: "198.18.246.1/24",
+			mutate: func(system *sysnetwindows.System, device gtun.Tun) error {
+				return system.AddTunAddr(device, "198.18.246.2/24")
+			},
+			wantAddr: []string{"198.18.246.1/24", "198.18.246.2/24"},
+		},
+		{
+			name:    "set two IPv4 addresses",
+			initial: "198.18.247.1/24",
+			mutate: func(system *sysnetwindows.System, device gtun.Tun) error {
+				return system.SetTunAddrs(device, []string{"198.18.247.1/24", "198.18.247.2/24"})
+			},
+			wantAddr: []string{"198.18.247.1/24", "198.18.247.2/24"},
+		},
+		{
+			name:    "replace IPv4 address",
+			initial: "198.18.248.1/24",
+			mutate: func(system *sysnetwindows.System, device gtun.Tun) error {
+				return system.SetTunAddrs(device, []string{"198.18.248.2/24"})
+			},
+			wantAddr: []string{"198.18.248.2/24"},
+		},
+		{
+			name:    "change IPv4 prefix length",
+			initial: "198.18.249.1/24",
+			mutate: func(system *sysnetwindows.System, device gtun.Tun) error {
+				return system.SetTunAddrs(device, []string{"198.18.249.1/32"})
+			},
+			wantAddr: []string{"198.18.249.1/32"},
+		},
+		{
+			name:    "add IPv6 address",
+			initial: "fd00:18:250::1/64",
+			mutate: func(system *sysnetwindows.System, device gtun.Tun) error {
+				return system.AddTunAddr(device, "fd00:18:250::2/64")
+			},
+			wantAddr: []string{"fd00:18:250::1/64", "fd00:18:250::2/64"},
+		},
+		{
+			name:    "replace IPv6 address",
+			initial: "fd00:18:251::1/64",
+			mutate: func(system *sysnetwindows.System, device gtun.Tun) error {
+				return system.SetTunAddrs(device, []string{"fd00:18:251::2/64"})
+			},
+			wantAddr: []string{"fd00:18:251::2/64"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			guid, err := windows.GenerateGUID()
+			if err != nil {
+				t.Fatalf("GenerateGUID() error = %v", err)
+			}
+			system, err := sysnetwindows.New(sysnetwindows.SystemConfig{StableGUID: guid.String()})
+			if err != nil {
+				t.Fatalf("windows.New() error = %v", err)
+			}
+			t.Cleanup(func() { _ = system.Close() })
+			device, err := system.BuildTun(sysnet.TunOpts{
+				Name:     testAdapterName("same-subnet", guid),
+				TunAddrs: []string{test.initial},
+			})
+			if err != nil {
+				t.Fatalf("BuildTun() error = %v", err)
+			}
+			if err := test.mutate(system, device); err != nil {
+				t.Fatalf("address mutation in owned subnet error = %v", err)
+			}
+			got, err := system.GetTunAddrs(device)
+			if err != nil {
+				t.Fatalf("GetTunAddrs() error = %v", err)
+			}
+			if !slices.Equal(got, test.wantAddr) {
+				t.Fatalf("GetTunAddrs() = %v, want %v", got, test.wantAddr)
+			}
+		})
+	}
+}
+
 func TestT07T09NativeNetIOMTUReadbackAndPacketBoundary(t *testing.T) {
 	device := createNativeTun(t, "netio-mtu")
 	metadata := device.Metadata()

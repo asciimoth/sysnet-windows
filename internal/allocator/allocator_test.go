@@ -273,6 +273,155 @@ func TestReplaceOwnedIPsDistinguishesOwnedAndForeignPrefixes(t *testing.T) {
 	}
 }
 
+func TestReplaceOwnedIPsAllowsDerivedOwnedRoutes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		oldPrefix  netip.Prefix
+		newPrefix  netip.Prefix
+		ownedRoute netip.Prefix
+	}{
+		{
+			name:       "IPv4 on-link route",
+			oldPrefix:  netip.MustParsePrefix("10.21.1.1/16"),
+			newPrefix:  netip.MustParsePrefix("10.21.2.1/16"),
+			ownedRoute: netip.MustParsePrefix("10.21.0.0/16"),
+		},
+		{
+			name:       "IPv4 assigned-address host route",
+			oldPrefix:  netip.MustParsePrefix("10.22.1.1/16"),
+			newPrefix:  netip.MustParsePrefix("10.22.2.1/16"),
+			ownedRoute: netip.MustParsePrefix("10.22.1.1/32"),
+		},
+		{
+			name:       "IPv4 directed-broadcast host route",
+			oldPrefix:  netip.MustParsePrefix("10.23.1.1/16"),
+			newPrefix:  netip.MustParsePrefix("10.23.2.1/16"),
+			ownedRoute: netip.MustParsePrefix("10.23.255.255/32"),
+		},
+		{
+			name:       "IPv6 on-link route",
+			oldPrefix:  netip.MustParsePrefix("fd21::1/64"),
+			newPrefix:  netip.MustParsePrefix("fd21::2/64"),
+			ownedRoute: netip.MustParsePrefix("fd21::/64"),
+		},
+		{
+			name:       "IPv6 assigned-address host route",
+			oldPrefix:  netip.MustParsePrefix("fd22::1/64"),
+			newPrefix:  netip.MustParsePrefix("fd22::2/64"),
+			ownedRoute: netip.MustParsePrefix("fd22::1/128"),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			reader := &sequenceReader{states: []netio.HostState{
+				{},
+				{
+					Addresses:         []netip.Addr{test.oldPrefix.Addr()},
+					InterfacePrefixes: []netip.Prefix{test.oldPrefix.Masked()},
+					Routes:            []netip.Prefix{test.ownedRoute},
+				},
+			}}
+			allocator := New(reader, time.Second)
+			if err := allocator.ReserveOwnedIPs("tun-1", []netip.Prefix{test.oldPrefix}); err != nil {
+				t.Fatalf("ReserveOwnedIPs() error = %v", err)
+			}
+			if err := allocator.ReplaceOwnedIPs("tun-1", []netip.Prefix{test.oldPrefix, test.newPrefix}); err != nil {
+				t.Fatalf("ReplaceOwnedIPs() with derived owned route error = %v", err)
+			}
+		})
+	}
+}
+
+func TestReplaceOwnedIPsRejectsForeignRoutesInsideOwnedPrefix(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		oldPrefix    netip.Prefix
+		newPrefix    netip.Prefix
+		foreignRoute netip.Prefix
+	}{
+		{
+			name:         "IPv4 foreign host route",
+			oldPrefix:    netip.MustParsePrefix("10.24.1.1/16"),
+			newPrefix:    netip.MustParsePrefix("10.24.2.1/16"),
+			foreignRoute: netip.MustParsePrefix("10.24.200.1/32"),
+		},
+		{
+			name:         "IPv4 foreign subnet route",
+			oldPrefix:    netip.MustParsePrefix("10.25.1.1/16"),
+			newPrefix:    netip.MustParsePrefix("10.25.2.1/16"),
+			foreignRoute: netip.MustParsePrefix("10.25.200.0/24"),
+		},
+		{
+			name:         "IPv6 foreign host route",
+			oldPrefix:    netip.MustParsePrefix("fd24::1/64"),
+			newPrefix:    netip.MustParsePrefix("fd24::2/64"),
+			foreignRoute: netip.MustParsePrefix("fd24::ffff/128"),
+		},
+		{
+			name:         "IPv6 foreign subnet route",
+			oldPrefix:    netip.MustParsePrefix("fd25::1/64"),
+			newPrefix:    netip.MustParsePrefix("fd25::2/64"),
+			foreignRoute: netip.MustParsePrefix("fd25::8000/113"),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			reader := &sequenceReader{states: []netio.HostState{
+				{},
+				{
+					Addresses:         []netip.Addr{test.oldPrefix.Addr()},
+					InterfacePrefixes: []netip.Prefix{test.oldPrefix.Masked()},
+					Routes:            []netip.Prefix{test.foreignRoute},
+				},
+			}}
+			allocator := New(reader, time.Second)
+			if err := allocator.ReserveOwnedIPs("tun-1", []netip.Prefix{test.oldPrefix}); err != nil {
+				t.Fatalf("ReserveOwnedIPs() error = %v", err)
+			}
+			if err := allocator.ReplaceOwnedIPs("tun-1", []netip.Prefix{test.oldPrefix, test.newPrefix}); !errors.Is(err, ErrReservationConflict) {
+				t.Fatalf("ReplaceOwnedIPs() error = %v, want ErrReservationConflict", err)
+			}
+		})
+	}
+}
+
+func TestContainsOwnedRouteMatchesOnlyWindowsDerivedRows(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		owner string
+		route string
+		want  bool
+	}{
+		{name: "IPv4 on-link", owner: "10.30.1.1/24", route: "10.30.1.0/24", want: true},
+		{name: "IPv4 assigned host", owner: "10.30.1.1/24", route: "10.30.1.1/32", want: true},
+		{name: "IPv4 directed broadcast", owner: "10.30.1.1/24", route: "10.30.1.255/32", want: true},
+		{name: "IPv4 slash 30 directed broadcast", owner: "10.30.2.1/30", route: "10.30.2.3/32", want: true},
+		{name: "IPv4 foreign host", owner: "10.30.1.1/24", route: "10.30.1.2/32"},
+		{name: "IPv4 foreign subnet", owner: "10.30.1.1/24", route: "10.30.1.128/25"},
+		{name: "IPv4 slash 31 peer", owner: "10.30.2.0/31", route: "10.30.2.1/32"},
+		{name: "IPv6 on-link", owner: "fd30::1/64", route: "fd30::/64", want: true},
+		{name: "IPv6 assigned host", owner: "fd30::1/64", route: "fd30::1/128", want: true},
+		{name: "IPv6 foreign host", owner: "fd30::1/64", route: "fd30::2/128"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got := containsOwnedRoute(
+				[]netip.Prefix{netip.MustParsePrefix(test.owner)},
+				netip.MustParsePrefix(test.route),
+			)
+			if got != test.want {
+				t.Fatalf("containsOwnedRoute(%s, %s) = %t, want %t", test.owner, test.route, got, test.want)
+			}
+		})
+	}
+}
+
 func TestReserveOwnedIPsRejectsEveryOverlappingHostResource(t *testing.T) {
 	t.Parallel()
 	candidate := netip.MustParsePrefix("10.60.1.1/16")

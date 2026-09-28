@@ -692,7 +692,7 @@ func conflictsPrefixExceptOwner(state netio.HostState, candidate netip.Prefix, o
 		}
 	}
 	for _, route := range state.Routes {
-		if usableRoute(route) && prefixesOverlap(candidate, route.Masked()) && !containsOwnedPrefix(owner, route) {
+		if usableRoute(route) && prefixesOverlap(candidate, route.Masked()) && !containsOwnedRoute(owner, route) {
 			return true
 		}
 	}
@@ -704,6 +704,40 @@ func containsOwnedPrefix(prefixes []netip.Prefix, want netip.Prefix) bool {
 	return slices.ContainsFunc(prefixes, func(prefix netip.Prefix) bool {
 		return prefix.Masked() == want
 	})
+}
+
+// containsOwnedRoute identifies routes that Windows derives from an address
+// assigned by this owner. In addition to the on-link prefix, Windows can add a
+// host route for the assigned address and an IPv4 host route for the directed
+// broadcast address. These rows must not make a later address transaction
+// conflict with the TUN's own native state.
+func containsOwnedRoute(prefixes []netip.Prefix, want netip.Prefix) bool {
+	want = want.Masked()
+	for _, prefix := range prefixes {
+		prefix = netip.PrefixFrom(prefix.Addr(), prefix.Bits())
+		if want == prefix.Masked() {
+			return true
+		}
+		if want.Bits() != prefix.Addr().BitLen() {
+			continue
+		}
+		if want.Addr() == prefix.Addr() {
+			return true
+		}
+		if prefix.Addr().Is4() && prefix.Bits() <= 30 && want.Addr() == ipv4DirectedBroadcast(prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func ipv4DirectedBroadcast(prefix netip.Prefix) netip.Addr {
+	prefix = prefix.Masked()
+	bytes := prefix.Addr().As4()
+	for bit := prefix.Bits(); bit < 32; bit++ {
+		bytes[bit/8] |= 1 << (7 - bit%8)
+	}
+	return netip.AddrFrom4(bytes)
 }
 
 func conflictsSubnet(state netio.HostState, candidate netip.Prefix) bool {
