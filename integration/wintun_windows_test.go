@@ -7,15 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	gtun "github.com/asciimoth/gonnect/tun"
+	"github.com/asciimoth/sysnet-windows/internal/netio"
 	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
@@ -209,6 +212,202 @@ func TestT13T15NativeWintunCloseContract(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Events did not close")
 	}
+}
+
+func TestT04T06NativeNetIOExactOwnership(t *testing.T) {
+	device := createNativeTun(t, "netio-rows")
+	metadata := device.Metadata()
+	iface := netio.Interface{LUID: metadata.LUID, Index: metadata.Index}
+	store := netio.NativeStore{}
+	manager, err := netio.NewManager(store)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// These rows simulate resources placed on the owned adapter by another
+	// component. Manager must not adopt, replace, or remove them.
+	foreignAddress := netip.MustParsePrefix("198.18.255.1/32")
+	foreignRoute := netio.Route{
+		Destination: netip.MustParsePrefix("203.0.113.201/32"),
+		NextHop:     netip.MustParseAddr("0.0.0.0"),
+		Metric:      77,
+	}
+	if err := store.CreateAddress(ctx, iface, foreignAddress); err != nil {
+		t.Fatalf("create foreign address sentinel: %v", err)
+	}
+	if err := store.WaitAddressUsable(ctx, iface, foreignAddress.Addr()); err != nil {
+		t.Fatalf("wait for foreign address sentinel: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if err := store.DeleteAddress(cleanupCtx, iface, foreignAddress); err != nil {
+			t.Errorf("delete foreign address sentinel: %v", err)
+		}
+	})
+	if err := store.CreateRoute(ctx, iface, foreignRoute); err != nil {
+		t.Fatalf("create foreign route sentinel: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		if err := store.DeleteRoute(cleanupCtx, iface, foreignRoute); err != nil {
+			t.Errorf("delete foreign route sentinel: %v", err)
+		}
+	})
+
+	ownedAddress := netip.MustParsePrefix("198.18.254.1/32")
+	ownedRoute := netio.Route{
+		Destination: netip.MustParsePrefix("203.0.113.202/32"),
+		NextHop:     netip.MustParseAddr("0.0.0.0"),
+		Metric:      78,
+	}
+	config := netio.Config{Addresses: []netip.Prefix{ownedAddress}, Routes: []netio.Route{ownedRoute}}
+	if err := manager.Apply(ctx, iface, config); err != nil {
+		t.Fatalf("Apply(owned rows) error = %v", err)
+	}
+	if got, err := manager.Read(ctx, iface); err != nil || len(got.Addresses) != 1 || got.Addresses[0] != ownedAddress || len(got.Routes) != 1 || got.Routes[0] != ownedRoute {
+		t.Fatalf("Read() = %+v, %v; want exact owned rows", got, err)
+	}
+	assertNativeRows(t, ctx, store, iface, foreignAddress, foreignRoute, ownedAddress, ownedRoute)
+
+	replacementAddress := netip.MustParsePrefix("198.18.253.1/32")
+	replacementRoute := ownedRoute
+	replacementRoute.Metric++
+	config = netio.Config{Addresses: []netip.Prefix{replacementAddress}, Routes: []netio.Route{replacementRoute}}
+	if err := manager.Apply(ctx, iface, config); err != nil {
+		t.Fatalf("Apply(replacement rows) error = %v", err)
+	}
+	assertNativeRowsAbsent(t, ctx, store, iface, ownedAddress, ownedRoute)
+	if err := manager.Apply(ctx, iface, netio.Config{}); err != nil {
+		t.Fatalf("Apply(cleanup) error = %v", err)
+	}
+	assertNativeRows(t, ctx, store, iface, foreignAddress, foreignRoute)
+	assertNativeRowsAbsent(t, ctx, store, iface, replacementAddress, replacementRoute)
+}
+
+func TestT07T09NativeNetIOMTUReadbackAndPacketBoundary(t *testing.T) {
+	device := createNativeTun(t, "netio-mtu")
+	metadata := device.Metadata()
+	iface := netio.Interface{LUID: metadata.LUID, Index: metadata.Index}
+	store := netio.NativeStore{}
+	manager, err := netio.NewManager(store)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	before, err := store.Snapshot(ctx, iface)
+	if err != nil {
+		t.Fatalf("Snapshot(before) error = %v", err)
+	}
+	original, ok := findProperties(before, netio.FamilyIPv4)
+	if !ok {
+		t.Fatal("created Wintun has no IPv4 interface row")
+	}
+	want := netio.Properties{Family: netio.FamilyIPv4, MTU: 1380, Metric: original.Metric + 7}
+	if err := manager.Apply(ctx, iface, netio.Config{Properties: []netio.Properties{want}}); err != nil {
+		t.Fatalf("Apply(MTU and metric) error = %v", err)
+	}
+	after, err := store.Snapshot(ctx, iface)
+	if err != nil {
+		t.Fatalf("Snapshot(after) error = %v", err)
+	}
+	if got, ok := findProperties(after, netio.FamilyIPv4); !ok || got != want {
+		t.Fatalf("native IPv4 properties = %+v, %t; want %+v", got, ok, want)
+	}
+	// Update the packet-facing report only after native readback succeeds.
+	if err := device.UpdateReportedMTU(int(want.MTU)); err != nil {
+		t.Fatalf("UpdateReportedMTU() error = %v", err)
+	}
+	if got, err := device.MTU(); err != nil || got != int(want.MTU) {
+		t.Fatalf("packet MTU = %d, %v; want %d", got, err, want.MTU)
+	}
+	// Raw Wintun injection does not perform IP fragmentation. Confirm that the
+	// wrapper preserves the native behavior immediately around the configured
+	// boundary; the Windows IP stack applies the MTU to routed traffic.
+	for _, size := range []int{int(want.MTU) - 1, int(want.MTU), int(want.MTU) + 1} {
+		packet := make([]byte, size)
+		packet[0] = 0x45
+		packet[2] = byte(size >> 8)
+		packet[3] = byte(size)
+		buffer := append(make([]byte, device.MWO()), packet...)
+		if written, err := device.Write([][]byte{buffer}, device.MWO()); err != nil || written != 1 {
+			t.Fatalf("Write(%d-byte packet near MTU) = %d, %v", size, written, err)
+		}
+	}
+
+	if err := manager.Apply(ctx, iface, netio.Config{}); err != nil {
+		t.Fatalf("Apply(restore properties) error = %v", err)
+	}
+	restored, err := store.Snapshot(ctx, iface)
+	if err != nil {
+		t.Fatalf("Snapshot(restored) error = %v", err)
+	}
+	if got, ok := findProperties(restored, netio.FamilyIPv4); !ok || got != original {
+		t.Fatalf("restored IPv4 properties = %+v, %t; want %+v", got, ok, original)
+	}
+}
+
+func assertNativeRows(t *testing.T, ctx context.Context, store netio.NativeStore, iface netio.Interface, addressesAndRoutes ...any) {
+	t.Helper()
+	state, err := store.Snapshot(ctx, iface)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	for _, expected := range addressesAndRoutes {
+		switch value := expected.(type) {
+		case netip.Prefix:
+			found := false
+			for _, row := range state.Addresses {
+				found = found || row.Prefix == value
+			}
+			if !found {
+				t.Errorf("native address %s is absent from %+v", value, state.Addresses)
+			}
+		case netio.Route:
+			if !slices.Contains(state.Routes, value) {
+				t.Errorf("native route %+v is absent from %+v", value, state.Routes)
+			}
+		default:
+			t.Fatalf("unsupported native row assertion %T", expected)
+		}
+	}
+}
+
+func assertNativeRowsAbsent(t *testing.T, ctx context.Context, store netio.NativeStore, iface netio.Interface, addressesAndRoutes ...any) {
+	t.Helper()
+	state, err := store.Snapshot(ctx, iface)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	for _, unexpected := range addressesAndRoutes {
+		switch value := unexpected.(type) {
+		case netip.Prefix:
+			for _, row := range state.Addresses {
+				if row.Prefix == value {
+					t.Errorf("native address %s remains after owned removal", value)
+				}
+			}
+		case netio.Route:
+			if slices.Contains(state.Routes, value) {
+				t.Errorf("native route %+v remains after owned removal", value)
+			}
+		default:
+			t.Fatalf("unsupported native row assertion %T", unexpected)
+		}
+	}
+}
+
+func findProperties(state netio.State, family netio.Family) (netio.Properties, bool) {
+	for _, properties := range state.Properties {
+		if properties.Family == family {
+			return properties, true
+		}
+	}
+	return netio.Properties{}, false
 }
 
 func createNativeTun(t *testing.T, label string) internaltun.ManagedTun {

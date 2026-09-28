@@ -15,8 +15,15 @@ func New(config SystemConfig) (*System, error) {
 }
 
 func nativeDependencies() systemDependencies {
+	netIO, err := netio.NewManager(netio.NativeStore{})
+	if err != nil {
+		// NativeStore is a non-nil value. Keep the invariant explicit if the
+		// manager constructor gains more validation later.
+		panic(err)
+	}
 	return systemDependencies{
 		tunFactory:       internaltun.NativeFactory{},
+		netIO:            netIO,
 		allocationReader: netio.NativeReader{},
 	}
 }

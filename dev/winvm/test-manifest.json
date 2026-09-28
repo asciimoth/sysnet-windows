@@ -8,12 +8,18 @@
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT25HostAwareAllocation",
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT26ConcurrentAllocation",
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT27EnumerationFailureAfterSelection",
+        "github.com/asciimoth/sysnet-windows/internal/netio::TestT04T06ExactManagerOwnedDeltaPreservesForeignRows",
+        "github.com/asciimoth/sysnet-windows/internal/netio::TestT04T06ExactManagerRechecksValueImmediatelyBeforeDelete",
+        "github.com/asciimoth/sysnet-windows/internal/netio::TestT04T06ExactManagerRejectsForeignDuplicateAndChangedOwnedValue",
+        "github.com/asciimoth/sysnet-windows/internal/netio::TestT04T06ExactManagerRetainsOwnershipAfterFailedRollback",
+        "github.com/asciimoth/sysnet-windows/internal/netio::TestT04T06ExactManagerWaitDeadlineRollsBackAddress",
+        "github.com/asciimoth/sysnet-windows/internal/netio::TestT07T09ExactManagerRequiresReadback",
+        "github.com/asciimoth/sysnet-windows/internal/netio::TestT07T09ExactManagerValidatesIdentityAndMTU",
         "github.com/asciimoth/sysnet-windows/internal/tun::TestT10T12AdapterPreservesPacketContract",
         "github.com/asciimoth/sysnet-windows/internal/tun::TestT10AdapterReturnsNativeCapacityError",
         "github.com/asciimoth/sysnet-windows/internal/tun::TestT13T15CloseUnblocksIOAndNormalizesErrors"
       ],
       "plannedCases": [
-        "M1 native NetIO ownership cases",
         "M2 native socket and underlay cases",
         "M3 native DNS cases",
         "M4 native owner lookup cases"
@@ -22,11 +28,12 @@
     "live-driver": {
       "requiredTests": [
         "github.com/asciimoth/sysnet-windows/integration::TestT01T03NativeWintunIdentityAndCollision",
+        "github.com/asciimoth/sysnet-windows/integration::TestT04T06NativeNetIOExactOwnership",
+        "github.com/asciimoth/sysnet-windows/integration::TestT07T09NativeNetIOMTUReadbackAndPacketBoundary",
         "github.com/asciimoth/sysnet-windows/integration::TestT10T12NativeWintunPacketContractAndMTUReport",
         "github.com/asciimoth/sysnet-windows/integration::TestT13T15NativeWintunCloseContract"
       ],
       "plannedCases": [
-        "M1 owned networking cleanup",
         "M3 DNS configuration restoration",
         "M5 split-driver lifecycle and reset recovery"
       ]

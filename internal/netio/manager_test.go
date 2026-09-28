@@ -1,0 +1,289 @@
+package netio
+
+import (
+	"context"
+	"errors"
+	"net/netip"
+	"slices"
+	"sync"
+	"testing"
+	"time"
+)
+
+var testInterface = Interface{LUID: 41, Index: 7}
+
+type fakeStore struct {
+	mu                sync.Mutex
+	state             State
+	wait              func(context.Context, netip.Addr) error
+	noRoute           bool
+	tentativeAddress  bool
+	failDeleteAddress bool
+	log               []string
+	snapshots         int
+	beforeSnapshot    func(*fakeStore, int)
+}
+
+func (s *fakeStore) Snapshot(ctx context.Context, _ Interface) (State, error) {
+	if err := ctx.Err(); err != nil {
+		return State{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshots++
+	if s.beforeSnapshot != nil {
+		s.beforeSnapshot(s, s.snapshots)
+	}
+	result := s.state
+	result.Addresses = append([]Address(nil), s.state.Addresses...)
+	result.Routes = append([]Route(nil), s.state.Routes...)
+	result.Properties = append([]Properties(nil), s.state.Properties...)
+	return result, nil
+}
+
+func (s *fakeStore) CreateAddress(_ context.Context, _ Interface, prefix netip.Prefix) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.log = append(s.log, "add-address "+prefix.String())
+	s.state.Addresses = append(s.state.Addresses, Address{Prefix: prefix, Usable: !s.tentativeAddress})
+	return nil
+}
+
+func (s *fakeStore) DeleteAddress(_ context.Context, _ Interface, prefix netip.Prefix) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.log = append(s.log, "delete-address "+prefix.String())
+	if s.failDeleteAddress {
+		return errors.New("injected address delete failure")
+	}
+	for index, row := range s.state.Addresses {
+		if row.Prefix.Addr() == prefix.Addr() {
+			s.state.Addresses = append(s.state.Addresses[:index], s.state.Addresses[index+1:]...)
+			return nil
+		}
+	}
+	return errors.New("address not found")
+}
+
+func (s *fakeStore) WaitAddressUsable(ctx context.Context, _ Interface, address netip.Addr) error {
+	if s.wait != nil {
+		return s.wait(ctx, address)
+	}
+	return nil
+}
+
+func (s *fakeStore) CreateRoute(_ context.Context, _ Interface, route Route) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.log = append(s.log, "add-route "+route.Destination.String())
+	if !s.noRoute {
+		s.state.Routes = append(s.state.Routes, route)
+	}
+	return nil
+}
+
+func (s *fakeStore) DeleteRoute(_ context.Context, _ Interface, route Route) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.log = append(s.log, "delete-route "+route.Destination.String())
+	key := routeKey(route)
+	for index, row := range s.state.Routes {
+		if routeKey(row) == key {
+			s.state.Routes = append(s.state.Routes[:index], s.state.Routes[index+1:]...)
+			return nil
+		}
+	}
+	return errors.New("route not found")
+}
+
+func (s *fakeStore) SetProperties(_ context.Context, _ Interface, properties Properties) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.log = append(s.log, "set-properties")
+	for index, row := range s.state.Properties {
+		if row.Family == properties.Family {
+			s.state.Properties[index] = properties
+			return nil
+		}
+	}
+	return errors.New("properties not found")
+}
+
+func TestT04T06ExactManagerOwnedDeltaPreservesForeignRows(t *testing.T) {
+	foreignAddress := Address{Prefix: netip.MustParsePrefix("192.0.2.9/24"), Usable: true}
+	foreignRoute := Route{Destination: netip.MustParsePrefix("198.51.100.0/24"), NextHop: netip.MustParseAddr("0.0.0.0"), Metric: 90}
+	originalProperties := Properties{Family: FamilyIPv4, MTU: 1500, Metric: 25, AutomaticMetric: true}
+	store := &fakeStore{state: State{
+		Interface: testInterface, Addresses: []Address{foreignAddress}, Routes: []Route{foreignRoute},
+		Properties: []Properties{originalProperties},
+	}}
+	manager, err := NewManager(store)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	firstAddress := netip.MustParsePrefix("10.19.0.1/24")
+	firstRoute := Route{Destination: netip.MustParsePrefix("10.20.0.0/16"), NextHop: netip.MustParseAddr("0.0.0.0"), Metric: 5}
+	appliedProperties := Properties{Family: FamilyIPv4, MTU: 1400, Metric: 3}
+	first := Config{Addresses: []netip.Prefix{firstAddress}, Routes: []Route{firstRoute}, Properties: []Properties{appliedProperties}}
+	if err := manager.Apply(context.Background(), testInterface, first); err != nil {
+		t.Fatalf("first Apply() error = %v", err)
+	}
+	assertConfig(t, manager, first)
+
+	secondAddress := netip.MustParsePrefix("10.19.0.1/25")
+	secondRoute := firstRoute
+	secondRoute.Metric = 8
+	second := Config{Addresses: []netip.Prefix{secondAddress}, Routes: []Route{secondRoute}, Properties: []Properties{{Family: FamilyIPv4, MTU: 1300, Metric: 4}}}
+	if err := manager.Apply(context.Background(), testInterface, second); err != nil {
+		t.Fatalf("replacement Apply() error = %v", err)
+	}
+	assertConfig(t, manager, second)
+	if err := manager.Apply(context.Background(), testInterface, Config{}); err != nil {
+		t.Fatalf("cleanup Apply() error = %v", err)
+	}
+
+	state, _ := store.Snapshot(context.Background(), testInterface)
+	if !slices.Equal(state.Addresses, []Address{foreignAddress}) {
+		t.Fatalf("addresses after cleanup = %+v, want foreign sentinel %+v", state.Addresses, foreignAddress)
+	}
+	if !slices.Equal(state.Routes, []Route{foreignRoute}) {
+		t.Fatalf("routes after cleanup = %+v, want foreign sentinel %+v", state.Routes, foreignRoute)
+	}
+	if !slices.Equal(state.Properties, []Properties{originalProperties}) {
+		t.Fatalf("properties after cleanup = %+v, want restored %+v", state.Properties, originalProperties)
+	}
+}
+
+func TestT04T06ExactManagerRejectsForeignDuplicateAndChangedOwnedValue(t *testing.T) {
+	prefix := netip.MustParsePrefix("10.19.0.1/24")
+	store := &fakeStore{state: State{Interface: testInterface, Addresses: []Address{{Prefix: prefix, Usable: true}}}}
+	manager, _ := NewManager(store)
+	if err := manager.Apply(context.Background(), testInterface, Config{Addresses: []netip.Prefix{prefix}}); !errors.Is(err, ErrResourceConflict) {
+		t.Fatalf("foreign duplicate error = %v, want ErrResourceConflict", err)
+	}
+
+	store.state.Addresses = nil
+	if err := manager.Apply(context.Background(), testInterface, Config{Addresses: []netip.Prefix{prefix}}); err != nil {
+		t.Fatalf("owned Apply() error = %v", err)
+	}
+	store.state.Addresses[0].Prefix = netip.MustParsePrefix("10.19.0.1/25")
+	if err := manager.Apply(context.Background(), testInterface, Config{}); !errors.Is(err, ErrResourceConflict) {
+		t.Fatalf("changed owned cleanup error = %v, want ErrResourceConflict", err)
+	}
+	if store.state.Addresses[0].Prefix.Bits() != 25 {
+		t.Fatal("cleanup changed a foreign replacement")
+	}
+}
+
+func TestT04T06ExactManagerRechecksValueImmediatelyBeforeDelete(t *testing.T) {
+	prefix := netip.MustParsePrefix("10.19.0.1/24")
+	store := &fakeStore{state: State{Interface: testInterface}}
+	manager, _ := NewManager(store)
+	if err := manager.Apply(context.Background(), testInterface, Config{Addresses: []netip.Prefix{prefix}}); err != nil {
+		t.Fatalf("owned Apply() error = %v", err)
+	}
+	store.snapshots = 0
+	store.beforeSnapshot = func(store *fakeStore, count int) {
+		if count == 2 {
+			store.state.Addresses[0].Prefix = netip.MustParsePrefix("10.19.0.1/25")
+		}
+	}
+	if err := manager.Apply(context.Background(), testInterface, Config{}); !errors.Is(err, ErrResourceConflict) {
+		t.Fatalf("cleanup error = %v, want ErrResourceConflict", err)
+	}
+	if got := store.state.Addresses[0].Prefix; got.Bits() != 25 {
+		t.Fatalf("foreign replacement = %s, want preserved /25", got)
+	}
+}
+
+func TestT04T06ExactManagerWaitDeadlineRollsBackAddress(t *testing.T) {
+	store := &fakeStore{state: State{Interface: testInterface}, tentativeAddress: true}
+	store.wait = func(ctx context.Context, _ netip.Addr) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	manager, _ := NewManager(store)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := manager.Apply(ctx, testInterface, Config{Addresses: []netip.Prefix{netip.MustParsePrefix("10.19.0.1/24")}})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Apply() error = %v, want deadline exceeded", err)
+	}
+	state, _ := store.Snapshot(context.Background(), testInterface)
+	if len(state.Addresses) != 0 {
+		t.Fatalf("addresses after failed usability wait = %+v, want rollback", state.Addresses)
+	}
+}
+
+func TestT07T09ExactManagerRequiresReadback(t *testing.T) {
+	store := &fakeStore{state: State{Interface: testInterface}, noRoute: true}
+	manager, _ := NewManager(store)
+	route := Route{Destination: netip.MustParsePrefix("203.0.113.0/24"), NextHop: netip.MustParseAddr("0.0.0.0"), Metric: 4}
+	if err := manager.Apply(context.Background(), testInterface, Config{Routes: []Route{route}}); !errors.Is(err, ErrReadback) {
+		t.Fatalf("Apply() error = %v, want ErrReadback", err)
+	}
+	if got, _ := manager.Read(context.Background(), testInterface); len(got.Routes) != 0 {
+		t.Fatalf("inventory committed after failed readback: %+v", got)
+	}
+}
+
+func TestT04T06ExactManagerRetainsOwnershipAfterFailedRollback(t *testing.T) {
+	store := &fakeStore{
+		state:             State{Interface: testInterface},
+		noRoute:           true,
+		failDeleteAddress: true,
+	}
+	manager, _ := NewManager(store)
+	prefix := netip.MustParsePrefix("10.19.0.1/24")
+	route := Route{Destination: netip.MustParsePrefix("203.0.113.0/24"), NextHop: netip.MustParseAddr("0.0.0.0"), Metric: 4}
+	err := manager.Apply(context.Background(), testInterface, Config{Addresses: []netip.Prefix{prefix}, Routes: []Route{route}})
+	if !errors.Is(err, ErrReadback) {
+		t.Fatalf("Apply() error = %v, want ErrReadback", err)
+	}
+	store.failDeleteAddress = false
+	store.noRoute = false
+	if err := manager.Apply(context.Background(), testInterface, Config{}); err != nil {
+		t.Fatalf("cleanup retained inventory error = %v", err)
+	}
+	state, _ := store.Snapshot(context.Background(), testInterface)
+	if len(state.Addresses) != 0 {
+		t.Fatalf("retained address after cleanup = %+v", state.Addresses)
+	}
+}
+
+func TestT07T09ExactManagerValidatesIdentityAndMTU(t *testing.T) {
+	store := &fakeStore{state: State{Interface: Interface{LUID: testInterface.LUID, Index: testInterface.Index + 1}}}
+	manager, _ := NewManager(store)
+	if err := manager.Apply(context.Background(), testInterface, Config{}); !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("identity error = %v, want ErrIdentityMismatch", err)
+	}
+
+	store.state.Interface = testInterface
+	for _, properties := range []Properties{
+		{Family: FamilyIPv4, MTU: 0},
+		{Family: FamilyIPv4, MTU: 575},
+		{Family: FamilyIPv6, MTU: 1279},
+	} {
+		err := manager.Apply(context.Background(), testInterface, Config{Properties: []Properties{properties}})
+		if !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("properties %+v error = %v, want ErrInvalidConfig", properties, err)
+		}
+	}
+}
+
+func assertConfig(t *testing.T, manager *ExactManager, want Config) {
+	t.Helper()
+	got, err := manager.Read(context.Background(), testInterface)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	normalized, err := normalizeConfig(want)
+	if err != nil {
+		t.Fatalf("normalizeConfig() error = %v", err)
+	}
+	if !slices.Equal(got.Addresses, normalized.Addresses) || !slices.Equal(got.Routes, normalized.Routes) || !slices.Equal(got.Properties, normalized.Properties) {
+		t.Fatalf("Read() = %+v, want %+v", got, normalized)
+	}
+}
+
+var _ Store = (*fakeStore)(nil)
