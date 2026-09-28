@@ -34,6 +34,20 @@ python3 "$script_dir/tests/test_qualify.py"
 pwsh -NoLogo -NoProfile -NonInteractive -File "$script_dir/tests/test-output.tests.ps1"
 shellcheck "$script_dir"/*.sh "$script_dir/tests"/*.sh
 
+# The completed M0-M1 gate excludes planned packet-flow work. The future
+# release gate includes it and flow runs fail before a guest starts.
+grep -Eq '^test-total:.*test-windows-e2e$' "$root/justfile"
+if grep -Eq '^test-total:.*test-windows-flow' "$root/justfile"; then
+    printf 'completed milestone gate includes planned packet-flow work\n' >&2
+    exit 1
+fi
+grep -Eq '^test-release:.*test-windows-flow' "$root/justfile"
+if flow_error=$("$script_dir/run.sh" flow 2>&1); then
+    printf 'planned packet-flow gate unexpectedly passed preflight\n' >&2
+    exit 1
+fi
+[[ $flow_error == *'packet-flow gate is planned but has no required tests'* ]]
+
 # Test commands retain JSON events while formatting their console output.
 grep -Fq 'Tee-Object -FilePath' "$script_dir/test.ps1"
 grep -Fq 'Tee-Object -FilePath' "$script_dir/e2e.ps1"
@@ -46,6 +60,7 @@ grep -Fq 'Expected two IPv4/IPv6 listeners on ports 53 and 47823' "$script_dir/r
 grep -Fq "'test-manifest.json'" "$script_dir/test.ps1"
 grep -Fq "'test-manifest.json'" "$script_dir/e2e.ps1"
 grep -Fq 'SYSNET_FLOW_EXE' "$script_dir/e2e.ps1"
+grep -Fq 'packet-flow helper is absent: cmd/sysnetflow' "$script_dir/run.sh"
 grep -Fq 'wintun-input.py' "$script_dir/run.sh"
 grep -Fq ".architecture | ascii_downcase" "$script_dir/run.sh"
 grep -Fq 'wintunLockHash' "$script_dir/run.sh"

@@ -43,6 +43,7 @@ just test-windows-vm
 just test-windows-e2e
 just test-windows-flow
 just test-total
+just check-release
 ```
 
 The baseline runs module verification, tidy, vet, tests, and build as the
@@ -57,9 +58,11 @@ listed as planned cases, not as optional passes. A required test fails the gate
 if it is absent or skipped. The live and flow gates cannot pass release
 qualification until their planned milestone tests become required and pass.
 `just test-total` runs the local Go and fuzz tests, then builds or reuses the
-base image and runs all three VM gates. `just check` adds all formatting,
-linting, vetting, builds, and host-harness checks around `test-total`.
-Linux-only VM recipes skip on Windows.
+base image and runs the completed baseline and live-driver gates. `just check`
+adds all formatting, linting, vetting, builds, and host-harness checks around
+`test-total`. `just check-release` also runs the planned packet-flow gate. That
+gate fails during host preflight until it has required tests and its helper is
+present. Linux-only VM recipes skip on Windows.
 
 The harness serializes VM processes on one host. Image creation has an exclusive
 content-key lock. Test runs hold a shared image lock and use a unique overlay,

@@ -284,6 +284,106 @@ func TestT04T06ExactManagerOwnedDeltaPreservesForeignRows(t *testing.T) {
 	}
 }
 
+func TestExactManagerCleanupContinuesAfterOwnedStateDisappears(t *testing.T) {
+	originalProperties := Properties{Family: FamilyIPv4, MTU: 1500, Metric: 25, AutomaticMetric: true}
+	address := netip.MustParsePrefix("10.19.0.1/24")
+	route := Route{Destination: netip.MustParsePrefix("10.20.0.0/16"), NextHop: netip.IPv4Unspecified(), Metric: 5}
+	appliedProperties := Properties{Family: FamilyIPv4, MTU: 1400, Metric: 3}
+	tests := []struct {
+		name   string
+		remove func(*fakeStore)
+	}{
+		{name: "address", remove: func(store *fakeStore) { store.state.Addresses = nil }},
+		{name: "route", remove: func(store *fakeStore) { store.state.Routes = nil }},
+		{name: "properties", remove: func(store *fakeStore) { store.state.Properties = nil }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &fakeStore{state: State{Interface: testInterface, Properties: []Properties{originalProperties}}}
+			manager, err := NewManager(store)
+			if err != nil {
+				t.Fatalf("NewManager() error = %v", err)
+			}
+			config := Config{
+				Addresses:  []netip.Prefix{address},
+				Routes:     []Route{route},
+				Properties: []Properties{appliedProperties},
+			}
+			if err := manager.Apply(context.Background(), testInterface, config); err != nil {
+				t.Fatalf("initial Apply() error = %v", err)
+			}
+			test.remove(store)
+			store.log = nil
+			if err := manager.Apply(context.Background(), testInterface, Config{}); err != nil {
+				t.Fatalf("cleanup Apply() error = %v", err)
+			}
+			if len(store.state.Addresses) != 0 || len(store.state.Routes) != 0 {
+				t.Fatalf("state after cleanup = %+v, want no addresses or routes", store.state)
+			}
+			if test.name == "properties" {
+				if len(store.state.Properties) != 0 {
+					t.Fatalf("properties after external removal = %+v, want empty", store.state.Properties)
+				}
+			} else if !slices.Equal(store.state.Properties, []Properties{originalProperties}) {
+				t.Fatalf("properties after cleanup = %+v, want restored %+v", store.state.Properties, originalProperties)
+			}
+			got, err := manager.Read(context.Background(), testInterface)
+			if err != nil || len(got.Addresses) != 0 || len(got.Routes) != 0 || len(got.Properties) != 0 {
+				t.Fatalf("Read() after cleanup = %+v, %v, want empty", got, err)
+			}
+		})
+	}
+}
+
+func TestExactManagerRejectsMissingStateThatIsStillDesired(t *testing.T) {
+	originalProperties := Properties{Family: FamilyIPv4, MTU: 1500, Metric: 25, AutomaticMetric: true}
+	address := netip.MustParsePrefix("10.19.0.1/24")
+	route := Route{Destination: netip.MustParsePrefix("10.20.0.0/16"), NextHop: netip.IPv4Unspecified(), Metric: 5}
+	appliedProperties := Properties{Family: FamilyIPv4, MTU: 1400, Metric: 3}
+	config := Config{Addresses: []netip.Prefix{address}, Routes: []Route{route}, Properties: []Properties{appliedProperties}}
+	tests := []struct {
+		name   string
+		remove func(*fakeStore)
+	}{
+		{name: "address", remove: func(store *fakeStore) { store.state.Addresses = nil }},
+		{name: "route", remove: func(store *fakeStore) { store.state.Routes = nil }},
+		{name: "properties", remove: func(store *fakeStore) { store.state.Properties = nil }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &fakeStore{state: State{Interface: testInterface, Properties: []Properties{originalProperties}}}
+			manager, _ := NewManager(store)
+			if err := manager.Apply(context.Background(), testInterface, config); err != nil {
+				t.Fatalf("initial Apply() error = %v", err)
+			}
+			test.remove(store)
+			if err := manager.Apply(context.Background(), testInterface, config); !errors.Is(err, ErrResourceConflict) {
+				t.Fatalf("Apply() error = %v, want ErrResourceConflict", err)
+			}
+		})
+	}
+}
+
+func TestExactManagerRejectsOwnedAddressThatBecameUnusable(t *testing.T) {
+	prefix := netip.MustParsePrefix("10.19.0.1/24")
+	store := &fakeStore{state: State{Interface: testInterface}}
+	manager, _ := NewManager(store)
+	config := Config{Addresses: []netip.Prefix{prefix}}
+	if err := manager.Apply(context.Background(), testInterface, config); err != nil {
+		t.Fatalf("initial Apply() error = %v", err)
+	}
+	store.state.Addresses[0].Usable = false
+	if _, err := manager.Read(context.Background(), testInterface); !errors.Is(err, ErrResourceConflict) {
+		t.Fatalf("Read() error = %v, want ErrResourceConflict", err)
+	}
+	if err := manager.Apply(context.Background(), testInterface, config); !errors.Is(err, ErrResourceConflict) {
+		t.Fatalf("keep Apply() error = %v, want ErrResourceConflict", err)
+	}
+	if err := manager.Apply(context.Background(), testInterface, Config{}); err != nil {
+		t.Fatalf("cleanup Apply() error = %v", err)
+	}
+}
+
 func TestT04T06ExactManagerRejectsForeignDuplicateAndChangedOwnedValue(t *testing.T) {
 	prefix := netip.MustParsePrefix("10.19.0.1/24")
 	store := &fakeStore{state: State{Interface: testInterface, Addresses: []Address{{Prefix: prefix, Usable: true}}}}
@@ -354,6 +454,43 @@ func TestT07T09ExactManagerRequiresReadback(t *testing.T) {
 	}
 	if got, _ := manager.Read(context.Background(), testInterface); len(got.Routes) != 0 {
 		t.Fatalf("inventory committed after failed readback: %+v", got)
+	}
+}
+
+func TestNormalizeConfigRejectsIPv4MappedIPv6Values(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		config Config
+	}{
+		{
+			name: "address",
+			config: Config{Addresses: []netip.Prefix{
+				netip.MustParsePrefix("::ffff:192.0.2.1/128"),
+			}},
+		},
+		{
+			name: "route destination",
+			config: Config{Routes: []Route{{
+				Destination: netip.MustParsePrefix("::ffff:192.0.2.0/120"),
+				NextHop:     netip.IPv6Unspecified(),
+			}}},
+		},
+		{
+			name: "route next hop",
+			config: Config{Routes: []Route{{
+				Destination: netip.MustParsePrefix("2001:db8::/64"),
+				NextHop:     netip.MustParseAddr("::ffff:192.0.2.1"),
+			}}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := normalizeConfig(test.config); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("normalizeConfig() error = %v, want ErrInvalidConfig", err)
+			}
+		})
 	}
 }
 

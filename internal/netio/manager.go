@@ -78,7 +78,7 @@ func (m *ExactManager) Apply(ctx context.Context, iface Interface, config Config
 	if owned == nil {
 		owned = newOwnedState()
 	}
-	if err := verifyOwnership(current, owned); err != nil {
+	if err := reconcileOwnership(current, owned, desired); err != nil {
 		return err
 	}
 	mutations, next, err := m.plan(iface, current, owned, desired)
@@ -459,7 +459,7 @@ func normalizeConfig(config Config) (Config, error) {
 	}
 	seenAddresses := make(map[string]struct{}, len(result.Addresses))
 	for index, prefix := range result.Addresses {
-		if !prefix.IsValid() || prefix.Addr().Zone() != "" || prefix.Addr().IsUnspecified() || prefix.Addr().IsMulticast() {
+		if !prefix.IsValid() || prefix.Addr().Zone() != "" || prefix.Addr().IsUnspecified() || prefix.Addr().IsMulticast() || prefix.Addr().Is4In6() {
 			return Config{}, fmt.Errorf("%w: address %d is %s", ErrInvalidConfig, index, prefix)
 		}
 		key := addressKey(prefix)
@@ -472,7 +472,8 @@ func normalizeConfig(config Config) (Config, error) {
 	for index := range result.Routes {
 		route := &result.Routes[index]
 		if !route.Destination.IsValid() || route.Destination != route.Destination.Masked() || route.Destination.Addr().Zone() != "" ||
-			!route.NextHop.IsValid() || route.NextHop.Zone() != "" || route.Destination.Addr().Is4() != route.NextHop.Is4() {
+			route.Destination.Addr().Is4In6() || !route.NextHop.IsValid() || route.NextHop.Zone() != "" || route.NextHop.Is4In6() ||
+			route.Destination.Addr().Is4() != route.NextHop.Is4() {
 			return Config{}, fmt.Errorf("%w: route %d is not canonical", ErrInvalidConfig, index)
 		}
 		key := routeKey(*route)
@@ -519,8 +520,8 @@ func verifyOwnership(state State, owned *ownedState) error {
 	addresses, routes, properties := indexState(state)
 	for key, want := range owned.addresses {
 		got, ok := addresses[key]
-		if !ok || got.Prefix != want {
-			return fmt.Errorf("%w: owned address %s changed or disappeared", ErrResourceConflict, want)
+		if !ok || got.Prefix != want || !got.Usable {
+			return fmt.Errorf("%w: owned address %s changed, became unusable, or disappeared", ErrResourceConflict, want)
 		}
 	}
 	for key, want := range owned.routes {
@@ -531,6 +532,55 @@ func verifyOwnership(state State, owned *ownedState) error {
 	for family, want := range owned.props {
 		if got, ok := properties[family]; !ok || got != want.applied {
 			return fmt.Errorf("%w: owned IPv%d properties changed or disappeared", ErrResourceConflict, family)
+		}
+	}
+	return nil
+}
+
+// reconcileOwnership forgets rows that another actor already removed only
+// when the requested configuration no longer needs those rows. It continues
+// to reject changed rows and missing rows that the caller wants to keep.
+func reconcileOwnership(state State, owned *ownedState, desired Config) error {
+	addresses, routes, properties := indexState(state)
+	desiredAddresses, desiredRoutes, desiredProperties := indexConfig(desired)
+	for key, want := range owned.addresses {
+		got, exists := addresses[key]
+		if exists && got.Prefix != want {
+			return fmt.Errorf("%w: owned address %s changed", ErrResourceConflict, want)
+		}
+		_, keep := desiredAddresses[key]
+		if exists && !got.Usable && keep {
+			return fmt.Errorf("%w: owned address %s became unusable", ErrResourceConflict, want)
+		}
+		if !exists {
+			if keep {
+				return fmt.Errorf("%w: owned address %s disappeared", ErrResourceConflict, want)
+			}
+			delete(owned.addresses, key)
+		}
+	}
+	for key, want := range owned.routes {
+		got, exists := routes[key]
+		if exists && got != want {
+			return fmt.Errorf("%w: owned route %s via %s changed", ErrResourceConflict, want.Destination, want.NextHop)
+		}
+		if !exists {
+			if _, keep := desiredRoutes[key]; keep {
+				return fmt.Errorf("%w: owned route %s via %s disappeared", ErrResourceConflict, want.Destination, want.NextHop)
+			}
+			delete(owned.routes, key)
+		}
+	}
+	for family, want := range owned.props {
+		got, exists := properties[family]
+		if exists && got != want.applied {
+			return fmt.Errorf("%w: owned IPv%d properties changed", ErrResourceConflict, family)
+		}
+		if !exists {
+			if _, keep := desiredProperties[family]; keep {
+				return fmt.Errorf("%w: owned IPv%d properties disappeared", ErrResourceConflict, family)
+			}
+			delete(owned.props, family)
 		}
 	}
 	return nil

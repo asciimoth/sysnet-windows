@@ -38,8 +38,8 @@ just winvm-image
 just test-windows-vm
 ```
 
-The live-driver and packet-flow entry points are wired into the harness. They
-intentionally fail until their required `winintegration` and `winflow` tests,
-and the `cmd/sysnetflow` helper, are implemented. A missing required test is not
-reported as a successful qualification. Update `dev/winvm/test-manifest.json` as
-milestone tests become required.
+The live-driver gate is part of `just check`. The packet-flow entry point is
+wired into the future release gate and intentionally fails until its required
+`winflow` tests and the `cmd/sysnetflow` helper are implemented. A missing
+required test is not reported as a successful qualification. Update
+`dev/winvm/test-manifest.json` as milestone tests become required.

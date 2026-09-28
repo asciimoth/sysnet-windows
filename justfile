@@ -9,6 +9,9 @@ check-fast: verify tidy-check fmt-check typos lint vet test fuzz build-windows w
 # This gate needs the licensed media and KVM setup described in dev/winvm/README.md.
 check: check-fast test-total
 
+# This future release gate also includes planned packet-flow coverage.
+check-release: check-fast test-release
+
 verify:
     go mod verify
 
@@ -59,7 +62,9 @@ build-windows:
 vulncheck:
     govulncheck ./...
 
-test-total: test fuzz test-windows-vm test-windows-e2e test-windows-flow
+test-total: test fuzz test-windows-vm test-windows-e2e
+
+test-release: test-total test-windows-flow
 
 winvm-doctor:
     dev/winvm/doctor.sh

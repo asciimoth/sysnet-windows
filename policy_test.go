@@ -76,6 +76,57 @@ func TestNormalizeTunOptionsRejectsOneAddressWithDifferentPrefixLengths(t *testi
 	}
 }
 
+func TestTunAddressValidationRejectsNonUnicastAndMappedAddresses(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "unspecified IPv4", value: "0.0.0.0/32"},
+		{name: "unspecified IPv6", value: "::/128"},
+		{name: "multicast IPv4", value: "224.0.0.1/32"},
+		{name: "multicast IPv6", value: "ff02::1/128"},
+		{name: "IPv4-mapped IPv6", value: "::ffff:192.0.2.1/128"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			factory := &countingTUNFactory{}
+			system, err := newSystem(SystemConfig{}, systemDependencies{tunFactory: factory})
+			if err != nil {
+				t.Fatalf("newSystem() error = %v", err)
+			}
+			opts := sysnet.TunOpts{TunAddrs: []string{test.value}}
+			report := system.CheckTunOpts(opts)
+			if err := report.Err(); !errors.Is(err, sysnet.ErrInvalidOptions) || len(report.Issues) == 0 || report.Issues[0].Path != "Tun.TunAddrs[0]" {
+				t.Fatalf("CheckTunOpts() report = %+v, want invalid Tun.TunAddrs[0]", report)
+			}
+			if _, err := system.BuildTun(opts); !errors.Is(err, sysnet.ErrInvalidOptions) {
+				t.Fatalf("BuildTun() error = %v, want ErrInvalidOptions", err)
+			}
+			if factory.calls != 0 {
+				t.Fatalf("TUN factory calls = %d, want 0", factory.calls)
+			}
+		})
+	}
+}
+
+func TestTunPrefixValidationRejectsIPv4MappedIPv6Routes(t *testing.T) {
+	t.Parallel()
+	_, report := normalizeTunOpts(defaultNormalizedSystemConfig(), sysnet.TunOpts{
+		TunRoutes: []string{"::ffff:192.0.2.0/120"},
+	})
+	if err := report.Err(); !errors.Is(err, sysnet.ErrInvalidOptions) || len(report.Issues) != 1 || report.Issues[0].Path != "Tun.TunRoutes[0]" {
+		t.Fatalf("normalizeTunOpts() report = %+v, want invalid Tun.TunRoutes[0]", report)
+	}
+	_, report = normalizeDefaultTunOpts(defaultNormalizedSystemConfig(), sysnet.DefaultTunOpts{
+		TunAddrs: []string{"0.0.0.0/32"},
+	})
+	if len(report.Issues) != 1 || report.Issues[0].Path != "DefaultTun.TunAddrs[0]" {
+		t.Fatalf("normalizeDefaultTunOpts() report = %+v, want repathed address issue", report)
+	}
+}
+
 func TestDefaultTunDNSNormalization(t *testing.T) {
 	t.Parallel()
 

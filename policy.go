@@ -174,11 +174,23 @@ func normalizePrefixes(config normalizedSystemConfig, raw []string, path string,
 		if prefix.Addr().IsLoopback() {
 			continue
 		}
+		if prefix.Addr().Is4In6() {
+			report.Issues = append(report.Issues, validationIssue(
+				itemPath, 0, "", "IPv4-mapped IPv6 prefixes are not valid TUN configuration", sysnet.ErrInvalidOptions,
+			))
+			continue
+		}
 		if issue := validateFamily(config, prefix.Addr(), itemPath); issue != nil {
 			report.Issues = append(report.Issues, *issue)
 			continue
 		}
 		if kind == prefixAddress {
+			if prefix.Addr().IsUnspecified() || prefix.Addr().IsMulticast() {
+				report.Issues = append(report.Issues, validationIssue(
+					itemPath, 0, "", "address must be a unicast host address", sysnet.ErrInvalidOptions,
+				))
+				continue
+			}
 			if previous, exists := seenAddresses[prefix.Addr()]; exists && previous != prefix {
 				report.Issues = append(report.Issues, validationIssue(
 					itemPath, 0, "", "address is repeated with a different prefix length", sysnet.ErrInvalidOptions,

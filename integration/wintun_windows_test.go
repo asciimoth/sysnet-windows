@@ -161,8 +161,14 @@ func TestT13T15NativeWintunCloseContract(t *testing.T) {
 	go func() {
 		close(readStarted)
 		buffer := make([]byte, device.MRO()+65535)
-		_, err := device.Read([][]byte{buffer}, []int{0}, device.MRO())
-		readResult <- err
+		sizes := []int{0}
+		for {
+			sizes[0] = 0
+			if _, err := device.Read([][]byte{buffer}, sizes, device.MRO()); err != nil {
+				readResult <- err
+				return
+			}
+		}
 	}()
 	<-readStarted
 	time.Sleep(100 * time.Millisecond)
@@ -284,8 +290,23 @@ func TestT04T06NativeNetIOExactOwnership(t *testing.T) {
 		t.Fatalf("Apply(replacement rows) error = %v", err)
 	}
 	assertNativeRowsAbsent(t, ctx, store, iface, ownedAddress, ownedRoute)
+	if err := store.DeleteAddress(ctx, iface, replacementAddress); err != nil {
+		t.Fatalf("externally delete owned address: %v", err)
+	}
 	if err := manager.Apply(ctx, iface, netio.Config{}); err != nil {
-		t.Fatalf("Apply(cleanup) error = %v", err)
+		t.Fatalf("Apply(cleanup after address removal) error = %v", err)
+	}
+	assertNativeRows(t, ctx, store, iface, foreignAddress, foreignRoute)
+	assertNativeRowsAbsent(t, ctx, store, iface, replacementAddress, replacementRoute)
+
+	if err := manager.Apply(ctx, iface, config); err != nil {
+		t.Fatalf("Apply(rows for route-removal regression) error = %v", err)
+	}
+	if err := store.DeleteRoute(ctx, iface, replacementRoute); err != nil {
+		t.Fatalf("externally delete owned route: %v", err)
+	}
+	if err := manager.Apply(ctx, iface, netio.Config{}); err != nil {
+		t.Fatalf("Apply(cleanup after route removal) error = %v", err)
 	}
 	assertNativeRows(t, ctx, store, iface, foreignAddress, foreignRoute)
 	assertNativeRowsAbsent(t, ctx, store, iface, replacementAddress, replacementRoute)

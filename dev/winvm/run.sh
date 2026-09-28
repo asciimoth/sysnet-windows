@@ -34,6 +34,11 @@ if [[ $mode == clean ]]; then
     printf 'Removed validated VM runs. The base image was kept.\n'
     exit
 fi
+if [[ $mode == flow ]]; then
+    flow_required=$(jq -er '.suites["packet-flow"].requiredTests | length' "$script_dir/test-manifest.json")
+    ((flow_required > 0)) || die 'packet-flow gate is planned but has no required tests'
+    [[ -d $repo_root/cmd/sysnetflow ]] || die 'packet-flow helper is absent: cmd/sysnetflow'
+fi
 for command in qemu-system-x86_64 qemu-img ssh scp jq python3 timeout flock git tar curl; do require_command "$command"; done
 [[ -r /dev/kvm && -w /dev/kvm ]] || die '/dev/kvm is not accessible; run just winvm-doctor'
 ensure_cache_dir
