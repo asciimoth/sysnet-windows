@@ -662,7 +662,7 @@ defer rollback to a later milestone.
    - Complete this step when T01-T03, T10-T15 and architecture-specific native
      smoke tests pass with the staged Wintun DLL.
 
-3. **Step 9 - Implement exact address, route, metric and MTU operations.**
+3. **Step 9 - Implement exact address, route, metric and MTU operations. (Completed)**
 
    - Add narrow NetIO adapters for unicast addresses, forward rows and per-family
      IP-interface properties. Convert native rows to stable comparison keys.

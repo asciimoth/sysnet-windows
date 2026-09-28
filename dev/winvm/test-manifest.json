@@ -14,6 +14,7 @@
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT04T06ExactManagerRetainsOwnershipAfterFailedRollback",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT04T06ExactManagerWaitDeadlineRollsBackAddress",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT07T09ExactManagerRequiresReadback",
+        "github.com/asciimoth/sysnet-windows/internal/netio::TestT07T09ExactManagerReleasesRestoredProperties",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT07T09ExactManagerValidatesIdentityAndMTU",
         "github.com/asciimoth/sysnet-windows/internal/tun::TestT10T12AdapterPreservesPacketContract",
         "github.com/asciimoth/sysnet-windows/internal/tun::TestT10AdapterReturnsNativeCapacityError",

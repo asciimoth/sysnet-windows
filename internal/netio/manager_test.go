@@ -227,6 +227,39 @@ func TestT07T09ExactManagerRequiresReadback(t *testing.T) {
 	}
 }
 
+func TestT07T09ExactManagerReleasesRestoredProperties(t *testing.T) {
+	original := Properties{Family: FamilyIPv4, MTU: 1500, Metric: 25, AutomaticMetric: true}
+	applied := Properties{Family: FamilyIPv4, MTU: 1400, Metric: 4}
+	store := &fakeStore{state: State{Interface: testInterface, Properties: []Properties{original}}}
+	manager, _ := NewManager(store)
+
+	if err := manager.Apply(context.Background(), testInterface, Config{Properties: []Properties{applied}}); err != nil {
+		t.Fatalf("Apply(changed properties) error = %v", err)
+	}
+	if err := manager.Apply(context.Background(), testInterface, Config{Properties: []Properties{original}}); err != nil {
+		t.Fatalf("Apply(original properties) error = %v", err)
+	}
+	got, err := manager.Read(context.Background(), testInterface)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(got.Properties) != 0 {
+		t.Fatalf("Read().Properties = %+v, want released inventory", got.Properties)
+	}
+
+	// The manager no longer owns the restored row. A later host update must not
+	// block an empty apply or cause the manager to overwrite the new value.
+	hostValue := original
+	hostValue.Metric++
+	store.state.Properties[0] = hostValue
+	if err := manager.Apply(context.Background(), testInterface, Config{}); err != nil {
+		t.Fatalf("Apply(empty) after host update error = %v", err)
+	}
+	if got := store.state.Properties[0]; got != hostValue {
+		t.Fatalf("properties after host update = %+v, want preserved %+v", got, hostValue)
+	}
+}
+
 func TestT04T06ExactManagerRetainsOwnershipAfterFailedRollback(t *testing.T) {
 	store := &fakeStore{
 		state:             State{Interface: testInterface},

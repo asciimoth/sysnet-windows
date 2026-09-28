@@ -242,6 +242,15 @@ func (m *ExactManager) plan(iface Interface, current State, owned *ownedState, d
 			if want == record.applied {
 				continue
 			}
+			if want == record.previous {
+				// Returning to the value that preceded our first change restores
+				// host state. Release the inventory entry just as we do when that
+				// value was already present on the first Apply call. Retaining it
+				// would make a later host change look like damage to an owned value.
+				changes = append(changes, m.setProperties(iface, record.applied, record.previous))
+				delete(next.props, family)
+				continue
+			}
 			changes = append(changes, m.setProperties(iface, record.applied, want))
 			record.applied = want
 			next.props[family] = record
