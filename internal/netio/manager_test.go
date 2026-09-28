@@ -273,6 +273,9 @@ func TestT04T06ExactManagerRetainsOwnershipAfterFailedRollback(t *testing.T) {
 	if !errors.Is(err, ErrReadback) {
 		t.Fatalf("Apply() error = %v, want ErrReadback", err)
 	}
+	if !RequiresRecovery(err) {
+		t.Fatalf("Apply() error = %v, want retained ownership recovery", err)
+	}
 	store.failDeleteAddress = false
 	store.noRoute = false
 	if err := manager.Apply(context.Background(), testInterface, Config{}); err != nil {
@@ -291,6 +294,13 @@ func TestT07T09ExactManagerValidatesIdentityAndMTU(t *testing.T) {
 		t.Fatalf("identity error = %v, want ErrIdentityMismatch", err)
 	}
 
+	store.state.Interface = testInterface
+	store.state.Interface.GUID = "{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa}"
+	withGUID := testInterface
+	withGUID.GUID = "{bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb}"
+	if err := manager.Apply(context.Background(), withGUID, Config{}); !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("GUID identity error = %v, want ErrIdentityMismatch", err)
+	}
 	store.state.Interface = testInterface
 	for _, properties := range []Properties{
 		{Family: FamilyIPv4, MTU: 0},

@@ -24,6 +24,7 @@ func newSystem(config SystemConfig, dependencies systemDependencies) (*System, e
 		support:      dependencies.capabilityCode,
 		journal:      reconcile.NewJournal(normalized.operationTimeout),
 		allocator:    internalallocator.New(dependencies.allocationReader, normalized.operationTimeout),
+		regularTuns:  make(map[*regularTun]struct{}),
 	}
 	if system.support == (implementationSupport{}) {
 		system.support = currentImplementationSupport()

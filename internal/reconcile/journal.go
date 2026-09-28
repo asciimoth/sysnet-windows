@@ -198,6 +198,57 @@ func (j *Journal) UndoAll(ctx context.Context) error {
 	return &Failure{err: err, recoveryRequired: recoveryRequired}
 }
 
+// Undo undoes and removes the committed entries with the specified keys. It
+// preserves journal order for all unselected and failed entries.
+func (j *Journal) Undo(ctx context.Context, keys ...OwnershipKey) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	selectedKeys := make(map[OwnershipKey]struct{}, len(keys))
+	for _, key := range keys {
+		selectedKeys[key] = struct{}{}
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if err := j.awaitPendingLocked(ctx); err != nil {
+		return &Failure{err: err, recoveryRequired: true}
+	}
+	previousRecovery := j.recoveryNeeded
+	original := append([]Entry(nil), j.entries...)
+	selected := make([]Entry, 0, len(keys))
+	unselected := make([]Entry, 0, len(j.entries))
+	for _, entry := range j.entries {
+		if _, ok := selectedKeys[entry.Key]; ok {
+			selected = append(selected, entry)
+		} else {
+			unselected = append(unselected, entry)
+		}
+	}
+	if len(selected) != len(selectedKeys) {
+		return fmt.Errorf("journal entries for owned resource are missing")
+	}
+	failed, err := j.undoLocked(ctx, selected)
+	failedKeys := make(map[OwnershipKey]struct{}, len(failed))
+	for _, entry := range failed {
+		failedKeys[entry.Key] = struct{}{}
+	}
+	j.entries = j.entries[:0]
+	for _, entry := range original {
+		_, wasSelected := selectedKeys[entry.Key]
+		_, didFail := failedKeys[entry.Key]
+		if !wasSelected || didFail {
+			j.entries = append(j.entries, entry)
+		}
+	}
+	recoveryRequired := len(failed) != 0 || RequiresRecovery(err) ||
+		previousRecovery && len(unselected) != 0
+	j.recoveryNeeded = recoveryRequired
+	if err == nil {
+		return nil
+	}
+	return &Failure{err: err, recoveryRequired: recoveryRequired}
+}
+
 // Quiesce waits until a callback which outlived its context has returned. It
 // does not retry or verify the uncertain operation.
 func (j *Journal) Quiesce(ctx context.Context) error {

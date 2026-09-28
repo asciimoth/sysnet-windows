@@ -564,6 +564,41 @@ func TestJournalRejectsDuplicateOwnershipWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestJournalUndoSelectedResourcesPreservesOtherEntries(t *testing.T) {
+	t.Parallel()
+	host := newFakeHost("foreign")
+	journal := &Journal{}
+	entries := []Entry{
+		host.entry("first-adapter", "", -1, 0),
+		host.entry("first-config", "", -1, 1),
+		host.entry("second-adapter", "", -1, 2),
+		host.entry("second-config", "", -1, 3),
+	}
+	if err := journal.Apply(context.Background(), entries); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if err := journal.Undo(context.Background(), entries[0].Key, entries[1].Key); err != nil {
+		t.Fatalf("Undo() error = %v", err)
+	}
+	if got, want := host.undoNames(), []string{"first-config", "first-adapter"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("selected undo order = %v, want %v", got, want)
+	}
+	if got := journal.Len(); got != 2 {
+		t.Fatalf("journal length = %d, want 2", got)
+	}
+	if got, want := host.resourceNames(), []string{"foreign", "second-adapter", "second-config"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("resources after selected undo = %v, want %v", got, want)
+	}
+	if err := journal.UndoAll(context.Background()); err != nil {
+		t.Fatalf("UndoAll() error = %v", err)
+	}
+	if got, want := host.undoNames(), []string{
+		"first-config", "first-adapter", "second-config", "second-adapter",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("complete undo order = %v, want %v", got, want)
+	}
+}
+
 func TestJournalBoundsEveryBlockingCallbackAndRetainsOwnership(t *testing.T) {
 	for _, phase := range []string{"apply", "verify-applied", "inverse", "verify-undone"} {
 		t.Run(phase, func(t *testing.T) {

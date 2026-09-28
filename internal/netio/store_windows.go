@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -30,7 +31,11 @@ func (NativeStore) Snapshot(ctx context.Context, iface Interface) (State, error)
 	if err != nil {
 		return State{}, fmt.Errorf("read interface identity: %w", err)
 	}
-	state := State{Interface: Interface{LUID: uint64(identity.InterfaceLUID), Index: identity.InterfaceIndex}}
+	state := State{Interface: Interface{
+		LUID:  uint64(identity.InterfaceLUID),
+		Index: identity.InterfaceIndex,
+		GUID:  strings.ToLower(identity.InterfaceGUID.String()),
+	}}
 
 	addressRows, err := winipcfg.GetUnicastIPAddressTable(windows.AF_UNSPEC)
 	if err != nil {

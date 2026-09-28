@@ -1,12 +1,14 @@
 package windows
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"strconv"
 	"strings"
 
 	"github.com/asciimoth/gonnect/sysnet"
+	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
 )
 
 const (
@@ -43,16 +45,24 @@ type normalizedRule struct {
 }
 
 func normalizeTunOpts(config normalizedSystemConfig, opts sysnet.TunOpts) (desiredTun, sysnet.ValidationReport) {
+	name := strings.TrimSpace(opts.Name)
+	nameReport := sysnet.ValidationReport{}
+	if err := internaltun.ValidateName(name); err != nil {
+		nameReport = invalidReport("Tun.Name", "adapter name is not valid", errors.Join(sysnet.ErrInvalidOptions, err))
+	}
 	addresses, addressReport := normalizePrefixes(config, opts.TunAddrs, "Tun.TunAddrs", prefixAddress)
 	routes, routeReport := normalizePrefixes(config, opts.TunRoutes, "Tun.TunRoutes", prefixRoute)
-	hasIPv6 := prefixesContainIPv6(addresses) || prefixesContainIPv6(routes)
+	// A regular TUN can gain IPv6 addresses through SetTunAddrs. Keep its MTU
+	// valid for every enabled family so a later address transaction does not
+	// need an implicit packet-facing MTU change.
+	hasIPv6 := config.ipv6
 	mtu, mtuReport := normalizeMTU(config, opts.MTU, "Tun.MTU", hasIPv6)
 	return desiredTun{
-		name:      strings.TrimSpace(opts.Name),
+		name:      name,
 		addresses: addresses,
 		routes:    routes,
 		mtu:       mtu,
-	}, joinReports(addressReport, routeReport, mtuReport)
+	}, joinReports(nameReport, addressReport, routeReport, mtuReport)
 }
 
 func normalizeDefaultTunOpts(config normalizedSystemConfig, opts sysnet.DefaultTunOpts) (desiredDefaultTun, sysnet.ValidationReport) {
@@ -377,15 +387,6 @@ func familyForPrefixes(groups ...[]netip.Prefix) sysnet.AddressFamily {
 	default:
 		return sysnet.FamilyNone
 	}
-}
-
-func prefixesContainIPv6(prefixes []netip.Prefix) bool {
-	for _, prefix := range prefixes {
-		if prefix.Addr().Is6() {
-			return true
-		}
-	}
-	return false
 }
 
 func validationIssue(path string, state sysnet.CapabilityState, reason sysnet.CapabilityReason, detail string, err error) sysnet.ValidationIssue {

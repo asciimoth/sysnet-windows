@@ -29,6 +29,9 @@ type System struct {
 	worker          *reconcile.Worker
 	resources       reconcile.Resources
 	allocator       *internalallocator.Allocator
+	regularTunsMu   sync.Mutex
+	regularTuns     map[*regularTun]struct{}
+	nextRegularTun  uint64
 	closeOnce       sync.Once
 	closeErr        error
 	probeGeneration uint64
@@ -112,6 +115,19 @@ func (s *System) applyTransaction(entries []reconcile.Entry) error {
 	return errors.Join(err, s.finishApply(active, recoveryRequired))
 }
 
+// applyOperation serializes a native transaction which provides its own exact
+// rollback and readback through the same worker used by journal operations.
+func (s *System) applyOperation(operation reconcile.Operation) error {
+	if err := s.beginApply(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.config.operationTimeout)
+	defer cancel()
+	err := s.worker.Execute(ctx, operation)
+	recoveryRequired := reconcile.RequiresRecovery(err)
+	return errors.Join(err, s.finishApply(s.journal.Len() != 0, recoveryRequired))
+}
+
 func (s *System) handleReconcileFailure(err error) {
 	if !reconcile.RequiresRecovery(err) {
 		return
@@ -147,10 +163,7 @@ func (s *System) Capabilities() sysnet.CapabilityReport {
 }
 
 func (s *System) CapabilitiesForTun(device tun.Tun) (sysnet.TunCapabilityReport, error) {
-	if err := s.requireOwnedTun(device); err != nil {
-		return sysnet.TunCapabilityReport{}, err
-	}
-	return sysnet.TunCapabilityReport{}, sysnet.ErrNotSupported
+	return s.regularTunCapabilities(device)
 }
 
 func (s *System) CheckTunOpts(opts sysnet.TunOpts) sysnet.ValidationReport {
@@ -306,44 +319,18 @@ func (s *System) BuildDefaultTun(opts sysnet.DefaultTunOpts) (sysnet.DefaultTun,
 func (*System) DefaultTunWarnings(sysnet.DefaultTun) []sysnet.Warning { return nil }
 
 func (s *System) BuildTun(opts sysnet.TunOpts) (tun.Tun, error) {
-	desired, report := normalizeTunOpts(s.policyConfig(), opts)
-	if report.Err() != nil {
-		return nil, report.Err()
-	}
-	capabilities, err := s.finalPreflight()
-	if err != nil {
-		return nil, err
-	}
-	family := familyForPrefixes(desired.addresses, desired.routes)
-	operation := sysnet.OpCreate
-	if desired.name != "" {
-		operation = sysnet.OpCreateNamed
-	}
-	capability := capabilities.Operation(sysnet.OperationKey{Target: sysnet.TargetTun, Operation: operation, Family: family})
-	if capability.State != sysnet.CapabilityAvailable {
-		return nil, capabilityError("Tun.Create", capability)
-	}
-	return nil, sysnet.ErrNotSupported
+	return s.buildRegularTun(opts)
 }
 
-func (*System) TunWarnings(tun.Tun) []sysnet.Warning { return nil }
+func (s *System) TunWarnings(device tun.Tun) []sysnet.Warning {
+	if _, err := s.lookupRegularTun(device); err != nil {
+		return nil
+	}
+	return nil
+}
 
 func (s *System) SetTunMTU(device tun.Tun, mtu int) error {
-	if err := s.requireOwnedTun(device); err != nil {
-		return err
-	}
-	_, report := normalizeMTU(s.policyConfig(), mtu, "Tun.MTU", false)
-	if err := report.Err(); err != nil {
-		return err
-	}
-	capabilities, err := s.finalPreflight()
-	if err != nil {
-		return err
-	}
-	if capability := capabilities.Operation(sysnet.OperationKey{Target: sysnet.TargetTun, Operation: sysnet.OpSetMTU, Family: sysnet.FamilyNone}); capability.State != sysnet.CapabilityAvailable {
-		return capabilityError("Tun.MTU", capability)
-	}
-	return sysnet.ErrNotSupported
+	return s.setRegularTunMTU(device, mtu)
 }
 
 func (s *System) SetTunAddrs(device tun.Tun, addrs []string) error {
@@ -355,10 +342,7 @@ func (s *System) AddTunAddr(device tun.Tun, addr string) error {
 }
 
 func (s *System) GetTunAddrs(device tun.Tun) ([]string, error) {
-	if err := s.requireOwnedTun(device); err != nil {
-		return nil, err
-	}
-	return nil, sysnet.ErrNotSupported
+	return s.getRegularTunPrefixes(device, prefixAddress)
 }
 
 func (s *System) SetTunRoutes(device tun.Tun, routes []string) error {
@@ -373,21 +357,7 @@ func (s *System) changeTunPrefixes(device tun.Tun, raw []string, path string, ki
 	if err := report.Err(); err != nil {
 		return err
 	}
-	capabilities, err := s.finalPreflight()
-	if err != nil {
-		return err
-	}
-	family := familyForPrefixes(prefixes)
-	if family == sysnet.FamilyNone {
-		family = defaultTunFamily(s.policyConfig())
-	}
-	capability := capabilities.Operation(sysnet.OperationKey{
-		Target: sysnet.TargetTun, Operation: operation, Family: family,
-	})
-	if capability.State != sysnet.CapabilityAvailable {
-		return capabilityError(path, capability)
-	}
-	return sysnet.ErrNotSupported
+	return s.changeRegularTunPrefixes(device, prefixes, path, kind, operation)
 }
 
 func (s *System) AddTunRoute(device tun.Tun, route string) error {
@@ -395,14 +365,14 @@ func (s *System) AddTunRoute(device tun.Tun, route string) error {
 }
 
 func (s *System) GetTunRoutes(device tun.Tun) ([]string, error) {
-	if err := s.requireOwnedTun(device); err != nil {
-		return nil, err
-	}
-	return nil, sysnet.ErrNotSupported
+	return s.getRegularTunPrefixes(device, prefixRoute)
 }
 
 func (s *System) SetTunName(device tun.Tun, _ string) error {
 	if err := s.requireOwnedTun(device); err != nil {
+		return err
+	}
+	if err := s.acceptingWork(); err != nil {
 		return err
 	}
 	return validationError(validationIssue(
@@ -415,10 +385,10 @@ func (s *System) SetTunName(device tun.Tun, _ string) error {
 }
 
 // requireOwnedTun rejects foreign, stale, and closed handles before option or
-// capability checks. M0 cannot create a TUN, so it has no owned handles. M1
-// replaces this scaffold check with lookup in the live TUN inventory.
-func (*System) requireOwnedTun(tun.Tun) error {
-	return sysnet.ErrUnknownTun
+// capability checks.
+func (s *System) requireOwnedTun(device tun.Tun) error {
+	_, err := s.requireRegularTun(device)
+	return err
 }
 
 func (s *System) acceptingWork() error {

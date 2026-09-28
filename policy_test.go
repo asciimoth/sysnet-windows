@@ -42,6 +42,17 @@ func TestNormalizeTunOptions(t *testing.T) {
 	}
 }
 
+func TestNormalizeTunOptionsRejectsInvalidName(t *testing.T) {
+	t.Parallel()
+	_, report := normalizeTunOpts(defaultNormalizedSystemConfig(), sysnet.TunOpts{
+		Name: strings.Repeat("x", 129),
+	})
+	if err := report.Err(); err == nil || !errors.Is(err, sysnet.ErrInvalidOptions) ||
+		len(report.Issues) != 1 || report.Issues[0].Path != "Tun.Name" {
+		t.Fatalf("normalizeTunOpts() report = %+v, want invalid Tun.Name", report)
+	}
+}
+
 func TestDefaultTunDNSNormalization(t *testing.T) {
 	t.Parallel()
 

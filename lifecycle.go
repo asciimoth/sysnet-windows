@@ -103,7 +103,7 @@ func (s *System) finishApply(active bool, recoveryRequired bool) error {
 	if active {
 		next = lifecycleActive
 	}
-	if recoveryRequired {
+	if recoveryRequired || s.state == lifecycleRecoveryRequired {
 		next = lifecycleRecoveryRequired
 	}
 	if err := s.transitionLocked(next); err != nil {

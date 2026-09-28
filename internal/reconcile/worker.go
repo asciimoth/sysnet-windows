@@ -17,9 +17,10 @@ type Handler func(context.Context, []Reason) ([]Entry, error)
 type FailureHandler func(error)
 
 type request struct {
-	ctx     context.Context
-	entries []Entry
-	result  chan error
+	ctx       context.Context
+	entries   []Entry
+	operation Operation
+	result    chan error
 }
 
 // Worker serializes all policy mutations through one goroutine.
@@ -90,6 +91,31 @@ func (w *Worker) Submit(ctx context.Context, entries []Entry) error {
 	return <-result
 }
 
+// Execute runs one bounded operation on the same serialized policy worker as
+// journal transactions. Execute is for a mutation whose boundary already
+// supplies exact rollback and readback, such as a NetIO Manager transaction.
+// It does not add an entry to the ownership journal.
+func (w *Worker) Execute(ctx context.Context, operation Operation) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if operation == nil {
+		return errors.New("execute nil reconciliation operation")
+	}
+	result := make(chan error, 1)
+	req := request{ctx: ctx, operation: operation, result: result}
+	select {
+	case <-w.stop:
+		return ErrStopped
+	case <-w.ctx.Done():
+		return ErrStopped
+	case <-ctx.Done():
+		return ctx.Err()
+	case w.requests <- req:
+	}
+	return <-result
+}
+
 // Enqueue queues a callback reason without waiting. A full queue coalesces the
 // reason with already pending work.
 func (w *Worker) Enqueue(reason Reason) bool {
@@ -139,7 +165,11 @@ func (w *Worker) run() {
 			return
 		case req := <-w.requests:
 			ctx, cancel := mergeContext(w.ctx, req.ctx)
-			req.result <- w.journal.Apply(ctx, req.entries)
+			if req.operation != nil {
+				req.result <- req.operation(ctx)
+			} else {
+				req.result <- w.journal.Apply(ctx, req.entries)
+			}
 			cancel()
 		case <-w.reasons:
 			w.handleReasons()

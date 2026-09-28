@@ -50,7 +50,7 @@ func (NativeFactory) Create(ctx context.Context, config Config) (ManagedTun, err
 	}
 	name := config.Name
 	if name == "" {
-		name = defaultName(guidText)
+		name = defaultName(config.NamePrefix, guidText)
 	}
 	if err := rejectExistingName(name); err != nil {
 		return nil, err
@@ -105,7 +105,10 @@ func canonicalGUID(guid windows.GUID) string {
 	return strings.ToLower(guid.String())
 }
 
-func defaultName(guid string) string {
+func defaultName(prefix, guid string) string {
+	if prefix == "" {
+		prefix = DefaultNamePrefix
+	}
 	compact := strings.NewReplacer("{", "", "}", "", "-", "").Replace(guid)
-	return DefaultNamePrefix + "-" + compact[:12]
+	return prefix + "-" + compact[:12]
 }

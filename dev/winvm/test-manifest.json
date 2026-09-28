@@ -33,7 +33,8 @@
         "github.com/asciimoth/sysnet-windows/integration::TestT04T06NativeNetIOExactOwnership",
         "github.com/asciimoth/sysnet-windows/integration::TestT07T09NativeNetIOMTUReadbackAndPacketBoundary",
         "github.com/asciimoth/sysnet-windows/integration::TestT10T12NativeWintunPacketContractAndMTUReport",
-        "github.com/asciimoth/sysnet-windows/integration::TestT13T15NativeWintunCloseContract"
+        "github.com/asciimoth/sysnet-windows/integration::TestT13T15NativeWintunCloseContract",
+        "github.com/asciimoth/sysnet-windows/integration::TestT16T24NativeRegularTunPublicLifecycle"
       ],
       "plannedCases": [
         "M3 DNS configuration restoration",

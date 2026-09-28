@@ -32,6 +32,10 @@ type Reader interface {
 type Interface struct {
 	LUID  uint64
 	Index uint32
+	// GUID is the durable adapter identity. It is optional for stores which do
+	// not expose a GUID, but native callers supply it so LUID/index reuse is
+	// detected before an owned row is changed.
+	GUID string
 }
 
 // Family identifies one Windows IP-interface row.
@@ -117,3 +121,19 @@ var (
 	// reported as successfully applied by the native API.
 	ErrReadback = errors.New("NetIO readback does not match applied value")
 )
+
+// Failure reports a Manager transaction whose rollback could not prove that
+// its inventory is safe for later cleanup.
+type Failure struct {
+	err error
+}
+
+func (e *Failure) Error() string { return e.err.Error() }
+func (e *Failure) Unwrap() error { return e.err }
+
+// RequiresRecovery reports whether a failed Manager transaction retained
+// observed ownership or could not read the state needed to decide.
+func RequiresRecovery(err error) bool {
+	var failure *Failure
+	return errors.As(err, &failure)
+}

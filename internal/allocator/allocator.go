@@ -22,6 +22,9 @@ var (
 	ErrIncompleteHostState = errors.New("host network state is incomplete")
 	// ErrClosed reports an allocation attempted after its owning System closed.
 	ErrClosed = errors.New("allocator is closed")
+	// ErrReservationConflict reports an address already configured by this
+	// System or observed in current host state.
+	ErrReservationConflict = errors.New("address reservation conflicts with host state")
 )
 
 // Allocator uses one reservation table for IP and subnet allocations. It
@@ -35,6 +38,10 @@ type Allocator struct {
 	attempt  allocationAttempt
 	closed   bool
 	lastErr  error
+
+	ipRefs      map[netip.Addr]int
+	ownedIPRefs map[netip.Addr]int
+	ownedIPs    map[string][]netip.Addr
 }
 
 type allocationAttempt struct {
@@ -46,7 +53,11 @@ type allocationAttempt struct {
 // New creates an allocator for the gonnect private address pools. Host state is
 // read only when an allocation is requested.
 func New(reader netio.Reader, timeout time.Duration) *Allocator {
-	allocator := &Allocator{reader: reader, timeout: timeout}
+	allocator := &Allocator{
+		reader: reader, timeout: timeout,
+		ipRefs: make(map[netip.Addr]int), ownedIPRefs: make(map[netip.Addr]int),
+		ownedIPs: make(map[string][]netip.Addr),
+	}
 	allocator.delegate = gonnectsubnet.NewDefaultAllocator(gonnectsubnet.DefaultAllocatorConfig{
 		IPFilter:     allocator.allowIP,
 		SubnetFilter: allocator.allowSubnet,
@@ -71,6 +82,9 @@ func (a *Allocator) Close() {
 	a.closed = true
 	a.delegate.FreeAllIP()
 	a.delegate.FreeAllSubnets()
+	clear(a.ipRefs)
+	clear(a.ownedIPRefs)
+	clear(a.ownedIPs)
 	a.attempt = allocationAttempt{}
 }
 
@@ -78,8 +92,12 @@ func (a *Allocator) Close() {
 func (a *Allocator) ReserveIP(ip net.IP) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if !a.closed {
-		a.delegate.ReserveIP(ip)
+	address, ok := canonicalIP(ip)
+	if !a.closed && ok {
+		if a.ipRefs[address]+a.ownedIPRefs[address] == 0 {
+			a.delegate.ReserveIP(ip)
+		}
+		a.ipRefs[address] = 1
 	}
 }
 
@@ -91,6 +109,7 @@ func (a *Allocator) AllocIP4() (net.IP, *net.IPNet) {
 		return nil, nil
 	}
 	ip, network := a.delegate.AllocIP4()
+	a.recordAllocatedIP(ip)
 	a.finishAttempt(ip != nil)
 	return ip, network
 }
@@ -103,6 +122,7 @@ func (a *Allocator) AllocIP6() (net.IP, *net.IPNet) {
 		return nil, nil
 	}
 	ip, network := a.delegate.AllocIP6()
+	a.recordAllocatedIP(ip)
 	a.finishAttempt(ip != nil)
 	return ip, network
 }
@@ -111,7 +131,12 @@ func (a *Allocator) AllocIP6() (net.IP, *net.IPNet) {
 func (a *Allocator) FreeIP(ip net.IP) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if !a.closed {
+	address, ok := canonicalIP(ip)
+	if a.closed || !ok || a.ipRefs[address] == 0 {
+		return
+	}
+	delete(a.ipRefs, address)
+	if a.ownedIPRefs[address] == 0 {
 		a.delegate.FreeIP(ip)
 	}
 }
@@ -121,7 +146,211 @@ func (a *Allocator) FreeAllIP() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.closed {
+		clear(a.ipRefs)
 		a.delegate.FreeAllIP()
+		for address := range a.ownedIPRefs {
+			a.delegate.ReserveIP(net.IP(address.AsSlice()))
+		}
+	}
+}
+
+// ReserveOwnedIPs reserves configured adapter addresses without consuming a
+// caller's existing allocator reservation for the same address. owner must be
+// unique until ReleaseOwnedIPs is called.
+func (a *Allocator) ReserveOwnedIPs(owner string, addresses []netip.Addr) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return ErrClosed
+	}
+	if owner == "" {
+		return errors.New("allocator reservation owner is empty")
+	}
+	if _, exists := a.ownedIPs[owner]; exists {
+		return errors.New("allocator reservation owner already exists")
+	}
+	unique := make([]netip.Addr, 0, len(addresses))
+	for _, address := range addresses {
+		address = address.Unmap()
+		if !usableCandidate(address) {
+			return fmt.Errorf("reserve invalid configured address %s", address)
+		}
+		if !slicesContainsAddr(unique, address) {
+			unique = append(unique, address)
+		}
+	}
+	if len(unique) == 0 {
+		a.ownedIPs[owner] = nil
+		return nil
+	}
+	state, err := a.readHostState()
+	if err != nil {
+		return err
+	}
+	for _, address := range unique {
+		if a.ownedIPRefs[address] != 0 || conflictsIP(state, address) {
+			return fmt.Errorf("%w: %s", ErrReservationConflict, address)
+		}
+	}
+	for _, address := range unique {
+		if a.ipRefs[address]+a.ownedIPRefs[address] == 0 {
+			a.delegate.ReserveIP(net.IP(address.AsSlice()))
+		}
+		a.ownedIPRefs[address]++
+	}
+	a.ownedIPs[owner] = unique
+	return nil
+}
+
+// ReplaceOwnedIPs atomically changes an existing owner's address reservation.
+// Caller reservations for the same addresses are not changed.
+func (a *Allocator) ReplaceOwnedIPs(owner string, addresses []netip.Addr) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return ErrClosed
+	}
+	old, exists := a.ownedIPs[owner]
+	if !exists {
+		return errors.New("allocator reservation owner does not exist")
+	}
+	unique := make([]netip.Addr, 0, len(addresses))
+	for _, address := range addresses {
+		address = address.Unmap()
+		if !usableCandidate(address) {
+			return fmt.Errorf("reserve invalid configured address %s", address)
+		}
+		if !slicesContainsAddr(unique, address) {
+			unique = append(unique, address)
+		}
+	}
+	hasAddition := false
+	for _, address := range unique {
+		if slicesContainsAddr(old, address) {
+			continue
+		}
+		hasAddition = true
+	}
+	var state netio.HostState
+	if hasAddition {
+		var err error
+		state, err = a.readHostState()
+		if err != nil {
+			return err
+		}
+	}
+	for _, address := range unique {
+		if slicesContainsAddr(old, address) {
+			continue
+		}
+		if a.ownedIPRefs[address] != 0 || conflictsIPExceptOwner(state, address, old) {
+			return fmt.Errorf("%w: %s", ErrReservationConflict, address)
+		}
+	}
+	a.replaceOwnedIPsLocked(owner, old, unique)
+	return nil
+}
+
+// RestoreOwnedIPs restores a previously verified owner reservation after its
+// corresponding native transaction rolls back. It does not treat the owner's
+// restored native addresses as foreign host conflicts.
+func (a *Allocator) RestoreOwnedIPs(owner string, addresses []netip.Addr) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return ErrClosed
+	}
+	old, exists := a.ownedIPs[owner]
+	if !exists {
+		return errors.New("allocator reservation owner does not exist")
+	}
+	unique := make([]netip.Addr, 0, len(addresses))
+	for _, address := range addresses {
+		address = address.Unmap()
+		if !usableCandidate(address) {
+			return fmt.Errorf("restore invalid configured address %s", address)
+		}
+		if !slicesContainsAddr(unique, address) {
+			unique = append(unique, address)
+		}
+	}
+	a.replaceOwnedIPsLocked(owner, old, unique)
+	return nil
+}
+
+func (a *Allocator) replaceOwnedIPsLocked(owner string, old, unique []netip.Addr) {
+	for _, address := range unique {
+		if slicesContainsAddr(old, address) {
+			continue
+		}
+		if a.ipRefs[address]+a.ownedIPRefs[address] == 0 {
+			a.delegate.ReserveIP(net.IP(address.AsSlice()))
+		}
+		a.ownedIPRefs[address]++
+	}
+	for _, address := range old {
+		if slicesContainsAddr(unique, address) {
+			continue
+		}
+		a.ownedIPRefs[address]--
+		if a.ownedIPRefs[address] == 0 {
+			delete(a.ownedIPRefs, address)
+			if a.ipRefs[address] == 0 {
+				a.delegate.FreeIP(net.IP(address.AsSlice()))
+			}
+		}
+	}
+	a.ownedIPs[owner] = unique
+}
+
+// VerifyOwnedIPsAvailable re-reads host state immediately before an adapter
+// first applies its reserved addresses.
+func (a *Allocator) VerifyOwnedIPsAvailable(owner string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return ErrClosed
+	}
+	addresses, exists := a.ownedIPs[owner]
+	if !exists {
+		return errors.New("allocator reservation owner does not exist")
+	}
+	if len(addresses) == 0 {
+		return nil
+	}
+	state, err := a.readHostState()
+	if err != nil {
+		return err
+	}
+	for _, address := range addresses {
+		if conflictsIP(state, address) {
+			return fmt.Errorf("%w: %s", ErrReservationConflict, address)
+		}
+	}
+	return nil
+}
+
+// ReleaseOwnedIPs releases only the references installed for owner. A caller
+// allocation or explicit reservation for the same address remains reserved.
+func (a *Allocator) ReleaseOwnedIPs(owner string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	addresses, exists := a.ownedIPs[owner]
+	if !exists {
+		return
+	}
+	delete(a.ownedIPs, owner)
+	if a.closed {
+		return
+	}
+	for _, address := range addresses {
+		a.ownedIPRefs[address]--
+		if a.ownedIPRefs[address] == 0 {
+			delete(a.ownedIPRefs, address)
+			if a.ipRefs[address] == 0 {
+				a.delegate.FreeIP(net.IP(address.AsSlice()))
+			}
+		}
 	}
 }
 
@@ -196,6 +425,33 @@ func (a *Allocator) finishAttempt(allocated bool) {
 		a.lastErr = ErrHostStateUnavailable
 	}
 	a.attempt = allocationAttempt{}
+}
+
+func (a *Allocator) recordAllocatedIP(ip net.IP) {
+	if ip == nil {
+		return
+	}
+	address, ok := canonicalIP(ip)
+	if ok {
+		a.ipRefs[address] = 1
+	}
+}
+
+func canonicalIP(ip net.IP) (netip.Addr, bool) {
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return netip.Addr{}, false
+	}
+	return address.Unmap(), true
+}
+
+func slicesContainsAddr(addresses []netip.Addr, want netip.Addr) bool {
+	for _, address := range addresses {
+		if address == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Allocator) allowIP(ip net.IP) bool {
@@ -310,6 +566,37 @@ func conflictsIP(state netio.HostState, candidate netip.Addr) bool {
 	}
 	for _, route := range state.Routes {
 		if usableRoute(route) && route.Contains(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func conflictsIPExceptOwner(state netio.HostState, candidate netip.Addr, owner []netip.Addr) bool {
+	if !usableCandidate(candidate) {
+		return true
+	}
+	for _, address := range state.Addresses {
+		if usableHostAddress(address) && address == candidate && !slicesContainsAddr(owner, address) {
+			return true
+		}
+	}
+	for _, prefix := range state.InterfacePrefixes {
+		if usableHostPrefix(prefix) && prefix.Contains(candidate) && !prefixContainsAny(prefix, owner) {
+			return true
+		}
+	}
+	for _, route := range state.Routes {
+		if usableRoute(route) && route.Contains(candidate) && !prefixContainsAny(route, owner) {
+			return true
+		}
+	}
+	return false
+}
+
+func prefixContainsAny(prefix netip.Prefix, addresses []netip.Addr) bool {
+	for _, address := range addresses {
+		if prefix.Contains(address) {
 			return true
 		}
 	}

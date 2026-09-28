@@ -84,6 +84,43 @@ func TestAllocatorRechecksCandidateBeforeReservation(t *testing.T) {
 	}
 }
 
+func TestOwnedIPReservationDoesNotConsumeCallerReservation(t *testing.T) {
+	t.Parallel()
+	reference := New(staticReader{}, time.Second)
+	first, _ := reference.AllocIP4()
+	if first == nil {
+		t.Fatal("reference AllocIP4 returned nil")
+	}
+	address, ok := netip.AddrFromSlice(first)
+	if !ok {
+		t.Fatalf("reference address %v is invalid", first)
+	}
+
+	allocator := New(staticReader{}, time.Second)
+	if err := allocator.ReserveOwnedIPs("tun-1", []netip.Addr{address.Unmap()}); err != nil {
+		t.Fatalf("ReserveOwnedIPs() error = %v", err)
+	}
+	got, _ := allocator.AllocIP4()
+	if got == nil || got.Equal(first) {
+		t.Fatalf("AllocIP4() = %v, want an address other than owned %v", got, first)
+	}
+
+	shared := New(staticReader{}, time.Second)
+	callerIP, _ := shared.AllocIP4()
+	callerAddress, ok := netip.AddrFromSlice(callerIP)
+	if !ok {
+		t.Fatalf("caller address %v is invalid", callerIP)
+	}
+	if err := shared.ReserveOwnedIPs("tun-2", []netip.Addr{callerAddress.Unmap()}); err != nil {
+		t.Fatalf("shared ReserveOwnedIPs() error = %v", err)
+	}
+	shared.ReleaseOwnedIPs("tun-2")
+	next, _ := shared.AllocIP4()
+	if next == nil || next.Equal(callerIP) {
+		t.Fatalf("AllocIP4() after owned release = %v, want caller reservation %v preserved", next, callerIP)
+	}
+}
+
 func TestT26ConcurrentAllocation(t *testing.T) {
 	t.Parallel()
 	allocator := New(staticReader{}, time.Second)

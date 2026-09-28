@@ -29,14 +29,16 @@ var (
 	ErrIdentityMismatch = errors.New("wintun adapter identity does not match")
 )
 
-// Config is the normalized device configuration used at creation time. GUID
-// is empty for a newly generated stable identity or is a canonical Windows
-// GUID. MTU initializes the packet-facing MTU report only. Applying the native
-// Windows interface MTU is a separate NetIO transaction.
+// Config is the normalized device configuration used at creation time.
+// NamePrefix is used only when Name is empty. GUID is empty for a newly
+// generated stable identity or is a canonical Windows GUID. MTU initializes
+// the packet-facing MTU report only. Applying the native Windows interface MTU
+// is a separate NetIO transaction.
 type Config struct {
-	Name string
-	GUID string
-	MTU  int
+	Name       string
+	NamePrefix string
+	GUID       string
+	MTU        int
 }
 
 // Metadata separates durable adapter identity from identifiers that are valid

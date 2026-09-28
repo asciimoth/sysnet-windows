@@ -17,10 +17,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/asciimoth/gonnect/sysnet"
 	gtun "github.com/asciimoth/gonnect/tun"
+	sysnetwindows "github.com/asciimoth/sysnet-windows"
 	"github.com/asciimoth/sysnet-windows/internal/netio"
 	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
 	"golang.org/x/sys/windows"
+	"golang.zx2c4.com/wintun"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 )
 
@@ -288,6 +291,119 @@ func TestT04T06NativeNetIOExactOwnership(t *testing.T) {
 	assertNativeRowsAbsent(t, ctx, store, iface, replacementAddress, replacementRoute)
 }
 
+func TestT16T24NativeRegularTunPublicLifecycle(t *testing.T) {
+	guid, err := windows.GenerateGUID()
+	if err != nil {
+		t.Fatalf("GenerateGUID() error = %v", err)
+	}
+	name := testAdapterName("public-lifecycle", guid)
+	system, err := sysnetwindows.New(sysnetwindows.SystemConfig{StableGUID: guid.String()})
+	if err != nil {
+		t.Fatalf("windows.New() error = %v", err)
+	}
+	closed := false
+	t.Cleanup(func() {
+		if !closed {
+			_ = system.Close()
+		}
+	})
+
+	firstAddress := netip.MustParsePrefix("198.18.248.1/32")
+	firstRoute := netip.MustParsePrefix("203.0.113.248/32")
+	device, err := system.BuildTun(sysnet.TunOpts{
+		Name: name, TunAddrs: []string{firstAddress.String()},
+		TunRoutes: []string{firstRoute.String()}, MTU: 1400,
+	})
+	if err != nil {
+		t.Fatalf("BuildTun() error = %v", err)
+	}
+	if got, err := system.GetTunAddrs(device); err != nil || !slices.Equal(got, []string{firstAddress.String()}) {
+		t.Fatalf("GetTunAddrs() = %v, %v", got, err)
+	}
+	if got, err := system.GetTunRoutes(device); err != nil || !slices.Equal(got, []string{firstRoute.String()}) {
+		t.Fatalf("GetTunRoutes() = %v, %v", got, err)
+	}
+
+	native, err := wintun.OpenAdapter(name)
+	if err != nil {
+		t.Fatalf("OpenAdapter(%q) error = %v", name, err)
+	}
+	luid := native.LUID()
+	if err := native.Close(); err != nil {
+		t.Fatalf("close inspection adapter handle: %v", err)
+	}
+	row, err := winipcfg.LUID(luid).Interface()
+	if err != nil {
+		t.Fatalf("read public TUN identity: %v", err)
+	}
+	normalizedGUID, err := internaltun.NormalizeGUID(guid.String())
+	if err != nil {
+		t.Fatalf("NormalizeGUID() error = %v", err)
+	}
+	iface := netio.Interface{LUID: luid, Index: row.InterfaceIndex, GUID: normalizedGUID}
+	store := netio.NativeStore{}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	before, err := store.Snapshot(ctx, iface)
+	if err != nil {
+		t.Fatalf("native Snapshot() error = %v", err)
+	}
+	if !nativeStateHasAddress(before, firstAddress) || !nativeStateHasRoute(before, firstRoute) {
+		t.Fatalf("native state does not contain public configuration: %+v", before)
+	}
+
+	replacementAddress := netip.MustParsePrefix("198.18.249.1/32")
+	replacementRoute := netip.MustParsePrefix("203.0.113.249/32")
+	if err := system.SetTunAddrs(device, []string{replacementAddress.String()}); err != nil {
+		t.Fatalf("SetTunAddrs() error = %v", err)
+	}
+	if err := system.SetTunRoutes(device, []string{replacementRoute.String()}); err != nil {
+		t.Fatalf("SetTunRoutes() error = %v", err)
+	}
+	if err := system.SetTunMTU(device, 1380); err != nil {
+		t.Fatalf("SetTunMTU() error = %v", err)
+	}
+	after, err := store.Snapshot(ctx, iface)
+	if err != nil {
+		t.Fatalf("native replacement Snapshot() error = %v", err)
+	}
+	properties, ok := findProperties(after, netio.FamilyIPv4)
+	if !nativeStateHasAddress(after, replacementAddress) || !nativeStateHasRoute(after, replacementRoute) ||
+		nativeStateHasAddress(after, firstAddress) || nativeStateHasRoute(after, firstRoute) ||
+		!ok || properties.MTU != 1380 {
+		t.Fatalf("native replacement state = %+v", after)
+	}
+
+	// Remove an owned row through an independent boundary. The public getter
+	// must not return its stale desired value as healthy.
+	if err := store.DeleteRoute(ctx, iface, netio.Route{
+		Destination: replacementRoute, NextHop: netip.IPv4Unspecified(),
+	}); err != nil {
+		t.Fatalf("remove owned route externally: %v", err)
+	}
+	if _, err := system.GetTunRoutes(device); !errors.Is(err, sysnet.ErrUnavailable) {
+		t.Fatalf("GetTunRoutes() after external removal error = %v, want unavailable", err)
+	}
+	// Restore the exact row so owned shutdown can prove cleanup and leave the
+	// disposable host in its pre-test state.
+	if err := store.CreateRoute(ctx, iface, netio.Route{
+		Destination: replacementRoute, NextHop: netip.IPv4Unspecified(), Metric: 5,
+	}); err != nil {
+		t.Fatalf("restore externally removed route: %v", err)
+	}
+	if err := system.Close(); err != nil {
+		t.Fatalf("System.Close() error = %v", err)
+	}
+	closed = true
+	if _, err := system.GetTunAddrs(device); !errors.Is(err, sysnet.ErrUnknownTun) {
+		t.Fatalf("GetTunAddrs() after close error = %v, want ErrUnknownTun", err)
+	}
+	if reopened, err := wintun.OpenAdapter(name); err == nil {
+		_ = reopened.Close()
+		t.Fatalf("adapter %q remained after System.Close()", name)
+	}
+}
+
 func TestT07T09NativeNetIOMTUReadbackAndPacketBoundary(t *testing.T) {
 	device := createNativeTun(t, "netio-mtu")
 	metadata := device.Metadata()
@@ -408,6 +524,24 @@ func findProperties(state netio.State, family netio.Family) (netio.Properties, b
 		}
 	}
 	return netio.Properties{}, false
+}
+
+func nativeStateHasAddress(state netio.State, prefix netip.Prefix) bool {
+	for _, address := range state.Addresses {
+		if address.Prefix == prefix {
+			return true
+		}
+	}
+	return false
+}
+
+func nativeStateHasRoute(state netio.State, prefix netip.Prefix) bool {
+	for _, route := range state.Routes {
+		if route.Destination == prefix && route.NextHop == netip.IPv4Unspecified() {
+			return true
+		}
+	}
+	return false
 }
 
 func createNativeTun(t *testing.T, label string) internaltun.ManagedTun {

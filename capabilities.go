@@ -61,9 +61,13 @@ type implementationSupport struct {
 }
 
 func currentImplementationSupport() implementationSupport {
-	// Steps 1 through 4 implement policy and reporting only. Later milestones
-	// enable each bit after its native and packet-path gates pass.
+	// Regular TUN creation and mutation are implemented by the M1 lifecycle.
+	// Later milestones enable the default TUN, network, and matcher rows only
+	// after their native and packet-path gates pass.
 	return implementationSupport{
+		regularTun:              true,
+		regularTunDual:          true,
+		regularTunNamed:         true,
 		exclusionRuleValidation: true,
 		matcherRuleValidation:   true,
 	}
@@ -112,16 +116,16 @@ func buildCapabilityReport(
 		capability := implementedCapability(implemented)
 		if family != sysnet.FamilyNone {
 			capability = familyCapability(capability, config, family)
-			capability = dependentCapability(capability, facts.netIO)
 		}
+		capability = dependentCapability(capability, facts.netIO)
 		report.Operations = append(report.Operations, operationCapability(
 			sysnet.TargetTun, sysnet.OpCreate, family, lifecycleCapability(capability, state),
 		))
 		named := implementedCapability(implemented && support.regularTunNamed)
 		if family != sysnet.FamilyNone {
 			named = familyCapability(named, config, family)
-			named = dependentCapability(named, facts.netIO)
 		}
+		named = dependentCapability(named, facts.netIO)
 		report.Operations = append(report.Operations, operationCapability(
 			sysnet.TargetTun, sysnet.OpCreateNamed, family, lifecycleCapability(named, state),
 		))

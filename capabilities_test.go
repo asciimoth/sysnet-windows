@@ -414,8 +414,8 @@ func TestCapabilityUnknownIsResolvedByBuild(t *testing.T) {
 		t.Fatalf("initial state = %v, want unknown", got)
 	}
 	_, err = system.BuildTun(sysnet.TunOpts{TunAddrs: []string{"192.0.2.1/24"}})
-	if !errors.Is(err, sysnet.ErrNotSupported) {
-		t.Fatalf("BuildTun() error = %v, want current implementation stub", err)
+	if !errors.Is(err, sysnet.ErrUnavailable) {
+		t.Fatalf("BuildTun() error = %v, want unavailable dependency", err)
 	}
 	if got := system.Capabilities().Operation(key).State; got != sysnet.CapabilityAvailable {
 		t.Fatalf("resolved state = %v, want available", got)

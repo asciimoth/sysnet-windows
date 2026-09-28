@@ -675,7 +675,7 @@ defer rollback to a later milestone.
    - Complete this step when T04-T09 pass and independent PowerShell or NetIO
      snapshots show only the expected delta.
 
-4. **Step 10 - Finish the regular-TUN public lifecycle.**
+4. **Step 10 - Finish the regular-TUN public lifecycle. (Completed)**
 
     - Connect allocation, Wintun and NetIO through the reconciliation worker.
     - Implement getters from verified observed state. Implement supported

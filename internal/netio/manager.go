@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -130,8 +131,10 @@ func (m *ExactManager) fail(ctx context.Context, iface Interface, before, planne
 	retainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultOperationTimeout)
 	defer cancel()
 	state, readErr := m.snapshot(retainCtx, iface)
+	recoveryRequired := readErr != nil
 	if readErr == nil {
 		retained := retainObservedOwnership(state, before, planned)
+		recoveryRequired = !retained.empty()
 		if retained.empty() {
 			delete(m.inventory, iface)
 		} else {
@@ -140,7 +143,11 @@ func (m *ExactManager) fail(ctx context.Context, iface Interface, before, planne
 	} else {
 		readErr = fmt.Errorf("retain inventory after failed rollback: %w", readErr)
 	}
-	return errors.Join(primary, rollbackErr, readErr)
+	result := errors.Join(primary, rollbackErr, readErr)
+	if recoveryRequired {
+		return &Failure{err: result}
+	}
+	return result
 }
 
 // Read returns the manager-owned state after it verifies that every recorded
@@ -421,11 +428,18 @@ func (m *ExactManager) snapshot(ctx context.Context, iface Interface) (State, er
 	if err != nil {
 		return State{}, err
 	}
-	if state.Interface != iface {
+	if !sameInterfaceIdentity(state.Interface, iface) {
 		return State{}, fmt.Errorf("%w: got LUID %d index %d, want LUID %d index %d", ErrIdentityMismatch,
 			state.Interface.LUID, state.Interface.Index, iface.LUID, iface.Index)
 	}
 	return state, nil
+}
+
+func sameInterfaceIdentity(observed, expected Interface) bool {
+	if observed.LUID != expected.LUID || observed.Index != expected.Index {
+		return false
+	}
+	return expected.GUID == "" || strings.EqualFold(observed.GUID, expected.GUID)
 }
 
 func normalizeConfig(config Config) (Config, error) {
