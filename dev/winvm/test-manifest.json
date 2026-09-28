@@ -20,6 +20,15 @@
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT07T09ExactManagerRequiresReadback",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT07T09ExactManagerReleasesRestoredProperties",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT07T09ExactManagerValidatesIdentityAndMTU",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestSocketBinderAppliesAndReadsBackEachFamily",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestSocketBinderRejectsLocalAddressBeforeSocketMutation",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestSocketBinderCallerRunsBeforeMandatoryConflictCheck",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestSocketBinderUsesReplacementSnapshotAfterCallerControl",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestSocketBinderExposesAllFailuresWithContext",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestNewSocketBinderValidation",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestNativeSocketBinderTCPAndUDP",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestNativeSocketBinderFamilyFailure",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestNativeSocketBinderUnderlayLoss",
         "github.com/asciimoth/sysnet-windows/internal/underlay::TestN17N19N20SelectRanksAndFiltersCandidates",
         "github.com/asciimoth/sysnet-windows/internal/underlay::TestN18SelectPublishesFamiliesIndependently",
         "github.com/asciimoth/sysnet-windows/internal/underlay::TestN21N24MonitorReconcilesNetworkChanges",
@@ -29,7 +38,6 @@
         "github.com/asciimoth/sysnet-windows/internal/tun::TestT13T15CloseUnblocksIOAndNormalizesErrors"
       ],
       "plannedCases": [
-        "M2 native socket binding cases",
         "M3 native DNS cases",
         "M4 native owner lookup cases"
       ]

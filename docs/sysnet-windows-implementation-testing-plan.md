@@ -706,7 +706,7 @@ defer rollback to a later milestone.
     - Complete this step when N17-N24 pass with separate IPv4/IPv6 paths,
       interface recreation, DHCP change and resume.
 
-2. **Step 12 - Implement the pre-connect socket binding primitive.**
+2. **Step 12 - Implement the pre-connect socket binding primitive. (Completed)**
 
     - Use `syscall.RawConn.Control` before bind or connect. Set
       `IP_UNICAST_IF` for IPv4 in network byte order and `IPV6_UNICAST_IF` for
