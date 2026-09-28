@@ -80,8 +80,9 @@ type State struct {
 	Properties []Properties
 }
 
-// Config is the complete desired state owned by one Manager. It does not
-// describe foreign rows, which the manager always preserves.
+// Config is the complete state desired by one Manager. Addresses and routes
+// are owned rows. Properties can already have the desired value, in which case
+// the manager preserves them without taking ownership.
 type Config struct {
 	Addresses  []netip.Prefix
 	Routes     []Route
@@ -107,6 +108,8 @@ type Store interface {
 type Manager interface {
 	Apply(context.Context, Interface, Config) error
 	Read(context.Context, Interface) (Config, error)
+	// Verify compares desired state with owned rows and effective properties.
+	Verify(context.Context, Interface, Config) error
 }
 
 var (

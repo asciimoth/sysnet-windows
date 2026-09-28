@@ -738,13 +738,21 @@ func usableHostAddress(address netip.Addr) bool {
 }
 
 func usableHostPrefix(prefix netip.Prefix) bool {
-	return prefix.IsValid() && usableCandidate(prefix.Addr())
+	return usableNonDefaultPrefix(prefix)
 }
 
 func usableRoute(prefix netip.Prefix) bool {
 	// A default route proves reachability. It does not mean that the complete
 	// address family is locally occupied.
-	return prefix.IsValid() && prefix.Bits() != 0 && usableCandidate(prefix.Addr())
+	return usableNonDefaultPrefix(prefix)
+}
+
+func usableNonDefaultPrefix(prefix netip.Prefix) bool {
+	if !prefix.IsValid() || prefix.Bits() == 0 {
+		return false
+	}
+	address := prefix.Addr()
+	return !address.IsLoopback() && !address.IsMulticast()
 }
 
 func prefixesOverlap(left, right netip.Prefix) bool {

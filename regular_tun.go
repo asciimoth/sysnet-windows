@@ -230,20 +230,10 @@ func (s *System) buildRegularTun(opts sysnet.TunOpts) (gtun.Tun, error) {
 				if result.closed.Load() && expected == reconcile.ExpectedUndone {
 					return nil
 				}
-				got, readErr := s.dependencies.netIO.Read(ctx, result.interfaceID())
-				if readErr != nil {
-					return readErr
-				}
 				if expected == reconcile.ExpectedUndone {
-					if netIOConfigEmpty(got) {
-						return nil
-					}
-					return errors.New("regular TUN NetIO state is still owned")
+					return s.dependencies.netIO.Verify(ctx, result.interfaceID(), netio.Config{})
 				}
-				if !netIOConfigEqual(got, want) {
-					return errors.New("regular TUN NetIO readback differs from desired state")
-				}
-				return nil
+				return s.dependencies.netIO.Verify(ctx, result.interfaceID(), want)
 			},
 		},
 	}
@@ -290,15 +280,11 @@ func (s *System) lookupRegularTun(device gtun.Tun) (*regularTun, error) {
 }
 
 func (s *System) observeRegularTun(ctx context.Context, device *regularTun) (netio.Config, error) {
-	observed, err := s.dependencies.netIO.Read(ctx, device.interfaceID())
-	if err != nil {
+	want, _, _, _, _ := device.snapshot()
+	if err := s.dependencies.netIO.Verify(ctx, device.interfaceID(), want); err != nil {
 		return netio.Config{}, s.failRegularTun(device, err)
 	}
-	want, _, _, _, _ := device.snapshot()
-	if !netIOConfigEqual(observed, want) {
-		return netio.Config{}, s.failRegularTun(device, errors.New("verified regular TUN state changed externally"))
-	}
-	return observed, nil
+	return want, nil
 }
 
 func (s *System) failRegularTun(device *regularTun, cause error) error {
@@ -587,15 +573,11 @@ func (s *System) verifyRegularTunStateAfterError(
 	// to restore packet/native agreement. Keep the TUN usable only after another
 	// read confirms the required state.
 	verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.config.operationTimeout)
-	observed, readErr := s.dependencies.netIO.Read(verifyCtx, device.interfaceID())
+	readErr := s.dependencies.netIO.Verify(verifyCtx, device.interfaceID(), expected)
 	cancel()
 	if readErr != nil {
 		return s.failRegularTun(device, errors.Join(err,
 			fmt.Errorf("verify regular TUN state after failed mutation: %w", readErr)))
-	}
-	if !netIOConfigEqual(observed, expected) {
-		return s.failRegularTun(device, errors.Join(err,
-			errors.New("regular TUN state differs after failed mutation")))
 	}
 	return err
 }

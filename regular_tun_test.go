@@ -99,6 +99,47 @@ func TestRegularTunLifecycleAndTransactions(t *testing.T) {
 	}
 }
 
+func TestRegularTunAcceptsPreexistingDesiredInterfaceProperties(t *testing.T) {
+	t.Parallel()
+	iface := netio.Interface{
+		LUID: 101, Index: 11, GUID: "{00000000-0000-0000-0000-000000000001}",
+	}
+	store := &preexistingPropertyStore{state: netio.State{
+		Interface: iface,
+		Properties: []netio.Properties{
+			{Family: netio.FamilyIPv4, MTU: defaultTunMTU, Metric: regularTunRouteMetric},
+			{Family: netio.FamilyIPv6, MTU: defaultTunMTU, Metric: regularTunRouteMetric},
+		},
+	}}
+	manager, err := netio.NewManager(store)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	system := newRegularTunTestSystem(t, &regularTunFactory{}, manager)
+	t.Cleanup(func() { _ = system.Close() })
+
+	device, err := system.BuildTun(sysnet.TunOpts{})
+	if err != nil {
+		t.Fatalf("BuildTun() error = %v", err)
+	}
+	if _, err := system.GetTunAddrs(device); err != nil {
+		t.Fatalf("GetTunAddrs() error = %v", err)
+	}
+	owned, err := manager.Read(context.Background(), iface)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if !netIOConfigEmpty(owned) {
+		t.Fatalf("owned NetIO configuration = %+v, want empty", owned)
+	}
+	if err := device.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if store.setCalls != 0 {
+		t.Fatalf("SetProperties() calls = %d, want no mutation of preexisting values", store.setCalls)
+	}
+}
+
 func TestT16T18RegularTunRejectsForeignClosedAndReusedIdentity(t *testing.T) {
 	firstFactory := &regularTunFactory{}
 	firstManager := newRegularTunManager()
@@ -783,7 +824,7 @@ func TestRegularTunCreateUseCloseLoop(t *testing.T) {
 	}
 }
 
-func newRegularTunTestSystem(t *testing.T, factory *regularTunFactory, manager *regularTunManager) *System {
+func newRegularTunTestSystem(t *testing.T, factory *regularTunFactory, manager netio.Manager) *System {
 	t.Helper()
 	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
 	system, err := newSystem(SystemConfig{}, systemDependencies{
@@ -943,6 +984,40 @@ type regularTunHostReader struct {
 	calls  int
 }
 
+type preexistingPropertyStore struct {
+	state    netio.State
+	setCalls int
+}
+
+func (s *preexistingPropertyStore) Snapshot(context.Context, netio.Interface) (netio.State, error) {
+	return s.state, nil
+}
+
+func (*preexistingPropertyStore) CreateAddress(context.Context, netio.Interface, netip.Prefix) error {
+	return errors.New("unexpected CreateAddress call")
+}
+
+func (*preexistingPropertyStore) DeleteAddress(context.Context, netio.Interface, netip.Prefix) error {
+	return errors.New("unexpected DeleteAddress call")
+}
+
+func (*preexistingPropertyStore) WaitAddressUsable(context.Context, netio.Interface, netip.Addr) error {
+	return errors.New("unexpected WaitAddressUsable call")
+}
+
+func (*preexistingPropertyStore) CreateRoute(context.Context, netio.Interface, netio.Route) error {
+	return errors.New("unexpected CreateRoute call")
+}
+
+func (*preexistingPropertyStore) DeleteRoute(context.Context, netio.Interface, netio.Route) error {
+	return errors.New("unexpected DeleteRoute call")
+}
+
+func (s *preexistingPropertyStore) SetProperties(context.Context, netio.Interface, netio.Properties) error {
+	s.setCalls++
+	return errors.New("unexpected SetProperties call")
+}
+
 func (r *regularTunHostReader) ReadHostState(context.Context) (netio.HostState, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1005,6 +1080,22 @@ func (m *regularTunManager) Read(_ context.Context, iface netio.Interface) (neti
 		return netio.Config{}, m.damage
 	}
 	return cloneNetIOConfig(m.states[iface]), nil
+}
+
+func (m *regularTunManager) Verify(_ context.Context, iface netio.Interface, want netio.Config) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.readCalls++
+	if current, exists := m.identities[iface.LUID]; exists && current != iface {
+		return netio.ErrIdentityMismatch
+	}
+	if m.damage != nil {
+		return m.damage
+	}
+	if !netIOConfigEqual(m.states[iface], want) {
+		return netio.ErrReadback
+	}
+	return nil
 }
 
 func (m *regularTunManager) config(iface netio.Interface) netio.Config {

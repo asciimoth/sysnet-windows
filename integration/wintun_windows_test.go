@@ -448,6 +448,9 @@ func TestT07T09NativeNetIOMTUReadbackAndPacketBoundary(t *testing.T) {
 	if err := manager.Apply(ctx, iface, netio.Config{Properties: []netio.Properties{want}}); err != nil {
 		t.Fatalf("Apply(MTU and metric) error = %v", err)
 	}
+	if err := manager.Verify(ctx, iface, netio.Config{Properties: []netio.Properties{want}}); err != nil {
+		t.Fatalf("Verify(MTU and metric) error = %v", err)
+	}
 	after, err := store.Snapshot(ctx, iface)
 	if err != nil {
 		t.Fatalf("Snapshot(after) error = %v", err)
@@ -485,6 +488,18 @@ func TestT07T09NativeNetIOMTUReadbackAndPacketBoundary(t *testing.T) {
 	}
 	if got, ok := findProperties(restored, netio.FamilyIPv4); !ok || got != original {
 		t.Fatalf("restored IPv4 properties = %+v, %t; want %+v", got, ok, original)
+	}
+	// Applying an already-current value does not take ownership. Verification
+	// must still compare the effective native value with the desired value.
+	originalConfig := netio.Config{Properties: []netio.Properties{original}}
+	if err := manager.Apply(ctx, iface, originalConfig); err != nil {
+		t.Fatalf("Apply(preexisting properties) error = %v", err)
+	}
+	if err := manager.Verify(ctx, iface, originalConfig); err != nil {
+		t.Fatalf("Verify(preexisting properties) error = %v", err)
+	}
+	if got, err := manager.Read(ctx, iface); err != nil || len(got.Properties) != 0 {
+		t.Fatalf("Read(preexisting properties) = %+v, %v; want no owned properties", got, err)
 	}
 }
 

@@ -690,6 +690,94 @@ func TestT07T09ExactManagerReleasesRestoredProperties(t *testing.T) {
 	}
 }
 
+func TestExactManagerVerifyAcceptsDesiredUnownedProperties(t *testing.T) {
+	t.Parallel()
+	original4 := Properties{Family: FamilyIPv4, MTU: 1400, Metric: 5}
+	original6 := Properties{Family: FamilyIPv6, MTU: 1400, Metric: 5}
+	store := &fakeStore{state: State{
+		Interface:  testInterface,
+		Properties: []Properties{original4, original6},
+	}}
+	manager, err := NewManager(store)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	desired := Config{Properties: []Properties{original4, original6}}
+	if err := manager.Apply(context.Background(), testInterface, desired); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	owned, err := manager.Read(context.Background(), testInterface)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(owned.Properties) != 0 {
+		t.Fatalf("Read().Properties = %+v, want no ownership of existing values", owned.Properties)
+	}
+	if err := manager.Verify(context.Background(), testInterface, desired); err != nil {
+		t.Fatalf("Verify(desired) error = %v", err)
+	}
+	if err := manager.Verify(context.Background(), testInterface, Config{}); err != nil {
+		t.Fatalf("Verify(empty) error = %v", err)
+	}
+
+	store.mu.Lock()
+	store.state.Properties[0].Metric++
+	store.mu.Unlock()
+	if err := manager.Verify(context.Background(), testInterface, desired); !errors.Is(err, ErrReadback) {
+		t.Fatalf("Verify(changed properties) error = %v, want ErrReadback", err)
+	}
+}
+
+func TestExactManagerVerifyRequiresOwnershipOfRows(t *testing.T) {
+	t.Parallel()
+	address := netip.MustParsePrefix("10.19.0.1/24")
+	route := Route{
+		Destination: netip.MustParsePrefix("203.0.113.0/24"),
+		NextHop:     netip.IPv4Unspecified(),
+		Metric:      5,
+	}
+	desired := Config{Addresses: []netip.Prefix{address}, Routes: []Route{route}}
+	store := &fakeStore{state: State{
+		Interface: testInterface,
+		Addresses: []Address{{Prefix: address, Usable: true}},
+		Routes:    []Route{route},
+	}}
+	manager, err := NewManager(store)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	if err := manager.Verify(context.Background(), testInterface, desired); !errors.Is(err, ErrReadback) {
+		t.Fatalf("Verify(foreign rows) error = %v, want ErrReadback", err)
+	}
+}
+
+func TestExactManagerVerifyRejectsMissingAndExtraOwnedState(t *testing.T) {
+	t.Parallel()
+	address := netip.MustParsePrefix("10.19.0.1/24")
+	properties := Properties{Family: FamilyIPv4, MTU: 1400, Metric: 5}
+	store := &fakeStore{state: State{
+		Interface:  testInterface,
+		Properties: []Properties{{Family: FamilyIPv4, MTU: 1500, Metric: 25, AutomaticMetric: true}},
+	}}
+	manager, err := NewManager(store)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	desired := Config{Addresses: []netip.Prefix{address}, Properties: []Properties{properties}}
+	if err := manager.Apply(context.Background(), testInterface, desired); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if err := manager.Verify(context.Background(), testInterface, desired); err != nil {
+		t.Fatalf("Verify(applied) error = %v", err)
+	}
+	if err := manager.Verify(context.Background(), testInterface, Config{Properties: []Properties{properties}}); !errors.Is(err, ErrReadback) {
+		t.Fatalf("Verify(missing address) error = %v, want ErrReadback", err)
+	}
+	if err := manager.Verify(context.Background(), testInterface, Config{Addresses: []netip.Prefix{address}}); !errors.Is(err, ErrReadback) {
+		t.Fatalf("Verify(missing properties) error = %v, want ErrReadback", err)
+	}
+}
+
 func TestT04T06ExactManagerRetainsOwnershipAfterFailedRollback(t *testing.T) {
 	store := &fakeStore{
 		state:             State{Interface: testInterface},

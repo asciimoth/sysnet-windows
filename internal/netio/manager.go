@@ -204,6 +204,51 @@ func (m *ExactManager) Read(ctx context.Context, iface Interface) (Config, error
 	return result, nil
 }
 
+// Verify checks one complete desired configuration against one native
+// snapshot. Addresses and routes must be in the manager inventory. Interface
+// properties can already have the desired value without being manager-owned.
+func (m *ExactManager) Verify(ctx context.Context, iface Interface, config Config) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	desired, err := normalizeConfig(config)
+	if err != nil {
+		return err
+	}
+	if err := validateInterface(iface); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	state, err := m.snapshot(ctx, iface)
+	if err != nil {
+		return err
+	}
+	owned := m.inventory[iface]
+	if owned == nil {
+		owned = newOwnedState()
+	}
+	if err := verifyOwnership(state, owned); err != nil {
+		return err
+	}
+	desiredAddresses, desiredRoutes, desiredProperties := indexConfig(desired)
+	if !equalMap(owned.addresses, desiredAddresses) || !equalMap(owned.routes, desiredRoutes) {
+		return fmt.Errorf("%w: owned rows differ from desired configuration", ErrReadback)
+	}
+	properties := propertiesMap(state)
+	for family, want := range desiredProperties {
+		if got, ok := properties[family]; !ok || got != want {
+			return fmt.Errorf("%w: IPv%d interface properties differ from desired configuration", ErrReadback, family)
+		}
+	}
+	for family := range owned.props {
+		if _, ok := desiredProperties[family]; !ok {
+			return fmt.Errorf("%w: owned IPv%d interface properties are not desired", ErrReadback, family)
+		}
+	}
+	return nil
+}
+
 func (m *ExactManager) plan(iface Interface, current State, owned *ownedState, desired Config) ([]mutation, *ownedState, error) {
 	addresses, routes, properties := indexState(current)
 	desiredAddresses, desiredRoutes, desiredProperties := indexConfig(desired)
@@ -669,6 +714,18 @@ func indexConfig(config Config) (map[string]netip.Prefix, map[string]Route, map[
 		properties[value.Family] = value
 	}
 	return addresses, routes, properties
+}
+
+func equalMap[K comparable, V comparable](left, right map[K]V) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func addressMap(state State) map[string]Address {

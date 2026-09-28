@@ -166,7 +166,7 @@ func (w *Worker) run() {
 		case req := <-w.requests:
 			ctx, cancel := mergeContext(w.ctx, req.ctx)
 			if req.operation != nil {
-				req.result <- req.operation(ctx)
+				w.execute(ctx, req)
 			} else {
 				req.result <- w.journal.Apply(ctx, req.entries)
 			}
@@ -174,6 +174,28 @@ func (w *Worker) run() {
 		case <-w.reasons:
 			w.handleReasons()
 		}
+	}
+}
+
+func (w *Worker) execute(ctx context.Context, req request) {
+	result := make(chan error, 1)
+	go func() { result <- req.operation(ctx) }()
+	select {
+	case err := <-result:
+		req.result <- err
+	case <-ctx.Done():
+		// Prefer a completed call when completion raced the deadline.
+		select {
+		case err := <-result:
+			req.result <- err
+			return
+		default:
+		}
+		// The operation can have changed native state before it observed
+		// cancellation. Release the caller with an explicit recovery result, but
+		// keep this worker serialized until the native call returns.
+		req.result <- &Failure{err: ctx.Err(), recoveryRequired: true}
+		<-result
 	}
 }
 

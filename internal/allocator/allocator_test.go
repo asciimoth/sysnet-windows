@@ -316,14 +316,64 @@ func TestReserveOwnedIPsRejectsEveryOverlappingHostResource(t *testing.T) {
 	}
 }
 
+func TestReserveOwnedIPsRejectsNonDefaultPrefixesWithUnspecifiedBase(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		candidate netip.Prefix
+		state     netio.HostState
+	}{
+		{
+			name:      "IPv4 interface prefix",
+			candidate: netip.MustParsePrefix("10.70.1.1/16"),
+			state: netio.HostState{InterfacePrefixes: []netip.Prefix{
+				netip.MustParsePrefix("0.0.0.0/1"),
+			}},
+		},
+		{
+			name:      "IPv4 route",
+			candidate: netip.MustParsePrefix("10.70.1.1/16"),
+			state: netio.HostState{Routes: []netip.Prefix{
+				netip.MustParsePrefix("0.0.0.0/1"),
+			}},
+		},
+		{
+			name:      "IPv6 interface prefix",
+			candidate: netip.MustParsePrefix("2001:db8:70::1/64"),
+			state: netio.HostState{InterfacePrefixes: []netip.Prefix{
+				netip.MustParsePrefix("::/1"),
+			}},
+		},
+		{
+			name:      "IPv6 route",
+			candidate: netip.MustParsePrefix("2001:db8:70::1/64"),
+			state: netio.HostState{Routes: []netip.Prefix{
+				netip.MustParsePrefix("::/1"),
+			}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			allocator := New(staticReader{state: test.state}, time.Second)
+			if err := allocator.ReserveOwnedIPs("tun-1", []netip.Prefix{test.candidate}); !errors.Is(err, ErrReservationConflict) {
+				t.Fatalf("ReserveOwnedIPs() error = %v, want ErrReservationConflict", err)
+			}
+		})
+	}
+}
+
 func TestReserveOwnedIPsAllowsDefaultAndUnrelatedRoutes(t *testing.T) {
 	t.Parallel()
 	allocator := New(staticReader{state: netio.HostState{Routes: []netip.Prefix{
 		netip.MustParsePrefix("0.0.0.0/0"),
+		netip.MustParsePrefix("::/0"),
 		netip.MustParsePrefix("192.0.2.0/24"),
+		netip.MustParsePrefix("2001:db8:ffff::/48"),
 	}}}, time.Second)
 	if err := allocator.ReserveOwnedIPs("tun-1", []netip.Prefix{
 		netip.MustParsePrefix("10.70.1.1/16"),
+		netip.MustParsePrefix("2001:db8:70::1/64"),
 	}); err != nil {
 		t.Fatalf("ReserveOwnedIPs() error = %v", err)
 	}

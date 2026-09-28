@@ -234,6 +234,118 @@ func TestWorkerSubmitPreservesRecoveryFailureAfterDeadline(t *testing.T) {
 	}
 }
 
+func TestWorkerExecuteReturnsRecoveryFailureAtRequestDeadline(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	worker := NewWorker(context.Background(), nil, nil, nil)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- worker.Execute(ctx, func(context.Context) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) || !RequiresRecovery(err) {
+			t.Fatalf("Execute() error = %v, want recovery deadline", err)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("Execute() did not honor its request deadline")
+	}
+	close(release)
+	if err := worker.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+}
+
+func TestWorkerExecuteRemainsSerializedAfterCallerDeadline(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	worker := NewWorker(context.Background(), nil, nil, nil)
+	firstStarted := make(chan struct{})
+	firstRelease := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	firstResult := make(chan error, 1)
+	go func() {
+		firstResult <- worker.Execute(ctx, func(context.Context) error {
+			close(firstStarted)
+			<-firstRelease
+			return nil
+		})
+	}()
+	<-firstStarted
+	if err := <-firstResult; !errors.Is(err, context.DeadlineExceeded) || !RequiresRecovery(err) {
+		t.Fatalf("first Execute() error = %v, want recovery deadline", err)
+	}
+
+	secondStarted := make(chan struct{})
+	secondResult := make(chan error, 1)
+	go func() {
+		secondResult <- worker.Execute(context.Background(), func(context.Context) error {
+			close(secondStarted)
+			return nil
+		})
+	}()
+	select {
+	case <-secondStarted:
+		close(firstRelease)
+		t.Fatal("second operation started while the timed-out operation was still running")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(firstRelease)
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second operation did not start after the first operation returned")
+	}
+	if err := <-secondResult; err != nil {
+		t.Fatalf("second Execute() error = %v", err)
+	}
+	if err := worker.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+}
+
+func TestWorkerStopIsBoundedWhileTimedOutExecuteStillRuns(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	worker := NewWorker(context.Background(), nil, nil, nil)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	requestCtx, cancelRequest := context.WithTimeout(context.Background(), timeout)
+	defer cancelRequest()
+	result := make(chan error, 1)
+	go func() {
+		result <- worker.Execute(requestCtx, func(context.Context) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	if err := <-result; !errors.Is(err, context.DeadlineExceeded) {
+		close(release)
+		t.Fatalf("Execute() error = %v, want deadline", err)
+	}
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), timeout)
+	err := worker.Stop(stopCtx)
+	cancelStop()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		close(release)
+		t.Fatalf("Stop() error = %v, want deadline", err)
+	}
+	close(release)
+	if err := worker.Stop(context.Background()); err != nil {
+		t.Fatalf("second Stop() error = %v", err)
+	}
+}
+
 func TestResourcesCloseInReverseAndRejectLateTrack(t *testing.T) {
 	t.Parallel()
 	var resources Resources
