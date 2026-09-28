@@ -389,14 +389,15 @@ func (s *System) setRegularTunMTU(device gtun.Tun, raw int) error {
 			next.Properties[index].MTU = uint32(mtu)
 		}
 		if err := s.dependencies.netIO.Apply(ctx, current.interfaceID(), next); err != nil {
-			return s.translateRegularTunMutationError(current, err)
+			return s.translateRegularTunMutationError(ctx, current, observed, err)
 		}
 		if err := current.native.UpdateReportedMTU(mtu); err != nil {
 			rollbackCtx, cancelRollback := context.WithTimeout(context.WithoutCancel(ctx), s.config.operationTimeout)
 			rollbackErr := s.dependencies.netIO.Apply(rollbackCtx, current.interfaceID(), previous)
 			cancelRollback()
 			if rollbackErr != nil {
-				return s.failRegularTun(current, errors.Join(err, fmt.Errorf("restore NetIO MTU: %w", rollbackErr)))
+				return s.verifyRegularTunStateAfterError(ctx, current, previous,
+					errors.Join(err, fmt.Errorf("restore NetIO MTU: %w", rollbackErr)))
 			}
 			return err
 		}
@@ -472,7 +473,7 @@ func (s *System) changeRegularTunPrefixes(
 				reservationErr := s.allocator.RestoreOwnedIPs(reservationID, observed.Addresses)
 				err = errors.Join(err, reservationErr)
 			}
-			return s.translateRegularTunMutationError(current, err)
+			return s.translateRegularTunMutationError(ctx, current, observed, err)
 		}
 		current.commit(next, mtu)
 		return nil
@@ -556,10 +557,45 @@ func (s *System) getRegularTunPrefixes(device gtun.Tun, kind prefixKind) ([]stri
 	return result, nil
 }
 
-func (s *System) translateRegularTunMutationError(device *regularTun, err error) error {
-	if netio.RequiresRecovery(err) || errors.Is(err, netio.ErrIdentityMismatch) ||
-		errors.Is(err, netio.ErrResourceConflict) || errors.Is(err, netio.ErrReadback) {
+func (s *System) translateRegularTunMutationError(
+	ctx context.Context,
+	device *regularTun,
+	expected netio.Config,
+	err error,
+) error {
+	if netio.RequiresRecovery(err) || errors.Is(err, netio.ErrIdentityMismatch) {
 		return s.failRegularTun(device, err)
+	}
+	if !errors.Is(err, netio.ErrResourceConflict) && !errors.Is(err, netio.ErrReadback) {
+		return err
+	}
+	return s.verifyRegularTunStateAfterError(ctx, device, expected, err)
+}
+
+func (s *System) verifyRegularTunStateAfterError(
+	ctx context.Context,
+	device *regularTun,
+	expected netio.Config,
+	err error,
+) error {
+	if netio.RequiresRecovery(err) || errors.Is(err, netio.ErrIdentityMismatch) {
+		return s.failRegularTun(device, err)
+	}
+	// ExactManager can report a native conflict or readback error after its
+	// rollback independently proves that the preceding configuration is still
+	// intact. An MTU report failure can also require a second NetIO transaction
+	// to restore packet/native agreement. Keep the TUN usable only after another
+	// read confirms the required state.
+	verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.config.operationTimeout)
+	observed, readErr := s.dependencies.netIO.Read(verifyCtx, device.interfaceID())
+	cancel()
+	if readErr != nil {
+		return s.failRegularTun(device, errors.Join(err,
+			fmt.Errorf("verify regular TUN state after failed mutation: %w", readErr)))
+	}
+	if !netIOConfigEqual(observed, expected) {
+		return s.failRegularTun(device, errors.Join(err,
+			errors.New("regular TUN state differs after failed mutation")))
 	}
 	return err
 }

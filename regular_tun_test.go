@@ -506,6 +506,193 @@ func TestRegularTunSetterFailurePreservesVerifiedState(t *testing.T) {
 	}
 }
 
+func TestRegularTunVerifiedNetIOErrorsRemainRetryable(t *testing.T) {
+	tests := []struct {
+		name      string
+		netIOErr  error
+		operation func(*System, gtun.Tun) error
+		verifyOld func(*testing.T, *System, gtun.Tun)
+	}{
+		{
+			name: "address readback", netIOErr: netio.ErrReadback,
+			operation: func(system *System, device gtun.Tun) error {
+				return system.SetTunAddrs(device, []string{"10.27.1.1/24"})
+			},
+			verifyOld: func(t *testing.T, system *System, device gtun.Tun) {
+				t.Helper()
+				if got, want := mustGetAddrs(t, system, device), []string{"10.26.1.1/24"}; !slices.Equal(got, want) {
+					t.Fatalf("addresses after verified rollback = %v, want %v", got, want)
+				}
+			},
+		},
+		{
+			name: "route conflict", netIOErr: netio.ErrResourceConflict,
+			operation: func(system *System, device gtun.Tun) error {
+				return system.SetTunRoutes(device, []string{"10.29.0.0/16"})
+			},
+			verifyOld: func(t *testing.T, system *System, device gtun.Tun) {
+				t.Helper()
+				if got, want := mustGetRoutes(t, system, device), []string{"10.28.0.0/16"}; !slices.Equal(got, want) {
+					t.Fatalf("routes after verified rollback = %v, want %v", got, want)
+				}
+			},
+		},
+		{
+			name: "MTU readback", netIOErr: netio.ErrReadback,
+			operation: func(system *System, device gtun.Tun) error {
+				return system.SetTunMTU(device, 1300)
+			},
+			verifyOld: func(t *testing.T, _ *System, device gtun.Tun) {
+				t.Helper()
+				if got, err := device.MTU(); err != nil || got != defaultTunMTU {
+					t.Fatalf("MTU after verified rollback = %d, %v; want %d, nil", got, err, defaultTunMTU)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			factory := &regularTunFactory{}
+			manager := newRegularTunManager()
+			system := newRegularTunTestSystem(t, factory, manager)
+			t.Cleanup(func() { _ = system.Close() })
+			device, err := system.BuildTun(sysnet.TunOpts{
+				TunAddrs: []string{"10.26.1.1/24"}, TunRoutes: []string{"10.28.0.0/16"},
+			})
+			if err != nil {
+				t.Fatalf("BuildTun() error = %v", err)
+			}
+
+			manager.failNextApply = errors.Join(errInjectedRegularTun, test.netIOErr)
+			err = test.operation(system, device)
+			if !errors.Is(err, errInjectedRegularTun) || netio.RequiresRecovery(err) {
+				t.Fatalf("first operation error = %v, want verified non-recovery failure", err)
+			}
+			test.verifyOld(t, system, device)
+			if system.state != lifecycleActive {
+				t.Fatalf("System state = %s, want active", system.state)
+			}
+			if err := test.operation(system, device); err != nil {
+				t.Fatalf("retry operation error = %v", err)
+			}
+		})
+	}
+}
+
+func TestRegularTunNetIOErrorRequiresVerifiedPreviousState(t *testing.T) {
+	tests := []struct {
+		name      string
+		afterFail func(*regularTunManager, netio.Interface)
+		wantCause error
+	}{
+		{
+			name: "changed state",
+			afterFail: func(manager *regularTunManager, iface netio.Interface) {
+				changed := manager.states[iface]
+				changed.Addresses = []netip.Prefix{netip.MustParsePrefix("10.31.1.1/24")}
+				manager.states[iface] = changed
+			},
+		},
+		{
+			name: "read failure",
+			afterFail: func(manager *regularTunManager, _ netio.Interface) {
+				manager.damage = errInjectedRegularTun
+			},
+			wantCause: errInjectedRegularTun,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			factory := &regularTunFactory{}
+			manager := newRegularTunManager()
+			system := newRegularTunTestSystem(t, factory, manager)
+			device, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{"10.30.1.1/24"}})
+			if err != nil {
+				t.Fatalf("BuildTun() error = %v", err)
+			}
+			manager.failNextApply = netio.ErrReadback
+			manager.afterNextApplyFailure = test.afterFail
+			err = system.SetTunAddrs(device, []string{"10.31.1.1/24"})
+			if !errors.Is(err, sysnet.ErrUnavailable) || !errors.Is(err, netio.ErrReadback) {
+				t.Fatalf("SetTunAddrs() error = %v, want unavailable readback failure", err)
+			}
+			if test.wantCause != nil && !errors.Is(err, test.wantCause) {
+				t.Fatalf("SetTunAddrs() error = %v, want cause %v", err, test.wantCause)
+			}
+			if system.state != lifecycleRecoveryRequired {
+				t.Fatalf("System state = %s, want recovery-required", system.state)
+			}
+			manager.damage = nil
+			if err := system.Close(); err != nil {
+				t.Fatalf("System.Close() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestRegularTunMTURestoreErrorUsesVerifiedState(t *testing.T) {
+	t.Run("restored state remains usable", func(t *testing.T) {
+		factory := &regularTunFactory{}
+		manager := newRegularTunManager()
+		system := newRegularTunTestSystem(t, factory, manager)
+		t.Cleanup(func() { _ = system.Close() })
+		device, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{"10.32.1.1/24"}})
+		if err != nil {
+			t.Fatalf("BuildTun() error = %v", err)
+		}
+		factory.created[0].updateErr = errInjectedRegularTun
+		manager.failApplyCall = manager.applyCalls + 2
+		manager.failApplyErr = netio.ErrReadback
+		manager.failApplyAfterMutation = true
+		err = system.SetTunMTU(device, 1300)
+		if !errors.Is(err, errInjectedRegularTun) || !errors.Is(err, netio.ErrReadback) {
+			t.Fatalf("SetTunMTU() error = %v, want report and rollback errors", err)
+		}
+		if system.state != lifecycleActive {
+			t.Fatalf("System state = %s, want active", system.state)
+		}
+		if got, mtuErr := device.MTU(); mtuErr != nil || got != defaultTunMTU {
+			t.Fatalf("MTU after restore = %d, %v; want %d, nil", got, mtuErr, defaultTunMTU)
+		}
+		factory.created[0].updateErr = nil
+		if err := system.SetTunMTU(device, 1300); err != nil {
+			t.Fatalf("retry SetTunMTU() error = %v", err)
+		}
+	})
+
+	for _, rollbackErr := range []error{errInjectedRegularTun, netio.ErrReadback} {
+		name := "plain error"
+		if errors.Is(rollbackErr, netio.ErrReadback) {
+			name = "readback error"
+		}
+		t.Run("unrestored state with "+name, func(t *testing.T) {
+			factory := &regularTunFactory{}
+			manager := newRegularTunManager()
+			system := newRegularTunTestSystem(t, factory, manager)
+			device, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{"10.33.1.1/24"}})
+			if err != nil {
+				t.Fatalf("BuildTun() error = %v", err)
+			}
+			factory.created[0].updateErr = errInjectedRegularTun
+			manager.failApplyCall = manager.applyCalls + 2
+			manager.failApplyErr = rollbackErr
+			err = system.SetTunMTU(device, 1300)
+			if !errors.Is(err, sysnet.ErrUnavailable) || !errors.Is(err, rollbackErr) {
+				t.Fatalf("SetTunMTU() error = %v, want unavailable rollback failure", err)
+			}
+			if system.state != lifecycleRecoveryRequired {
+				t.Fatalf("System state = %s, want recovery-required", system.state)
+			}
+			manager.failApplyCall = 0
+			manager.failApplyErr = nil
+			factory.created[0].updateErr = nil
+			if err := system.Close(); err != nil {
+				t.Fatalf("System.Close() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestRegularTunPrefixExpansionRejectsNewHostOverlap(t *testing.T) {
 	t.Parallel()
 	factory := &regularTunFactory{}
@@ -735,15 +922,19 @@ func (t *fakeManagedTun) Close() error {
 }
 
 type regularTunManager struct {
-	mu             sync.Mutex
-	states         map[netio.Interface]netio.Config
-	identities     map[uint64]netio.Interface
-	applyCalls     int
-	readCalls      int
-	failNextApply  error
-	mutateThenFail error
-	failEmpty      error
-	damage         error
+	mu                     sync.Mutex
+	states                 map[netio.Interface]netio.Config
+	identities             map[uint64]netio.Interface
+	applyCalls             int
+	readCalls              int
+	failNextApply          error
+	afterNextApplyFailure  func(*regularTunManager, netio.Interface)
+	failApplyCall          int
+	failApplyErr           error
+	failApplyAfterMutation bool
+	mutateThenFail         error
+	failEmpty              error
+	damage                 error
 }
 
 type regularTunHostReader struct {
@@ -778,7 +969,18 @@ func (m *regularTunManager) Apply(_ context.Context, iface netio.Interface, conf
 	if m.failNextApply != nil {
 		err := m.failNextApply
 		m.failNextApply = nil
+		if m.afterNextApplyFailure != nil {
+			after := m.afterNextApplyFailure
+			m.afterNextApplyFailure = nil
+			after(m, iface)
+		}
 		return err
+	}
+	if m.failApplyCall == m.applyCalls {
+		if m.failApplyAfterMutation {
+			m.states[iface] = cloneNetIOConfig(config)
+		}
+		return m.failApplyErr
 	}
 	if netIOConfigEmpty(config) && m.failEmpty != nil {
 		return m.failEmpty
