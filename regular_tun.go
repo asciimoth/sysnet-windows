@@ -136,11 +136,7 @@ func (s *System) buildRegularTun(opts sysnet.TunOpts) (gtun.Tun, error) {
 
 	id := s.nextRegularTunID()
 	reservationID := fmt.Sprintf("regular-tun-%d", id)
-	reservedAddresses := make([]netip.Addr, 0, len(desired.addresses))
-	for _, prefix := range desired.addresses {
-		reservedAddresses = append(reservedAddresses, prefix.Addr())
-	}
-	if err := s.allocator.ReserveOwnedIPs(reservationID, reservedAddresses); err != nil {
+	if err := s.allocator.ReserveOwnedIPs(reservationID, desired.addresses); err != nil {
 		return nil, fmt.Errorf("reserve regular TUN addresses: %w", err)
 	}
 	keepReservation := false
@@ -453,13 +449,13 @@ func (s *System) changeRegularTunPrefixes(
 		reservationsChanged := kind == prefixAddress
 		reservationID := fmt.Sprintf("regular-tun-%d", current.id)
 		if reservationsChanged {
-			if err := s.allocator.ReplaceOwnedIPs(reservationID, configAddresses(next)); err != nil {
+			if err := s.allocator.ReplaceOwnedIPs(reservationID, next.Addresses); err != nil {
 				return fmt.Errorf("reserve updated regular TUN addresses: %w", err)
 			}
 		}
 		if err := s.dependencies.netIO.Apply(ctx, current.interfaceID(), next); err != nil {
 			if reservationsChanged {
-				reservationErr := s.allocator.RestoreOwnedIPs(reservationID, configAddresses(observed))
+				reservationErr := s.allocator.RestoreOwnedIPs(reservationID, observed.Addresses)
 				err = errors.Join(err, reservationErr)
 			}
 			return s.translateRegularTunMutationError(current, err)
@@ -595,14 +591,6 @@ func configContainsIPv6(config netio.Config) bool {
 	}
 	family := familyForNetIOConfig(config)
 	return family == sysnet.FamilyIPv6 || family == sysnet.FamilyDual
-}
-
-func configAddresses(config netio.Config) []netip.Addr {
-	result := make([]netip.Addr, 0, len(config.Addresses))
-	for _, prefix := range config.Addresses {
-		result = append(result, prefix.Addr())
-	}
-	return result
 }
 
 func appendUniquePrefixes(current []netip.Prefix, values ...netip.Prefix) []netip.Prefix {

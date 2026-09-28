@@ -178,6 +178,135 @@ func TestCurrentImplementationAdvertisesOnlyCompletedGates(t *testing.T) {
 	}
 }
 
+func TestCurrentImplementationAdvertisesWorkingAllocators(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	system, err := newSystem(SystemConfig{}, systemDependencies{
+		allocationReader: emptyHostReader{},
+		capabilityProbe: staticCapabilityProbe{facts: capabilityProbeFacts{
+			netIO: available, split: available,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+
+	if ip, network := system.AllocIP().AllocIP4(); ip == nil || network == nil {
+		t.Fatalf("AllocIP4() = (%v, %v), want a working allocation", ip, network)
+	}
+	if ip, network := system.AllocIP().AllocIP6(); ip == nil || network == nil {
+		t.Fatalf("AllocIP6() = (%v, %v), want a working allocation", ip, network)
+	}
+	if network := system.AllocSubnet().AllocSubnet4(24); network == nil {
+		t.Fatal("AllocSubnet4() = nil, want a working allocation")
+	}
+	if network := system.AllocSubnet().AllocSubnet6(64); network == nil {
+		t.Fatal("AllocSubnet6() = nil, want a working allocation")
+	}
+	for _, operation := range []sysnet.Operation{sysnet.OpAllocateIP, sysnet.OpAllocateSubnet} {
+		for _, family := range []sysnet.AddressFamily{sysnet.FamilyIPv4, sysnet.FamilyIPv6} {
+			capability := system.Capabilities().Operation(operationKey(sysnet.TargetSystem, operation, family))
+			if capability.State != sysnet.CapabilityAvailable {
+				t.Errorf("%s/%s capability = %+v, want available", operation, family, capability)
+			}
+		}
+	}
+}
+
+func TestAllocatorCapabilityMatrix(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	disabledIPv6 := defaultNormalizedSystemConfig()
+	disabledIPv6.ipv6 = false
+	type capabilityCase struct {
+		name       string
+		config     normalizedSystemConfig
+		support    implementationSupport
+		facts      capabilityProbeFacts
+		state      lifecycleState
+		family     sysnet.AddressFamily
+		wantState  sysnet.CapabilityState
+		wantReason sysnet.CapabilityReason
+	}
+	tests := []capabilityCase{
+		{
+			name: "available IPv4", config: defaultNormalizedSystemConfig(),
+			support: currentImplementationSupport(), facts: capabilityProbeFacts{netIO: available},
+			state: lifecycleReady, family: sysnet.FamilyIPv4, wantState: sysnet.CapabilityAvailable,
+		},
+		{
+			name: "available IPv6", config: defaultNormalizedSystemConfig(),
+			support: currentImplementationSupport(), facts: capabilityProbeFacts{netIO: available},
+			state: lifecycleActive, family: sysnet.FamilyIPv6, wantState: sysnet.CapabilityAvailable,
+		},
+		{
+			name: "dependency unavailable", config: defaultNormalizedSystemConfig(),
+			support: currentImplementationSupport(), facts: capabilityProbeFacts{
+				netIO: unavailableCapability(sysnet.ReasonPermissionDenied),
+			},
+			state: lifecycleReady, family: sysnet.FamilyIPv4,
+			wantState: sysnet.CapabilityUnavailable, wantReason: sysnet.ReasonPermissionDenied,
+		},
+		{
+			name: "implementation gate closed", config: defaultNormalizedSystemConfig(),
+			support: implementationSupport{}, facts: capabilityProbeFacts{netIO: available},
+			state: lifecycleReady, family: sysnet.FamilyIPv4,
+			wantState: sysnet.CapabilityUnsupported, wantReason: sysnet.ReasonNotImplemented,
+		},
+		{
+			name: "system closed", config: defaultNormalizedSystemConfig(),
+			support: currentImplementationSupport(), facts: capabilityProbeFacts{netIO: available},
+			state: lifecycleClosed, family: sysnet.FamilyIPv4,
+			wantState: sysnet.CapabilityUnavailable, wantReason: sysnet.ReasonSystemClosed,
+		},
+		{
+			name: "family disabled", config: disabledIPv6,
+			support: currentImplementationSupport(), facts: capabilityProbeFacts{netIO: available},
+			state: lifecycleReady, family: sysnet.FamilyIPv6,
+			wantState: sysnet.CapabilityUnsupported, wantReason: sysnet.ReasonDisabledByConfig,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			report := buildCapabilityReport(test.config, test.support, test.facts, test.state)
+			if err := report.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+			for _, operation := range []sysnet.Operation{sysnet.OpAllocateIP, sysnet.OpAllocateSubnet} {
+				capability := report.Operation(operationKey(sysnet.TargetSystem, operation, test.family))
+				if capability.State != test.wantState || test.wantReason != "" && !containsReason(capability.Reasons, test.wantReason) {
+					t.Errorf("%s capability = %+v, want state %v reason %q", operation, capability, test.wantState, test.wantReason)
+				}
+			}
+			for _, family := range []sysnet.AddressFamily{sysnet.FamilyNone, sysnet.FamilyDual} {
+				if got := report.Operation(operationKey(sysnet.TargetSystem, sysnet.OpAllocateIP, family)); got.State != sysnet.CapabilityUnknown {
+					t.Errorf("allocate_ip/%s capability = %+v, want omitted unknown row", family, got)
+				}
+			}
+		})
+	}
+}
+
+func TestAllocatorCapabilityGatesAreIndependent(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	report := buildCapabilityReport(
+		defaultNormalizedSystemConfig(),
+		implementationSupport{allocateIP: true},
+		capabilityProbeFacts{netIO: available},
+		lifecycleReady,
+	)
+	if got := report.Operation(operationKey(sysnet.TargetSystem, sysnet.OpAllocateIP, sysnet.FamilyIPv4)); got.State != sysnet.CapabilityAvailable {
+		t.Fatalf("allocate IP capability = %+v, want available", got)
+	}
+	if got := report.Operation(operationKey(sysnet.TargetSystem, sysnet.OpAllocateSubnet, sysnet.FamilyIPv4)); got.State != sysnet.CapabilityUnsupported {
+		t.Fatalf("allocate subnet capability = %+v, want unsupported", got)
+	}
+}
+
 func TestCapabilityDependencyIsolation(t *testing.T) {
 	t.Parallel()
 	config := defaultNormalizedSystemConfig()

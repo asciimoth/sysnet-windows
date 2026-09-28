@@ -97,7 +97,7 @@ func TestOwnedIPReservationDoesNotConsumeCallerReservation(t *testing.T) {
 	}
 
 	allocator := New(staticReader{}, time.Second)
-	if err := allocator.ReserveOwnedIPs("tun-1", []netip.Addr{address.Unmap()}); err != nil {
+	if err := allocator.ReserveOwnedIPs("tun-1", []netip.Prefix{netip.PrefixFrom(address.Unmap(), address.Unmap().BitLen())}); err != nil {
 		t.Fatalf("ReserveOwnedIPs() error = %v", err)
 	}
 	got, _ := allocator.AllocIP4()
@@ -111,13 +111,200 @@ func TestOwnedIPReservationDoesNotConsumeCallerReservation(t *testing.T) {
 	if !ok {
 		t.Fatalf("caller address %v is invalid", callerIP)
 	}
-	if err := shared.ReserveOwnedIPs("tun-2", []netip.Addr{callerAddress.Unmap()}); err != nil {
+	if err := shared.ReserveOwnedIPs("tun-2", []netip.Prefix{netip.PrefixFrom(callerAddress.Unmap(), callerAddress.Unmap().BitLen())}); err != nil {
 		t.Fatalf("shared ReserveOwnedIPs() error = %v", err)
 	}
 	shared.ReleaseOwnedIPs("tun-2")
 	next, _ := shared.AllocIP4()
 	if next == nil || next.Equal(callerIP) {
 		t.Fatalf("AllocIP4() after owned release = %v, want caller reservation %v preserved", next, callerIP)
+	}
+}
+
+func TestReplaceOwnedIPsDistinguishesOwnedAndForeignPrefixes(t *testing.T) {
+	t.Parallel()
+	oldPrefix := netip.MustParsePrefix("10.20.1.1/16")
+	newPrefix := netip.MustParsePrefix("10.20.2.1/16")
+	tests := []struct {
+		name      string
+		state     netio.HostState
+		wantError bool
+	}{
+		{
+			name: "foreign broader interface prefix",
+			state: netio.HostState{
+				Addresses:         []netip.Addr{oldPrefix.Addr()},
+				InterfacePrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+			},
+			wantError: true,
+		},
+		{
+			name: "foreign broader route",
+			state: netio.HostState{
+				Addresses: []netip.Addr{oldPrefix.Addr()},
+				Routes:    []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+			},
+			wantError: true,
+		},
+		{
+			name: "foreign narrower interface prefix",
+			state: netio.HostState{
+				Addresses:         []netip.Addr{oldPrefix.Addr()},
+				InterfacePrefixes: []netip.Prefix{netip.MustParsePrefix("10.20.200.0/24")},
+			},
+			wantError: true,
+		},
+		{
+			name: "exact owned interface prefix",
+			state: netio.HostState{
+				Addresses:         []netip.Addr{oldPrefix.Addr()},
+				InterfacePrefixes: []netip.Prefix{oldPrefix.Masked()},
+			},
+		},
+		{
+			name: "exact owned on-link route",
+			state: netio.HostState{
+				Addresses: []netip.Addr{oldPrefix.Addr()},
+				Routes:    []netip.Prefix{oldPrefix.Masked()},
+			},
+		},
+		{
+			name: "default route",
+			state: netio.HostState{
+				Addresses: []netip.Addr{oldPrefix.Addr()},
+				Routes:    []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			reader := &sequenceReader{states: []netio.HostState{{}, test.state}}
+			allocator := New(reader, time.Second)
+			if err := allocator.ReserveOwnedIPs("tun-1", []netip.Prefix{oldPrefix}); err != nil {
+				t.Fatalf("ReserveOwnedIPs() error = %v", err)
+			}
+			err := allocator.ReplaceOwnedIPs("tun-1", []netip.Prefix{oldPrefix, newPrefix})
+			if test.wantError && !errors.Is(err, ErrReservationConflict) {
+				t.Fatalf("ReplaceOwnedIPs() error = %v, want ErrReservationConflict", err)
+			}
+			if !test.wantError && err != nil {
+				t.Fatalf("ReplaceOwnedIPs() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestReserveOwnedIPsRejectsEveryOverlappingHostResource(t *testing.T) {
+	t.Parallel()
+	candidate := netip.MustParsePrefix("10.60.1.1/16")
+	tests := []struct {
+		name  string
+		state netio.HostState
+	}{
+		{
+			name: "address elsewhere in configured prefix",
+			state: netio.HostState{Addresses: []netip.Addr{
+				netip.MustParseAddr("10.60.200.1"),
+			}},
+		},
+		{
+			name: "narrower interface prefix",
+			state: netio.HostState{InterfacePrefixes: []netip.Prefix{
+				netip.MustParsePrefix("10.60.200.0/24"),
+			}},
+		},
+		{
+			name: "broader interface prefix",
+			state: netio.HostState{InterfacePrefixes: []netip.Prefix{
+				netip.MustParsePrefix("10.0.0.0/8"),
+			}},
+		},
+		{
+			name: "narrower route",
+			state: netio.HostState{Routes: []netip.Prefix{
+				netip.MustParsePrefix("10.60.200.0/24"),
+			}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			allocator := New(staticReader{state: test.state}, time.Second)
+			if err := allocator.ReserveOwnedIPs("tun-1", []netip.Prefix{candidate}); !errors.Is(err, ErrReservationConflict) {
+				t.Fatalf("ReserveOwnedIPs() error = %v, want ErrReservationConflict", err)
+			}
+		})
+	}
+}
+
+func TestReserveOwnedIPsAllowsDefaultAndUnrelatedRoutes(t *testing.T) {
+	t.Parallel()
+	allocator := New(staticReader{state: netio.HostState{Routes: []netip.Prefix{
+		netip.MustParsePrefix("0.0.0.0/0"),
+		netip.MustParsePrefix("192.0.2.0/24"),
+	}}}, time.Second)
+	if err := allocator.ReserveOwnedIPs("tun-1", []netip.Prefix{
+		netip.MustParsePrefix("10.70.1.1/16"),
+	}); err != nil {
+		t.Fatalf("ReserveOwnedIPs() error = %v", err)
+	}
+}
+
+func TestVerifyOwnedIPsAvailableRechecksCompletePrefix(t *testing.T) {
+	t.Parallel()
+	candidate := netip.MustParsePrefix("10.75.1.1/16")
+	reader := &sequenceReader{states: []netio.HostState{
+		{},
+		{InterfacePrefixes: []netip.Prefix{netip.MustParsePrefix("10.75.200.0/24")}},
+	}}
+	allocator := New(reader, time.Second)
+	if err := allocator.ReserveOwnedIPs("tun-1", []netip.Prefix{candidate}); err != nil {
+		t.Fatalf("ReserveOwnedIPs() error = %v", err)
+	}
+	if err := allocator.VerifyOwnedIPsAvailable("tun-1"); !errors.Is(err, ErrReservationConflict) {
+		t.Fatalf("VerifyOwnedIPsAvailable() error = %v, want ErrReservationConflict", err)
+	}
+	if allocator.ownedIPRefs[candidate.Addr()] != 1 {
+		t.Fatalf("reservation was lost after failed verification: %v", allocator.ownedIPRefs)
+	}
+}
+
+func TestReplaceOwnedIPsConflictDoesNotChangeReservations(t *testing.T) {
+	t.Parallel()
+	oldPrefix := netip.MustParsePrefix("10.30.1.1/16")
+	blockedPrefix := netip.MustParsePrefix("10.40.1.1/16")
+	replacementPrefix := netip.MustParsePrefix("10.30.2.1/16")
+	reader := &sequenceReader{states: []netio.HostState{
+		{},
+		{
+			Addresses:         []netip.Addr{oldPrefix.Addr()},
+			InterfacePrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+		},
+		{
+			Addresses:         []netip.Addr{oldPrefix.Addr()},
+			InterfacePrefixes: []netip.Prefix{oldPrefix.Masked()},
+		},
+	}}
+	allocator := New(reader, time.Second)
+	if err := allocator.ReserveOwnedIPs("tun-1", []netip.Prefix{oldPrefix}); err != nil {
+		t.Fatalf("ReserveOwnedIPs() error = %v", err)
+	}
+	if err := allocator.ReplaceOwnedIPs("tun-1", []netip.Prefix{blockedPrefix}); !errors.Is(err, ErrReservationConflict) {
+		t.Fatalf("conflicting ReplaceOwnedIPs() error = %v, want ErrReservationConflict", err)
+	}
+	if allocator.ownedIPRefs[oldPrefix.Addr()] != 1 || allocator.ownedIPRefs[blockedPrefix.Addr()] != 0 {
+		t.Fatalf("reservations changed after conflict: %v", allocator.ownedIPRefs)
+	}
+	if err := allocator.ReplaceOwnedIPs("tun-1", []netip.Prefix{oldPrefix, replacementPrefix}); err != nil {
+		t.Fatalf("ReplaceOwnedIPs() after conflict error = %v", err)
+	}
+	if allocator.ownedIPRefs[oldPrefix.Addr()] != 1 || allocator.ownedIPRefs[replacementPrefix.Addr()] != 1 {
+		t.Fatalf("replacement reservations = %v", allocator.ownedIPRefs)
+	}
+	allocator.ReleaseOwnedIPs("tun-1")
+	if got, _ := allocator.AllocIP4(); got == nil {
+		t.Fatal("AllocIP4() after release returned nil")
 	}
 }
 

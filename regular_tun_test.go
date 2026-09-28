@@ -232,6 +232,33 @@ func TestT28T30RegularTunBuildFailureRollsBack(t *testing.T) {
 		}
 	})
 
+	t.Run("configured prefix overlap prevents adapter creation", func(t *testing.T) {
+		factory := &regularTunFactory{}
+		manager := newRegularTunManager()
+		available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+		system, err := newSystem(SystemConfig{}, systemDependencies{
+			tunFactory: factory, netIO: manager,
+			allocationReader: &regularTunHostReader{states: []netio.HostState{{
+				InterfacePrefixes: []netip.Prefix{netip.MustParsePrefix("10.80.20.0/24")},
+			}}},
+			capabilityProbe: staticCapabilityProbe{facts: capabilityProbeFacts{
+				netIO: available, split: available,
+			}},
+		})
+		if err != nil {
+			t.Fatalf("newSystem() error = %v", err)
+		}
+		t.Cleanup(func() { _ = system.Close() })
+		if _, err := system.BuildTun(sysnet.TunOpts{
+			TunAddrs: []string{"10.80.1.1/16"},
+		}); !errors.Is(err, internalallocator.ErrReservationConflict) {
+			t.Fatalf("BuildTun() error = %v, want reservation conflict", err)
+		}
+		if len(factory.created) != 0 || manager.applyCalls != 0 {
+			t.Fatalf("overlap changed resources: devices=%d applies=%d", len(factory.created), manager.applyCalls)
+		}
+	})
+
 	t.Run("rollback failure joins errors and requires recovery", func(t *testing.T) {
 		factory := &regularTunFactory{}
 		manager := newRegularTunManager()

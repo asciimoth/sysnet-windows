@@ -47,6 +47,8 @@ func (m *capabilityModel) replace(next sysnet.CapabilityReport) bool {
 // implementationSupport records code that has passed its implementation gate.
 // Dependency facts must never turn a false support bit into an available row.
 type implementationSupport struct {
+	allocateIP              bool
+	allocateSubnet          bool
 	regularTun              bool
 	regularTunDual          bool
 	regularTunNamed         bool
@@ -61,10 +63,12 @@ type implementationSupport struct {
 }
 
 func currentImplementationSupport() implementationSupport {
-	// Regular TUN creation and mutation are implemented by the M1 lifecycle.
+	// Host-aware allocation and regular TUN operations are implemented by M1.
 	// Later milestones enable the default TUN, network, and matcher rows only
 	// after their native and packet-path gates pass.
 	return implementationSupport{
+		allocateIP:              true,
+		allocateSubnet:          true,
 		regularTun:              true,
 		regularTunDual:          true,
 		regularTunNamed:         true,
@@ -107,6 +111,21 @@ func buildCapabilityReport(
 ) sysnet.CapabilityReport {
 	report := sysnet.CapabilityReport{SchemaVersion: sysnet.CapabilitySchemaVersion}
 	families := []sysnet.AddressFamily{sysnet.FamilyIPv4, sysnet.FamilyIPv6, sysnet.FamilyDual}
+	for _, family := range []sysnet.AddressFamily{sysnet.FamilyIPv4, sysnet.FamilyIPv6} {
+		for _, item := range []struct {
+			operation   sysnet.Operation
+			implemented bool
+		}{
+			{operation: sysnet.OpAllocateIP, implemented: support.allocateIP},
+			{operation: sysnet.OpAllocateSubnet, implemented: support.allocateSubnet},
+		} {
+			capability := familyCapability(implementedCapability(item.implemented), config, family)
+			capability = dependentCapability(capability, facts.netIO)
+			report.Operations = append(report.Operations, operationCapability(
+				sysnet.TargetSystem, item.operation, family, lifecycleCapability(capability, state),
+			))
+		}
+	}
 
 	for _, family := range append([]sysnet.AddressFamily{sysnet.FamilyNone}, families...) {
 		implemented := support.regularTun
@@ -202,10 +221,6 @@ func buildCapabilityReport(
 func unsupportedOperationCatalog(families []sysnet.AddressFamily) []sysnet.OperationCapability {
 	notImplemented := unsupported(sysnet.ReasonNotImplemented, "implementation gate has not passed")
 	operations := []sysnet.OperationCapability{
-		operationCapability(sysnet.TargetSystem, sysnet.OpAllocateIP, sysnet.FamilyIPv4, notImplemented),
-		operationCapability(sysnet.TargetSystem, sysnet.OpAllocateIP, sysnet.FamilyIPv6, notImplemented),
-		operationCapability(sysnet.TargetSystem, sysnet.OpAllocateSubnet, sysnet.FamilyIPv4, notImplemented),
-		operationCapability(sysnet.TargetSystem, sysnet.OpAllocateSubnet, sysnet.FamilyIPv6, notImplemented),
 		operationCapability(sysnet.TargetDefaultTun, sysnet.OpSetMTU, sysnet.FamilyNone, notImplemented),
 		operationCapability(sysnet.TargetDefaultTun, sysnet.OpRename, sysnet.FamilyNone, notImplemented),
 		operationCapability(sysnet.TargetOutNet, sysnet.OpResolve, sysnet.FamilyNone, notImplemented),
