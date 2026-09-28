@@ -36,6 +36,26 @@ $exactSkip = [pscustomobject]@{
     Package = $package
     Test = 'TestRequired'
 }
+$requiredSubtestSkip = [pscustomobject]@{
+    Action = 'skip'
+    Package = $package
+    Test = 'TestRequired/native-prerequisite'
+}
+$requiredNestedSubtestSkip = [pscustomobject]@{
+    Action = 'skip'
+    Package = $package
+    Test = 'TestRequired/native-prerequisite/arm64'
+}
+$similarTestSkip = [pscustomobject]@{
+    Action = 'skip'
+    Package = $package
+    Test = 'TestRequiredExtra/native-prerequisite'
+}
+$wrongPackageSubtestSkip = [pscustomobject]@{
+    Action = 'skip'
+    Package = 'example.test/wrong'
+    Test = 'TestRequired/native-prerequisite'
+}
 
 $result = Get-RequiredTestResults @($pass) @($identity)
 if ($result[$identity] -ne 'pass' -or $result.Count -ne 1) {
@@ -47,11 +67,22 @@ if ($result[$identity] -ne 'pass') {
     throw 'A skip from another package blocked the exact passing test'
 }
 
+$result = Get-RequiredTestResults @($similarTestSkip, $wrongPackageSubtestSkip, $pass) @($identity)
+if ($result[$identity] -ne 'pass') {
+    throw 'An unrelated subtest skip blocked the exact passing test'
+}
+
 Assert-Throws {
     Get-RequiredTestResults @($wrongPackagePass) @($identity) | Out-Null
 } "$identity has no pass event"
 Assert-Throws {
     Get-RequiredTestResults @($wrongPackagePass, $exactSkip) @($identity) | Out-Null
+} "$identity was skipped"
+Assert-Throws {
+    Get-RequiredTestResults @($pass, $requiredSubtestSkip) @($identity) | Out-Null
+} "$identity was skipped"
+Assert-Throws {
+    Get-RequiredTestResults @($pass, $requiredNestedSubtestSkip) @($identity) | Out-Null
 } "$identity was skipped"
 Assert-Throws {
     Get-RequiredTestResults @($pass) @('TestRequired') | Out-Null

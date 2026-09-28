@@ -73,7 +73,9 @@ function Get-RequiredTestResults([object[]]$Events, [string[]]$RequiredTests) {
         $test = $Matches.Test
         if ($Events | Where-Object {
                 $_.PSObject.Properties['Package'] -and $_.Package -eq $package -and
-                $_.PSObject.Properties['Test'] -and $_.Test -eq $test -and $_.Action -eq 'skip'
+                $_.PSObject.Properties['Test'] -and
+                ($_.Test -eq $test -or $_.Test.StartsWith("$test/", [StringComparison]::Ordinal)) -and
+                $_.Action -eq 'skip'
             }) {
             throw "$identity was skipped"
         }

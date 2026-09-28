@@ -101,7 +101,7 @@ func (a *Allocator) ReserveIP(ip net.IP) {
 		if a.ipRefs[address]+a.ownedIPRefs[address] == 0 {
 			a.delegate.ReserveIP(ip)
 		}
-		a.ipRefs[address] = 1
+		a.ipRefs[address]++
 	}
 }
 
@@ -137,6 +137,10 @@ func (a *Allocator) FreeIP(ip net.IP) {
 	defer a.mu.Unlock()
 	address, ok := canonicalIP(ip)
 	if a.closed || !ok || a.ipRefs[address] == 0 {
+		return
+	}
+	a.ipRefs[address]--
+	if a.ipRefs[address] != 0 {
 		return
 	}
 	delete(a.ipRefs, address)
@@ -493,7 +497,7 @@ func (a *Allocator) recordAllocatedIP(ip net.IP) {
 	}
 	address, ok := canonicalIP(ip)
 	if ok {
-		a.ipRefs[address] = 1
+		a.ipRefs[address]++
 	}
 }
 

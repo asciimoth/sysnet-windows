@@ -19,6 +19,13 @@ type fakeStore struct {
 	noRoute           bool
 	tentativeAddress  bool
 	failDeleteAddress bool
+	deleteAddressErr  error
+	createAddressAs   *netip.Prefix
+	createAddressErr  error
+	createRouteAs     *Route
+	createRouteErr    error
+	propertiesResult  *Properties
+	propertiesError   error
 	log               []string
 	snapshots         int
 	beforeSnapshot    func(*fakeStore, int)
@@ -45,8 +52,11 @@ func (s *fakeStore) CreateAddress(_ context.Context, _ Interface, prefix netip.P
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.log = append(s.log, "add-address "+prefix.String())
+	if s.createAddressAs != nil {
+		prefix = *s.createAddressAs
+	}
 	s.state.Addresses = append(s.state.Addresses, Address{Prefix: prefix, Usable: !s.tentativeAddress})
-	return nil
+	return s.createAddressErr
 }
 
 func (s *fakeStore) DeleteAddress(_ context.Context, _ Interface, prefix netip.Prefix) error {
@@ -59,7 +69,7 @@ func (s *fakeStore) DeleteAddress(_ context.Context, _ Interface, prefix netip.P
 	for index, row := range s.state.Addresses {
 		if row.Prefix.Addr() == prefix.Addr() {
 			s.state.Addresses = append(s.state.Addresses[:index], s.state.Addresses[index+1:]...)
-			return nil
+			return s.deleteAddressErr
 		}
 	}
 	return errors.New("address not found")
@@ -76,10 +86,13 @@ func (s *fakeStore) CreateRoute(_ context.Context, _ Interface, route Route) err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.log = append(s.log, "add-route "+route.Destination.String())
+	if s.createRouteAs != nil {
+		route = *s.createRouteAs
+	}
 	if !s.noRoute {
 		s.state.Routes = append(s.state.Routes, route)
 	}
-	return nil
+	return s.createRouteErr
 }
 
 func (s *fakeStore) DeleteRoute(_ context.Context, _ Interface, route Route) error {
@@ -102,11 +115,128 @@ func (s *fakeStore) SetProperties(_ context.Context, _ Interface, properties Pro
 	s.log = append(s.log, "set-properties")
 	for index, row := range s.state.Properties {
 		if row.Family == properties.Family {
-			s.state.Properties[index] = properties
-			return nil
+			if s.propertiesResult != nil {
+				s.state.Properties[index] = *s.propertiesResult
+			} else {
+				s.state.Properties[index] = properties
+			}
+			return s.propertiesError
 		}
 	}
 	return errors.New("properties not found")
+}
+
+func TestExactManagerRequiresRecoveryAfterUncertainPropertyMutation(t *testing.T) {
+	original := Properties{Family: FamilyIPv4, MTU: 1500, Metric: 25, AutomaticMetric: true}
+	desired := Properties{Family: FamilyIPv4, MTU: 1400, Metric: 5}
+	partial := Properties{Family: FamilyIPv4, MTU: desired.MTU, Metric: original.Metric, AutomaticMetric: true}
+	mutationErr := errors.New("native property update failed after mutation")
+	store := &fakeStore{
+		state:            State{Interface: testInterface, Properties: []Properties{original}},
+		propertiesResult: &partial,
+		propertiesError:  mutationErr,
+	}
+	manager, err := NewManager(store)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	err = manager.Apply(context.Background(), testInterface, Config{Properties: []Properties{desired}})
+	if !errors.Is(err, mutationErr) || !errors.Is(err, ErrResourceConflict) {
+		t.Fatalf("Apply() error = %v, want mutation and rollback-conflict errors", err)
+	}
+	if !RequiresRecovery(err) {
+		t.Fatalf("Apply() error = %v, want recovery required for changed host properties", err)
+	}
+	if got := store.state.Properties[0]; got != partial {
+		t.Fatalf("properties after failed mutation = %+v, want evidence value %+v", got, partial)
+	}
+}
+
+func TestExactManagerRequiresRecoveryAfterUncertainRowMutation(t *testing.T) {
+	t.Parallel()
+	mutationErr := errors.New("native row update failed after mutation")
+	tests := []struct {
+		name      string
+		configure func(*fakeStore)
+		config    Config
+	}{
+		{
+			name: "address",
+			configure: func(store *fakeStore) {
+				partial := netip.MustParsePrefix("10.19.0.1/25")
+				store.createAddressAs = &partial
+				store.createAddressErr = mutationErr
+			},
+			config: Config{Addresses: []netip.Prefix{netip.MustParsePrefix("10.19.0.1/24")}},
+		},
+		{
+			name: "route",
+			configure: func(store *fakeStore) {
+				partial := Route{
+					Destination: netip.MustParsePrefix("203.0.113.0/24"),
+					NextHop:     netip.IPv4Unspecified(),
+					Metric:      6,
+				}
+				store.createRouteAs = &partial
+				store.createRouteErr = mutationErr
+			},
+			config: Config{Routes: []Route{{
+				Destination: netip.MustParsePrefix("203.0.113.0/24"),
+				NextHop:     netip.IPv4Unspecified(),
+				Metric:      5,
+			}}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			store := &fakeStore{state: State{Interface: testInterface}}
+			test.configure(store)
+			manager, err := NewManager(store)
+			if err != nil {
+				t.Fatalf("NewManager() error = %v", err)
+			}
+			err = manager.Apply(context.Background(), testInterface, test.config)
+			if !errors.Is(err, mutationErr) || !errors.Is(err, ErrResourceConflict) {
+				t.Fatalf("Apply() error = %v, want mutation and rollback-conflict errors", err)
+			}
+			if !RequiresRecovery(err) {
+				t.Fatalf("Apply() error = %v, want recovery required", err)
+			}
+		})
+	}
+}
+
+func TestExactManagerAcceptsFailedInverseWithVerifiedCleanup(t *testing.T) {
+	inverseErr := errors.New("delete reported failure after mutation")
+	store := &fakeStore{
+		state:            State{Interface: testInterface},
+		noRoute:          true,
+		deleteAddressErr: inverseErr,
+	}
+	manager, err := NewManager(store)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	prefix := netip.MustParsePrefix("10.19.0.1/24")
+	route := Route{
+		Destination: netip.MustParsePrefix("203.0.113.0/24"),
+		NextHop:     netip.IPv4Unspecified(),
+		Metric:      5,
+	}
+	err = manager.Apply(context.Background(), testInterface, Config{
+		Addresses: []netip.Prefix{prefix}, Routes: []Route{route},
+	})
+	if !errors.Is(err, ErrReadback) || !errors.Is(err, inverseErr) {
+		t.Fatalf("Apply() error = %v, want readback and inverse errors", err)
+	}
+	if RequiresRecovery(err) {
+		t.Fatalf("Apply() error = %v, want verified cleanup without recovery", err)
+	}
+	if len(store.state.Addresses) != 0 {
+		t.Fatalf("addresses after rollback = %+v, want empty", store.state.Addresses)
+	}
 }
 
 func TestT04T06ExactManagerOwnedDeltaPreservesForeignRows(t *testing.T) {

@@ -134,7 +134,7 @@ func (m *ExactManager) fail(ctx context.Context, iface Interface, before, planne
 	recoveryRequired := readErr != nil
 	if readErr == nil {
 		retained := retainObservedOwnership(state, before, planned)
-		recoveryRequired = !retained.empty()
+		recoveryRequired = !mutationsUndone(state, completed)
 		if retained.empty() {
 			delete(m.inventory, iface)
 		} else {
@@ -148,6 +148,15 @@ func (m *ExactManager) fail(ctx context.Context, iface Interface, before, planne
 		return &Failure{err: result}
 	}
 	return result
+}
+
+func mutationsUndone(state State, completed []mutation) bool {
+	for _, change := range completed {
+		if !change.undone(state) {
+			return false
+		}
+	}
+	return true
 }
 
 // Read returns the manager-owned state after it verifies that every recorded

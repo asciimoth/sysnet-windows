@@ -122,6 +122,83 @@ func TestOwnedIPReservationDoesNotConsumeCallerReservation(t *testing.T) {
 	}
 }
 
+func TestCallerIPReservationsRemainReferenceCounted(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		allocate func(*Allocator) net.IP
+	}{
+		{
+			name: "IPv4",
+			allocate: func(allocator *Allocator) net.IP {
+				ip, _ := allocator.AllocIP4()
+				return ip
+			},
+		},
+		{
+			name: "IPv6",
+			allocate: func(allocator *Allocator) net.IP {
+				ip, _ := allocator.AllocIP6()
+				return ip
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			reference := New(staticReader{}, time.Second)
+			reserved := test.allocate(reference)
+			if reserved == nil {
+				t.Fatal("reference allocation = nil")
+			}
+
+			allocator := New(staticReader{}, time.Second)
+			for range 3 {
+				allocator.ReserveIP(reserved)
+			}
+			allocator.FreeIP(reserved)
+			allocator.FreeIP(reserved)
+			address, _ := canonicalIP(reserved)
+			if got := allocator.ipRefs[address]; got != 1 {
+				t.Fatalf("reservation references after two frees = %d, want 1", got)
+			}
+			got := test.allocate(allocator)
+			if got == nil {
+				t.Fatal("allocation = nil")
+			}
+			if got.Equal(reserved) {
+				t.Fatalf("allocation after two frees = %v, want %v to remain reserved", got, reserved)
+			}
+			allocator.FreeIP(reserved)
+			if got := allocator.ipRefs[address]; got != 0 {
+				t.Fatalf("reservation references after final free = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestAllocatedAndExplicitIPReferencesCompose(t *testing.T) {
+	t.Parallel()
+	allocator := New(staticReader{}, time.Second)
+	ip, _ := allocator.AllocIP4()
+	if ip == nil {
+		t.Fatal("AllocIP4() = nil")
+	}
+	address, _ := canonicalIP(ip)
+	allocator.ReserveIP(ip)
+	if got := allocator.ipRefs[address]; got != 2 {
+		t.Fatalf("references after allocation and reservation = %d, want 2", got)
+	}
+	allocator.FreeIP(ip)
+	if got := allocator.ipRefs[address]; got != 1 {
+		t.Fatalf("references after one free = %d, want 1", got)
+	}
+	allocator.FreeIP(ip)
+	if got := allocator.ipRefs[address]; got != 0 {
+		t.Fatalf("references after second free = %d, want 0", got)
+	}
+}
+
 func TestReplaceOwnedIPsDistinguishesOwnedAndForeignPrefixes(t *testing.T) {
 	t.Parallel()
 	oldPrefix := netip.MustParsePrefix("10.20.1.1/16")
