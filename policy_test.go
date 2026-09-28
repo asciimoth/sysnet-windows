@@ -391,6 +391,7 @@ func TestNormalizeSystemConfigAdapterIdentity(t *testing.T) {
 	normalized, err := normalizeSystemConfig(SystemConfig{
 		AdapterNamePrefix: "  private-tunnel  ",
 		StableGUID:        "01234567-89AB-CDEF-0123-456789ABCDEF",
+		UnderlaySelector:  "  Ethernet  ",
 	})
 	if err != nil {
 		t.Fatalf("normalizeSystemConfig() error = %v", err)
@@ -400,6 +401,9 @@ func TestNormalizeSystemConfigAdapterIdentity(t *testing.T) {
 	}
 	if normalized.stableGUID != "{01234567-89ab-cdef-0123-456789abcdef}" {
 		t.Fatalf("stable GUID = %q", normalized.stableGUID)
+	}
+	if normalized.underlaySelector != "Ethernet" {
+		t.Fatalf("underlay selector = %q, want Ethernet", normalized.underlaySelector)
 	}
 
 	for _, test := range []struct {

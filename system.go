@@ -14,6 +14,7 @@ import (
 	"github.com/asciimoth/gonnect/tun"
 	internalallocator "github.com/asciimoth/sysnet-windows/internal/allocator"
 	"github.com/asciimoth/sysnet-windows/internal/reconcile"
+	"github.com/asciimoth/sysnet-windows/internal/underlay"
 )
 
 // System is the Windows implementation of the gonnect system contract.
@@ -30,6 +31,9 @@ type System struct {
 	resources       reconcile.Resources
 	allocator       *internalallocator.Allocator
 	publicAllocator *systemAllocator
+	underlayMonitor *underlay.Monitor
+	underlayOwnedMu sync.RWMutex
+	underlayOwned   map[*regularTun]underlay.Interface
 	regularTunsMu   sync.Mutex
 	regularTuns     map[*regularTun]struct{}
 	nextRegularTun  uint64
@@ -79,6 +83,10 @@ func (s *System) close() error {
 	}
 	s.mu.Unlock()
 
+	var underlayErr error
+	if s.underlayMonitor != nil {
+		underlayErr = s.underlayMonitor.Close()
+	}
 	var stopErr error
 	if s.worker != nil {
 		stopCtx, cancelStop := context.WithTimeout(context.Background(), s.config.operationTimeout)
@@ -106,11 +114,11 @@ func (s *System) close() error {
 		cleanupErr = s.journal.UndoAll(cleanupCtx)
 		cancelCleanup()
 	}
-	result := errors.Join(stopErr, quiesceErr, resourceErr, cleanupErr)
+	result := errors.Join(underlayErr, stopErr, quiesceErr, resourceErr, cleanupErr)
 
 	s.mu.Lock()
 	next := lifecycleClosed
-	if stopErr != nil || quiesceErr != nil || resourceErr != nil || reconcile.RequiresRecovery(cleanupErr) {
+	if underlayErr != nil || stopErr != nil || quiesceErr != nil || resourceErr != nil || reconcile.RequiresRecovery(cleanupErr) {
 		next = lifecycleRecoveryRequired
 	}
 	transitionErr := s.transitionLocked(next)

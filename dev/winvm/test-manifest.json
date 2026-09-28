@@ -6,6 +6,7 @@
         "github.com/asciimoth/sysnet-windows::TestNativeNoResourceSmoke",
         "github.com/asciimoth/sysnet-windows::TestNativeWintunCapabilityReflectsDLLAvailability",
         "github.com/asciimoth/sysnet-windows::TestNativeHostAwareAllocation",
+        "github.com/asciimoth/sysnet-windows::TestNativeUnderlayMonitor",
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT25HostAwareAllocation",
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT26ConcurrentAllocation",
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT27EnumerationFailureAfterSelection",
@@ -19,13 +20,16 @@
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT07T09ExactManagerRequiresReadback",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT07T09ExactManagerReleasesRestoredProperties",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT07T09ExactManagerValidatesIdentityAndMTU",
+        "github.com/asciimoth/sysnet-windows/internal/underlay::TestN17N19N20SelectRanksAndFiltersCandidates",
+        "github.com/asciimoth/sysnet-windows/internal/underlay::TestN18SelectPublishesFamiliesIndependently",
+        "github.com/asciimoth/sysnet-windows/internal/underlay::TestN21N24MonitorReconcilesNetworkChanges",
         "github.com/asciimoth/sysnet-windows/internal/tun::TestT10T12AdapterPreservesPacketContract",
         "github.com/asciimoth/sysnet-windows/internal/tun::TestT10T12AdapterSerializesCallsInEachDirection",
         "github.com/asciimoth/sysnet-windows/internal/tun::TestT10AdapterReturnsNativeCapacityError",
         "github.com/asciimoth/sysnet-windows/internal/tun::TestT13T15CloseUnblocksIOAndNormalizesErrors"
       ],
       "plannedCases": [
-        "M2 native socket and underlay cases",
+        "M2 native socket binding cases",
         "M3 native DNS cases",
         "M4 native owner lookup cases"
       ]

@@ -692,7 +692,7 @@ defer rollback to a later milestone.
 
 #### M2: implement underlay selection, OutNet and LocalNet
 
-1. **Step 11 - Select and monitor one underlay per family.**
+1. **Step 11 - Select and monitor one underlay per family. (Completed)**
 
     - Rank candidates by explicit selector result, operational state, usable
       source address, destination reachability, route metric and interface

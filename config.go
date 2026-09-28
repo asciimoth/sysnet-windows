@@ -38,7 +38,9 @@ type SystemConfig struct {
 	AdapterNamePrefix string
 	// StableGUID optionally requests one stable Windows adapter GUID. Both the
 	// braced and unbraced 8-4-4-4-12 forms are accepted.
-	StableGUID       string
+	StableGUID string
+	// UnderlaySelector prefers an outbound interface whose name or GUID matches
+	// this value, without excluding other usable interfaces as fallback paths.
 	UnderlaySelector string
 	Features         FeatureConfig
 	OperationTimeout time.Duration
@@ -55,6 +57,7 @@ type Logger interface {
 type normalizedSystemConfig struct {
 	adapterNamePrefix string
 	stableGUID        string
+	underlaySelector  string
 	ipv4              bool
 	ipv6              bool
 	exclusions        bool
@@ -112,6 +115,7 @@ func normalizeSystemConfig(config SystemConfig) (normalizedSystemConfig, error) 
 	return normalizedSystemConfig{
 		adapterNamePrefix: prefix,
 		stableGUID:        stableGUID,
+		underlaySelector:  strings.TrimSpace(config.UnderlaySelector),
 		ipv4:              !config.Features.DisableIPv4,
 		ipv6:              !config.Features.DisableIPv6,
 		exclusions:        !config.Features.DisableExclusions,

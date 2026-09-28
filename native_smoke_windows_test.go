@@ -59,3 +59,31 @@ func TestNativeHostAwareAllocation(t *testing.T) {
 		t.Fatalf("AllocSubnet4: %v", system.allocator.LastError())
 	}
 }
+
+// TestNativeUnderlayMonitor verifies that construction can read all required
+// NetIO tables and register interface, route, and address callbacks. A host can
+// legitimately have neither family selected while it is disconnected.
+func TestNativeUnderlayMonitor(t *testing.T) {
+	system, err := New(SystemConfig{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() {
+		if err := system.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
+	if system.underlayMonitor == nil {
+		t.Fatal("underlay monitor is not configured")
+	}
+	if err := system.underlayMonitor.LastError(); err != nil {
+		t.Fatalf("initial underlay snapshot: %v", err)
+	}
+	snapshot := system.underlayMonitor.Snapshot()
+	if snapshot.IPv4 != nil && (!snapshot.IPv4.Source.Is4() || snapshot.IPv4.InterfaceIndex == 0) {
+		t.Fatalf("IPv4 underlay = %+v", snapshot.IPv4)
+	}
+	if snapshot.IPv6 != nil && (!snapshot.IPv6.Source.Is6() || snapshot.IPv6.InterfaceIndex == 0) {
+		t.Fatalf("IPv6 underlay = %+v", snapshot.IPv6)
+	}
+}

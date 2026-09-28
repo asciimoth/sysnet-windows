@@ -9,13 +9,14 @@ import (
 	"github.com/asciimoth/gonnect/sysnet"
 	"github.com/asciimoth/sysnet-windows/internal/netio"
 	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
+	"github.com/asciimoth/sysnet-windows/internal/underlay"
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wintun"
 )
 
-// New creates a Windows System. Construction does not install a driver, start
-// a worker, or change host networking. Native resources are acquired lazily by
-// later operations.
+// New creates a Windows System. Construction registers read-only network-change
+// monitoring, but does not install a driver or change host networking. Native
+// mutation resources are acquired lazily by later operations.
 func New(config SystemConfig) (*System, error) {
 	return newSystem(config, nativeDependencies())
 }
@@ -32,6 +33,7 @@ func nativeDependencies() systemDependencies {
 		tunFactory:       internaltun.NativeFactory{},
 		netIO:            netIO,
 		allocationReader: reader,
+		underlay:         underlay.NativeSource{},
 		capabilityProbe:  nativeCapabilityProbe{reader: reader},
 	}
 }

@@ -17,9 +17,31 @@ import (
 	internalallocator "github.com/asciimoth/sysnet-windows/internal/allocator"
 	"github.com/asciimoth/sysnet-windows/internal/netio"
 	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
+	"github.com/asciimoth/sysnet-windows/internal/underlay"
 )
 
 var errInjectedRegularTun = errors.New("injected regular TUN failure")
+
+func TestRegularTunUnderlayOwnershipUsesStableAndCurrentIdentity(t *testing.T) {
+	t.Parallel()
+	system := &System{underlayOwned: make(map[*regularTun]underlay.Interface)}
+	device := &regularTun{metadata: internaltun.Metadata{
+		LUID: 41, Index: 42, GUID: "{aaaaaaaa-0000-0000-0000-000000000000}",
+	}}
+	system.registerOwnedUnderlay(device)
+	if !system.ownsUnderlayInterface(underlay.Interface{LUID: 41, Index: 42}) {
+		t.Fatal("current LUID and index were not recognized as owned")
+	}
+	if !system.ownsUnderlayInterface(underlay.Interface{
+		LUID: 99, Index: 100, GUID: "{AAAAAAAA-0000-0000-0000-000000000000}",
+	}) {
+		t.Fatal("stable GUID was not recognized as owned after index recreation")
+	}
+	system.unregisterOwnedUnderlay(device)
+	if system.ownsUnderlayInterface(underlay.Interface{LUID: 41, Index: 42}) {
+		t.Fatal("closed adapter remained owned")
+	}
+}
 
 func TestRegularTunLifecycleAndTransactions(t *testing.T) {
 	factory := &regularTunFactory{}

@@ -183,6 +183,7 @@ func (s *System) buildRegularTun(opts sysnet.TunOpts) (gtun.Tun, error) {
 					owner: s, id: id, native: native, metadata: metadata,
 					desired: cloneNetIOConfig(want), mtu: desired.mtu, instanceRevision: 1,
 				}
+				s.registerOwnedUnderlay(result)
 				return nil
 			},
 			Inverse: func(ctx context.Context) error {
@@ -190,6 +191,7 @@ func (s *System) buildRegularTun(opts sysnet.TunOpts) (gtun.Tun, error) {
 					return nil
 				}
 				if result.closed.Load() {
+					s.unregisterOwnedUnderlay(result)
 					s.allocator.ReleaseOwnedIPs(reservationID)
 					return nil
 				}
@@ -202,6 +204,7 @@ func (s *System) buildRegularTun(opts sysnet.TunOpts) (gtun.Tun, error) {
 				}
 				closeErr := result.closeNative()
 				if closeErr == nil {
+					s.unregisterOwnedUnderlay(result)
 					s.allocator.ReleaseOwnedIPs(reservationID)
 				}
 				return closeErr
