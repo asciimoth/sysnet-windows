@@ -26,6 +26,7 @@ type fakeStore struct {
 	createRouteErr    error
 	propertiesResult  *Properties
 	propertiesError   error
+	propertiesHook    func(*fakeStore, Properties) error
 	log               []string
 	snapshots         int
 	beforeSnapshot    func(*fakeStore, int)
@@ -113,6 +114,9 @@ func (s *fakeStore) SetProperties(_ context.Context, _ Interface, properties Pro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.log = append(s.log, "set-properties")
+	if s.propertiesHook != nil {
+		return s.propertiesHook(s, properties)
+	}
 	for index, row := range s.state.Properties {
 		if row.Family == properties.Family {
 			if s.propertiesResult != nil {
@@ -236,6 +240,165 @@ func TestExactManagerAcceptsFailedInverseWithVerifiedCleanup(t *testing.T) {
 	}
 	if len(store.state.Addresses) != 0 {
 		t.Fatalf("addresses after rollback = %+v, want empty", store.state.Addresses)
+	}
+}
+
+func TestExactManagerReplacementRollbackDoesNotRequireRecovery(t *testing.T) {
+	originalProperties := Properties{Family: FamilyIPv4, MTU: 1500, Metric: 25, AutomaticMetric: true}
+	firstAddress := netip.MustParsePrefix("10.19.0.1/24")
+	secondAddress := netip.MustParsePrefix("10.19.0.1/25")
+	peerAddress := netip.MustParsePrefix("10.19.1.1/24")
+	firstRoute := Route{Destination: netip.MustParsePrefix("10.20.0.0/16"), NextHop: netip.IPv4Unspecified(), Metric: 5}
+	secondRoute := firstRoute
+	secondRoute.Metric = 8
+	peerRoute := Route{Destination: netip.MustParsePrefix("10.21.0.0/16"), NextHop: netip.IPv4Unspecified(), Metric: 6}
+	firstProperties := Properties{Family: FamilyIPv4, MTU: 1400, Metric: 3}
+	secondProperties := Properties{Family: FamilyIPv4, MTU: 1300, Metric: 4}
+	tests := []struct {
+		name   string
+		first  Config
+		second Config
+	}{
+		{
+			name: "address prefix",
+			first: Config{
+				Addresses: []netip.Prefix{firstAddress}, Properties: []Properties{firstProperties},
+			},
+			second: Config{
+				Addresses: []netip.Prefix{secondAddress}, Properties: []Properties{secondProperties},
+			},
+		},
+		{
+			name: "route metric",
+			first: Config{
+				Routes: []Route{firstRoute}, Properties: []Properties{firstProperties},
+			},
+			second: Config{
+				Routes: []Route{secondRoute}, Properties: []Properties{secondProperties},
+			},
+		},
+		{
+			name: "address and route",
+			first: Config{
+				Addresses: []netip.Prefix{firstAddress}, Routes: []Route{firstRoute},
+				Properties: []Properties{firstProperties},
+			},
+			second: Config{
+				Addresses: []netip.Prefix{secondAddress}, Routes: []Route{secondRoute},
+				Properties: []Properties{secondProperties},
+			},
+		},
+		{
+			name: "replacement and new peer keys",
+			first: Config{
+				Addresses: []netip.Prefix{firstAddress}, Routes: []Route{firstRoute},
+				Properties: []Properties{firstProperties},
+			},
+			second: Config{
+				Addresses: []netip.Prefix{secondAddress, peerAddress}, Routes: []Route{secondRoute, peerRoute},
+				Properties: []Properties{secondProperties},
+			},
+		},
+		{
+			name: "replacement and removed peer keys",
+			first: Config{
+				Addresses: []netip.Prefix{firstAddress, peerAddress}, Routes: []Route{firstRoute, peerRoute},
+				Properties: []Properties{firstProperties},
+			},
+			second: Config{
+				Addresses: []netip.Prefix{secondAddress}, Routes: []Route{secondRoute},
+				Properties: []Properties{secondProperties},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &fakeStore{state: State{Interface: testInterface, Properties: []Properties{originalProperties}}}
+			manager, err := NewManager(store)
+			if err != nil {
+				t.Fatalf("NewManager() error = %v", err)
+			}
+			if err := manager.Apply(context.Background(), testInterface, test.first); err != nil {
+				t.Fatalf("initial Apply() error = %v", err)
+			}
+
+			store.propertiesError = errors.New("property update failed after mutation")
+			err = manager.Apply(context.Background(), testInterface, test.second)
+			if err == nil {
+				t.Fatal("replacement Apply() error = nil")
+			}
+			if RequiresRecovery(err) {
+				t.Fatalf("replacement Apply() error = %v, want verified rollback without recovery", err)
+			}
+			assertConfig(t, manager, test.first)
+
+			store.propertiesError = nil
+			if err := manager.Apply(context.Background(), testInterface, test.second); err != nil {
+				t.Fatalf("replacement retry Apply() error = %v", err)
+			}
+			assertConfig(t, manager, test.second)
+			if err := manager.Apply(context.Background(), testInterface, Config{}); err != nil {
+				t.Fatalf("cleanup Apply() error = %v", err)
+			}
+			state, err := store.Snapshot(context.Background(), testInterface)
+			if err != nil {
+				t.Fatalf("Snapshot() error = %v", err)
+			}
+			if len(state.Addresses) != 0 || len(state.Routes) != 0 || !slices.Equal(state.Properties, []Properties{originalProperties}) {
+				t.Fatalf("state after cleanup = %+v, want only original properties %+v", state, originalProperties)
+			}
+		})
+	}
+}
+
+func TestExactManagerReplacementRollbackRequiresRecoveryWhenOldValueIsNotRestored(t *testing.T) {
+	originalProperties := Properties{Family: FamilyIPv4, MTU: 1500, Metric: 25, AutomaticMetric: true}
+	firstProperties := Properties{Family: FamilyIPv4, MTU: 1400, Metric: 3}
+	secondProperties := Properties{Family: FamilyIPv4, MTU: 1300, Metric: 4}
+	firstAddress := netip.MustParsePrefix("10.19.0.1/24")
+	secondAddress := netip.MustParsePrefix("10.19.0.1/25")
+	store := &fakeStore{state: State{Interface: testInterface, Properties: []Properties{originalProperties}}}
+	manager, err := NewManager(store)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	first := Config{Addresses: []netip.Prefix{firstAddress}, Properties: []Properties{firstProperties}}
+	if err := manager.Apply(context.Background(), testInterface, first); err != nil {
+		t.Fatalf("initial Apply() error = %v", err)
+	}
+
+	propertyCalls := 0
+	primaryErr := errors.New("property update failed after mutation")
+	store.propertiesHook = func(store *fakeStore, properties Properties) error {
+		propertyCalls++
+		store.state.Properties[0] = properties
+		if propertyCalls == 1 {
+			store.failDeleteAddress = true
+			return primaryErr
+		}
+		return nil
+	}
+	err = manager.Apply(context.Background(), testInterface, Config{
+		Addresses: []netip.Prefix{secondAddress}, Properties: []Properties{secondProperties},
+	})
+	if !errors.Is(err, primaryErr) || !RequiresRecovery(err) {
+		t.Fatalf("replacement Apply() error = %v, want primary error with recovery required", err)
+	}
+	if len(store.state.Addresses) != 1 || store.state.Addresses[0].Prefix != secondAddress {
+		t.Fatalf("address after incomplete rollback = %+v, want retained replacement %s", store.state.Addresses, secondAddress)
+	}
+
+	store.propertiesHook = nil
+	store.failDeleteAddress = false
+	if err := manager.Apply(context.Background(), testInterface, Config{}); err != nil {
+		t.Fatalf("cleanup retained replacement error = %v", err)
+	}
+	state, err := store.Snapshot(context.Background(), testInterface)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if len(state.Addresses) != 0 || !slices.Equal(state.Properties, []Properties{originalProperties}) {
+		t.Fatalf("state after recovery cleanup = %+v, want only original properties %+v", state, originalProperties)
 	}
 }
 

@@ -36,6 +36,7 @@ type ownedProperties struct {
 
 type mutation struct {
 	description  string
+	rollbackKey  string
 	precondition func(State) bool
 	apply        func(context.Context) error
 	verify       func(State) bool
@@ -151,7 +152,15 @@ func (m *ExactManager) fail(ctx context.Context, iface Interface, before, planne
 }
 
 func mutationsUndone(state State, completed []mutation) bool {
+	// A replacement deletes and recreates one native key. The first mutation
+	// for that key describes its state before the transaction; later mutations
+	// describe intermediate states which cannot all be true after rollback.
+	checked := make(map[string]struct{}, len(completed))
 	for _, change := range completed {
+		if _, ok := checked[change.rollbackKey]; ok {
+			continue
+		}
+		checked[change.rollbackKey] = struct{}{}
 		if !change.undone(state) {
 			return false
 		}
@@ -302,6 +311,7 @@ func (m *ExactManager) createAddress(iface Interface, prefix netip.Prefix) mutat
 	key := addressKey(prefix)
 	return mutation{
 		description: "create address " + prefix.String(),
+		rollbackKey: "address|" + key,
 		precondition: func(state State) bool {
 			_, exists := addressMap(state)[key]
 			return !exists
@@ -329,6 +339,7 @@ func (m *ExactManager) deleteAddress(iface Interface, prefix netip.Prefix) mutat
 	key := addressKey(prefix)
 	return mutation{
 		description: "delete address " + prefix.String(),
+		rollbackKey: "address|" + key,
 		precondition: func(state State) bool {
 			value, ok := addressMap(state)[key]
 			return ok && value.Prefix == prefix
@@ -352,6 +363,7 @@ func (m *ExactManager) createRoute(iface Interface, route Route) mutation {
 	key := routeKey(route)
 	return mutation{
 		description: fmt.Sprintf("create route %s via %s", route.Destination, route.NextHop),
+		rollbackKey: "route|" + key,
 		precondition: func(state State) bool {
 			_, exists := routeMap(state)[key]
 			return !exists
@@ -367,6 +379,7 @@ func (m *ExactManager) deleteRoute(iface Interface, route Route) mutation {
 	key := routeKey(route)
 	return mutation{
 		description: fmt.Sprintf("delete route %s via %s", route.Destination, route.NextHop),
+		rollbackKey: "route|" + key,
 		precondition: func(state State) bool {
 			value, ok := routeMap(state)[key]
 			return ok && value == route
@@ -381,6 +394,7 @@ func (m *ExactManager) deleteRoute(iface Interface, route Route) mutation {
 func (m *ExactManager) setProperties(iface Interface, from, to Properties) mutation {
 	return mutation{
 		description: fmt.Sprintf("set IPv%d interface properties", to.Family),
+		rollbackKey: fmt.Sprintf("properties|%d", to.Family),
 		precondition: func(state State) bool {
 			value, ok := propertiesMap(state)[from.Family]
 			return ok && value == from
