@@ -2,7 +2,7 @@
 # shellcheck disable=SC2154 # Set by common.sh before this file is sourced.
 
 # prepare_wintun_archive validates and downloads the Wintun archive that
-# the flow gate uses. It sets wintun_archive to the verified cache path.
+# the live and flow gates use. It sets wintun_archive to the verified cache path.
 prepare_wintun_archive() {
     local lock_file=$1 version file source expected partial fd
     jq -e '

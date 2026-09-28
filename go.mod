@@ -8,6 +8,7 @@ require (
 	github.com/asciimoth/tuntap v0.4.3
 	github.com/tailscale/wf v0.0.0-20240214030419-6fbb0a674ee6
 	golang.org/x/sys v0.47.0
+	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
 	golang.zx2c4.com/wireguard/windows v1.1.1
 )
 
@@ -21,6 +22,5 @@ require (
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect
 	golang.org/x/tools/go/expect v0.1.1-deprecated // indirect
-	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	honnef.co/go/tools v0.3.2 // indirect
 )

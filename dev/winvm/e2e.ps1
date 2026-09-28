@@ -29,6 +29,9 @@ $nativeArchitecture = switch ($env:PROCESSOR_ARCHITECTURE) { 'AMD64' { 'amd64' }
 if ($manifest.architecture.ToString().ToLowerInvariant() -ne $nativeArchitecture) { throw 'Driver package and native architecture do not match' }
 $goVersion = (& $GoExecutable version | Out-String).Trim()
 if ($goVersion -notmatch " windows/$nativeArchitecture$") { throw "Go process does not target native $nativeArchitecture" }
+$wintunDLL = Join-Path (Split-Path $SourceDir -Parent) 'wintun.dll'
+if (-not (Test-Path -LiteralPath $wintunDLL -PathType Leaf)) { throw 'The staged Wintun DLL is absent' }
+$env:SYSNET_WINDOWS_WINTUN_DLL = $wintunDLL
 if (-not $SysnetWindowsRevision) {
     $SysnetWindowsRevision = (& git -C $SourceDir rev-parse HEAD 2>$null | Out-String).Trim()
 }

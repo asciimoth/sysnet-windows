@@ -5,10 +5,10 @@ import (
 	"errors"
 	"net/netip"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/asciimoth/gonnect/sysnet"
-	gtun "github.com/asciimoth/gonnect/tun"
 	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
 )
 
@@ -300,11 +300,47 @@ func TestNewValidatesConfigBeforePlatform(t *testing.T) {
 	}
 }
 
+func TestNormalizeSystemConfigAdapterIdentity(t *testing.T) {
+	t.Parallel()
+
+	normalized, err := normalizeSystemConfig(SystemConfig{
+		AdapterNamePrefix: "  private-tunnel  ",
+		StableGUID:        "01234567-89AB-CDEF-0123-456789ABCDEF",
+	})
+	if err != nil {
+		t.Fatalf("normalizeSystemConfig() error = %v", err)
+	}
+	if normalized.adapterNamePrefix != "private-tunnel" {
+		t.Fatalf("adapter name prefix = %q, want private-tunnel", normalized.adapterNamePrefix)
+	}
+	if normalized.stableGUID != "{01234567-89ab-cdef-0123-456789abcdef}" {
+		t.Fatalf("stable GUID = %q", normalized.stableGUID)
+	}
+
+	for _, test := range []struct {
+		name   string
+		config SystemConfig
+		path   string
+	}{
+		{name: "invalid GUID", config: SystemConfig{StableGUID: "not-a-guid"}, path: "SystemConfig.StableGUID"},
+		{name: "NUL in prefix", config: SystemConfig{AdapterNamePrefix: "bad\x00name"}, path: "SystemConfig.AdapterNamePrefix"},
+		{name: "long prefix", config: SystemConfig{AdapterNamePrefix: strings.Repeat("x", 128)}, path: "SystemConfig.AdapterNamePrefix"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := normalizeSystemConfig(test.config)
+			if err == nil || !errors.Is(err, sysnet.ErrInvalidOptions) || !strings.Contains(err.Error(), test.path) {
+				t.Fatalf("normalizeSystemConfig() error = %v, want invalid options at %s", err, test.path)
+			}
+		})
+	}
+}
+
 type countingTUNFactory struct {
 	calls int
 }
 
-func (f *countingTUNFactory) Create(context.Context, internaltun.Config) (gtun.Tun, error) {
+func (f *countingTUNFactory) Create(context.Context, internaltun.Config) (internaltun.ManagedTun, error) {
 	f.calls++
 	return nil, errors.New("unexpected TUN creation")
 }

@@ -1,9 +1,12 @@
 package windows
 
 import (
+	"errors"
+	"strings"
 	"time"
 
 	"github.com/asciimoth/gonnect/sysnet"
+	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
 )
 
 const defaultOperationTimeout = 30 * time.Second
@@ -30,13 +33,17 @@ const (
 // SystemConfig configures a Windows System. New does not install drivers or
 // change host networking while it processes this value.
 type SystemConfig struct {
+	// AdapterNamePrefix prefixes automatically generated Wintun names. The
+	// default is "gonnect".
 	AdapterNamePrefix string
-	StableGUID        string
-	UnderlaySelector  string
-	Features          FeatureConfig
-	OperationTimeout  time.Duration
-	Recovery          RecoveryPolicy
-	Logger            Logger
+	// StableGUID optionally requests one stable Windows adapter GUID. Both the
+	// braced and unbraced 8-4-4-4-12 forms are accepted.
+	StableGUID       string
+	UnderlaySelector string
+	Features         FeatureConfig
+	OperationTimeout time.Duration
+	Recovery         RecoveryPolicy
+	Logger           Logger
 }
 
 // Logger receives diagnostic messages. Implementations must be safe for
@@ -46,11 +53,13 @@ type Logger interface {
 }
 
 type normalizedSystemConfig struct {
-	ipv4             bool
-	ipv6             bool
-	exclusions       bool
-	matchers         bool
-	operationTimeout time.Duration
+	adapterNamePrefix string
+	stableGUID        string
+	ipv4              bool
+	ipv6              bool
+	exclusions        bool
+	matchers          bool
+	operationTimeout  time.Duration
 }
 
 func normalizeSystemConfig(config SystemConfig) (normalizedSystemConfig, error) {
@@ -72,16 +81,42 @@ func normalizeSystemConfig(config SystemConfig) (normalizedSystemConfig, error) 
 			sysnet.ErrInvalidOptions,
 		))
 	}
+	prefix := strings.TrimSpace(config.AdapterNamePrefix)
+	if prefix == "" {
+		prefix = internaltun.DefaultNamePrefix
+	}
+	// Leave space for the generated hyphen and 12-character GUID suffix.
+	if err := internaltun.ValidateName(prefix + "-000000000000"); err != nil {
+		return normalizedSystemConfig{}, validationError(validationIssue(
+			"SystemConfig.AdapterNamePrefix",
+			0,
+			"",
+			"adapter name prefix is not valid",
+			errors.Join(sysnet.ErrInvalidOptions, err),
+		))
+	}
+	stableGUID, err := internaltun.NormalizeGUID(config.StableGUID)
+	if err != nil {
+		return normalizedSystemConfig{}, validationError(validationIssue(
+			"SystemConfig.StableGUID",
+			0,
+			"",
+			"stable adapter GUID is not valid",
+			errors.Join(sysnet.ErrInvalidOptions, err),
+		))
+	}
 	timeout := config.OperationTimeout
 	if timeout == 0 {
 		timeout = defaultOperationTimeout
 	}
 	return normalizedSystemConfig{
-		ipv4:             !config.Features.DisableIPv4,
-		ipv6:             !config.Features.DisableIPv6,
-		exclusions:       !config.Features.DisableExclusions,
-		matchers:         !config.Features.DisableMatchers,
-		operationTimeout: timeout,
+		adapterNamePrefix: prefix,
+		stableGUID:        stableGUID,
+		ipv4:              !config.Features.DisableIPv4,
+		ipv6:              !config.Features.DisableIPv6,
+		exclusions:        !config.Features.DisableExclusions,
+		matchers:          !config.Features.DisableMatchers,
+		operationTimeout:  timeout,
 	}, nil
 }
 

@@ -47,18 +47,19 @@ just test-total
 
 The baseline runs module verification, tidy, vet, tests, and build as the
 standard user. Its required native smoke test creates no network resource and
-does not load Wintun or the split driver. The live gate starts the verified
-driver, runs only the `windows && winintegration` package serially as `SYSTEM`,
-checks cleanup, and stops the service. The flow gate adds a second disposable
-endpoint guest and two isolated links. It validates packet markers in a capture
-from each link. The manifest lists only existing package tests as required
-tests. Future live and flow coverage is listed as planned cases, not as optional
-passes. A required test fails the gate if it is absent or skipped. The live and
-flow gates cannot pass release qualification until their planned milestone tests
-become required and pass. `just test-total` runs the local Go and fuzz tests,
-then builds or reuses the base image and runs all three VM gates. `just check`
-adds all formatting, linting, vetting, builds, and host-harness checks around
-`test-total`. Linux-only VM recipes skip on Windows.
+does not load Wintun or the split driver. The live gate stages the locked Wintun
+DLL, starts the verified split driver, runs only the `windows && winintegration`
+package serially as `SYSTEM`, checks cleanup, and stops the service. The flow
+gate adds a second disposable endpoint guest and two isolated links. It
+validates packet markers in a capture from each link. The manifest lists only
+existing package tests as required tests. Future live and flow coverage is
+listed as planned cases, not as optional passes. A required test fails the gate
+if it is absent or skipped. The live and flow gates cannot pass release
+qualification until their planned milestone tests become required and pass.
+`just test-total` runs the local Go and fuzz tests, then builds or reuses the
+base image and runs all three VM gates. `just check` adds all formatting,
+linting, vetting, builds, and host-harness checks around `test-total`.
+Linux-only VM recipes skip on Windows.
 
 The harness serializes VM processes on one host. Image creation has an exclusive
 content-key lock. Test runs hold a shared image lock and use a unique overlay,

@@ -16,7 +16,9 @@ while IFS= read -r test_name; do
     }
     package_path=${BASH_REMATCH[1]}
     function_name=${BASH_REMATCH[2]}
-    package_dir=$(cd -- "$root" && go list -f '{{.Dir}}' "$package_path")
+    # Resolve the same Windows-only packages that the live gate builds. This
+    # also lets the manifest validate tagged integration tests on a Linux host.
+    package_dir=$(cd -- "$root" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go list -tags=winintegration -f '{{.Dir}}' "$package_path")
     rg -q --max-depth 1 "^func ${function_name}\\(t \\*testing\\.T\\)" "$package_dir" --glob '*_test.go' || {
         printf 'required test does not exist in %s: %s\n' "$package_path" "$function_name" >&2
         exit 1

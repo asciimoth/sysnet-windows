@@ -2,7 +2,10 @@
 
 package windows
 
-import "github.com/asciimoth/sysnet-windows/internal/netio"
+import (
+	"github.com/asciimoth/sysnet-windows/internal/netio"
+	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
+)
 
 // New creates a Windows System. Construction does not install a driver, start
 // a worker, or change host networking. Native resources are acquired lazily by
@@ -12,5 +15,8 @@ func New(config SystemConfig) (*System, error) {
 }
 
 func nativeDependencies() systemDependencies {
-	return systemDependencies{allocationReader: netio.NativeReader{}}
+	return systemDependencies{
+		tunFactory:       internaltun.NativeFactory{},
+		allocationReader: netio.NativeReader{},
+	}
 }

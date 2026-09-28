@@ -12,6 +12,7 @@ build locks. Update them together.
 | `github.com/tailscale/wf`                      | `6fbb0a674ee6`                                         | WFP object management                                  |
 | `golang.zx2c4.com/wireguard/windows`           | `v1.1.1`                                               | NetIO and `winipcfg` operations                        |
 | `golang.org/x/sys`                             | `v0.47.0` (`9e7e939dcafac07e8ab4cffa6e5fc74908413f00`) | Windows system calls                                   |
+| `golang.zx2c4.com/wintun`                      | `0fa3db229ce2`                                         | Adapter collision checks and staged Wintun DLL loading |
 
 The exact public method inventory and accepted changes from the earlier
 inspected contract are in [`gonnect-contract.md`](gonnect-contract.md).

@@ -39,7 +39,7 @@ for command in qemu-system-x86_64 qemu-img ssh scp jq python3 timeout flock git 
 ensure_cache_dir
 mkdir -p "$artifact_root" "$winvm_cache_dir/locks"
 chmod 0700 "$artifact_root"
-if [[ $mode == flow ]]; then
+if [[ $mode == e2e || $mode == flow ]]; then
     wintun_lock="$script_dir/wintun-lock.json"
     prepare_wintun_archive "$wintun_lock"
 fi
@@ -189,7 +189,7 @@ if [[ $mode != shell ]]; then
     dirty=false
     [[ -n $(git -C "$repo_root" status --porcelain) ]] && dirty=true
     wintun_lock_hash=''
-    [[ $mode != flow ]] || wintun_lock_hash=$(sha256_file "$wintun_lock")
+    if [[ $mode == e2e || $mode == flow ]]; then wintun_lock_hash=$(sha256_file "$wintun_lock"); fi
     jq -n --arg revision "$revision" --argjson dirty "$dirty" --arg key "$key" --arg mode "$mode" --arg started "$(date -u +%FT%TZ)" --arg testHash "$(sha256_file "$script_dir/test.ps1")" --arg e2eHash "$(sha256_file "$script_dir/e2e.ps1")" --arg runnerHash "$(sha256_file "$script_dir/run.sh")" --arg wintunLockHash "$wintun_lock_hash" '{revision:$revision,dirty:$dirty,baseImageKey:$key,mode:$mode,startedAt:$started,status:"running",stage:"setup",scriptHashes:{test:$testHash,e2e:$e2eHash,runner:$runnerHash,wintunLock:$wintunLockHash}}' >"$run_dir/run.json"
     cp "$manifest" "$run_dir/image-manifest.json"
     qemu-img create -q -f qcow2 -F qcow2 -b "$base" "$overlay"
@@ -295,13 +295,17 @@ stage=transfer
 ssh "${ssh_opts[@]}" "$target" "powershell.exe -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$remote/source','$remote/artifacts'|Out-Null\""
 scp "${scp_opts[@]}" "$payload" "$target:$remote/worktree.tar" >/dev/null
 ssh "${ssh_opts[@]}" "$target" "tar.exe -xf \"$remote/worktree.tar\" -C \"$remote/source\""
+if [[ $mode == e2e || $mode == flow ]]; then
+    wintun_architecture=$(jq -er .architecture "$manifest")
+    python3 "$script_dir/tools/wintun-input.py" --lock "$wintun_lock" --archive "$wintun_archive" --architecture "$wintun_architecture" --output "$run_dir/wintun.dll"
+    [[ -s $run_dir/wintun.dll ]] || die "Wintun $wintun_architecture DLL is absent from the locked archive"
+    scp "${scp_opts[@]}" "$run_dir/wintun.dll" "$target:$remote/" >/dev/null
+fi
 if [[ $mode == flow ]]; then
     stage=flow-setup
     GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o "$run_dir/flowecho.exe" "$repo_root/cmd/flowecho"
     GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o "$run_dir/tunnelpeer.exe" "$repo_root/cmd/tunnelpeer"
     GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o "$run_dir/sysnetflow.exe" "$repo_root/cmd/sysnetflow"
-    python3 "$script_dir/tools/wintun-input.py" --lock "$wintun_lock" --archive "$wintun_archive" --architecture amd64 --output "$run_dir/wintun.dll"
-    [[ -s $run_dir/wintun.dll ]] || die 'Wintun amd64 DLL is absent from the locked archive'
     endpoint_remote="C:/winvm/runs/${run_id//[^A-Za-z0-9-]/}"
     ssh "${endpoint_ssh_opts[@]}" "$endpoint_target" "powershell.exe -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$endpoint_remote'|Out-Null\""
     scp "${endpoint_scp_opts[@]}" "$run_dir/flowecho.exe" "$run_dir/tunnelpeer.exe" "$script_dir/flow-network.ps1" "$endpoint_target:$endpoint_remote/" >/dev/null
@@ -310,7 +314,7 @@ if [[ $mode == flow ]]; then
     "$script_dir/tools/qga.py" --socket "$endpoint_qga" --timeout 30 exec powershell.exe -NoProfile -Command "Set-NetFirewallProfile -All -Enabled False; Start-Sleep -Seconds 3; \$action=New-ScheduledTaskAction -Execute '$endpoint_windows\\flowecho.exe'; Register-ScheduledTask -TaskName SysnetFlowEndpoint -Action \$action -User SYSTEM -RunLevel Highest -Force | Out-Null; Start-ScheduledTask -TaskName SysnetFlowEndpoint; \$peer=New-ScheduledTaskAction -Execute '$endpoint_windows\\tunnelpeer.exe' -Argument '-listen 198.18.0.1:51900'; Register-ScheduledTask -TaskName SysnetFlowPeer -Action \$peer -User SYSTEM -RunLevel Highest -Force | Out-Null; Start-ScheduledTask -TaskName SysnetFlowPeer; Start-Sleep -Seconds 2; \$listeners=@(Get-NetTCPConnection -State Listen | Where-Object LocalPort -in 53,47823); if (@(\$listeners | Where-Object LocalPort -eq 53).Count -ne 2 -or @(\$listeners | Where-Object LocalPort -eq 47823).Count -ne 2) { throw 'Expected two IPv4/IPv6 listeners on ports 53 and 47823' }; if (-not (Get-NetUDPEndpoint -LocalAddress 198.18.0.1 -LocalPort 51900)) { throw 'Tunnel peer is not listening' }; \$listeners | Select-Object LocalAddress,LocalPort,OwningProcess | ConvertTo-Json" >"$run_dir/endpoint-service.json"
     guest_remote=${remote//\//\\}
     "$script_dir/tools/qga.py" --socket "$qga" --timeout 60 exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$guest_remote\\source\\dev\\winvm\\flow-network.ps1" -Role Client >"$run_dir/client-network.json"
-    scp "${scp_opts[@]}" "$run_dir/sysnetflow.exe" "$run_dir/wintun.dll" "$target:$remote/" >/dev/null
+    scp "${scp_opts[@]}" "$run_dir/sysnetflow.exe" "$target:$remote/" >/dev/null
 fi
 stage='test'
 test_timeout=$(jq -r .machine.testTimeoutSeconds "$config_file")
