@@ -12,6 +12,7 @@ import (
 	"github.com/asciimoth/gonnect/subnet"
 	"github.com/asciimoth/gonnect/sysnet"
 	"github.com/asciimoth/gonnect/tun"
+	internalallocator "github.com/asciimoth/sysnet-windows/internal/allocator"
 	"github.com/asciimoth/sysnet-windows/internal/reconcile"
 )
 
@@ -27,6 +28,7 @@ type System struct {
 	journal         *reconcile.Journal
 	worker          *reconcile.Worker
 	resources       reconcile.Resources
+	allocator       *internalallocator.Allocator
 	closeOnce       sync.Once
 	closeErr        error
 	probeGeneration uint64
@@ -73,6 +75,9 @@ func (s *System) close() error {
 		resourceCtx, cancelResources := context.WithTimeout(context.Background(), s.config.operationTimeout)
 		resourceErr = s.resources.CloseAll(resourceCtx)
 		cancelResources()
+	}
+	if s.allocator != nil {
+		s.allocator.Close()
 	}
 	var cleanupErr error
 	if stopErr == nil && quiesceErr == nil && resourceErr == nil && s.journal != nil {
@@ -219,9 +224,21 @@ func (s *System) CompleteRule(sysnet.Rule, sysnet.RuleContext) ([]string, error)
 	return nil, sysnet.ErrNotSupported
 }
 
-func (*System) AllocIP() subnet.IPAllocator { return nil }
+// AllocIP returns the System's shared host-aware IP allocator.
+func (s *System) AllocIP() subnet.IPAllocator {
+	if s == nil {
+		return nil
+	}
+	return s.allocator
+}
 
-func (*System) AllocSubnet() subnet.SubnetAllocator { return nil }
+// AllocSubnet returns the same shared reservation state as AllocIP.
+func (s *System) AllocSubnet() subnet.SubnetAllocator {
+	if s == nil {
+		return nil
+	}
+	return s.allocator
+}
 
 func (*System) OutDNS() dns.Interface { return nil }
 

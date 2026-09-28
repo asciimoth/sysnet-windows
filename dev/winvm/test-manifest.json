@@ -3,7 +3,11 @@
   "suites": {
     "native-unit": {
       "requiredTests": [
-        "github.com/asciimoth/sysnet-windows::TestNativeNoResourceSmoke"
+        "github.com/asciimoth/sysnet-windows::TestNativeNoResourceSmoke",
+        "github.com/asciimoth/sysnet-windows::TestNativeHostAwareAllocation",
+        "github.com/asciimoth/sysnet-windows/internal/allocator::TestT25HostAwareAllocation",
+        "github.com/asciimoth/sysnet-windows/internal/allocator::TestT26ConcurrentAllocation",
+        "github.com/asciimoth/sysnet-windows/internal/allocator::TestT27EnumerationFailureAfterSelection"
       ],
       "plannedCases": [
         "M1 native Wintun and NetIO cases",

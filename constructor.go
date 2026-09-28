@@ -3,6 +3,7 @@ package windows
 import (
 	"context"
 
+	internalallocator "github.com/asciimoth/sysnet-windows/internal/allocator"
 	"github.com/asciimoth/sysnet-windows/internal/reconcile"
 )
 
@@ -22,6 +23,7 @@ func newSystem(config SystemConfig, dependencies systemDependencies) (*System, e
 		probeFacts:   initialProbeFacts(),
 		support:      dependencies.capabilityCode,
 		journal:      reconcile.NewJournal(normalized.operationTimeout),
+		allocator:    internalallocator.New(dependencies.allocationReader, normalized.operationTimeout),
 	}
 	if system.support == (implementationSupport{}) {
 		system.support = currentImplementationSupport()

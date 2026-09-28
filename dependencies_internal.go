@@ -23,17 +23,18 @@ type capabilityProber interface {
 // the stable integration path while package tests can inject deterministic
 // fakes through newSystem.
 type systemDependencies struct {
-	tunFactory      internaltun.Factory
-	netIO           netio.Manager
-	underlay        underlay.Source
-	dnsConfigurator internaldns.Configurator
-	splitController split.Controller
-	wfpManager      wfp.Manager
-	ownerLookup     owner.Lookup
-	clock           internalclock.Clock
-	logger          Logger
-	capabilityProbe capabilityProber
-	capabilityCode  implementationSupport
+	tunFactory       internaltun.Factory
+	netIO            netio.Manager
+	allocationReader netio.Reader
+	underlay         underlay.Source
+	dnsConfigurator  internaldns.Configurator
+	splitController  split.Controller
+	wfpManager       wfp.Manager
+	ownerLookup      owner.Lookup
+	clock            internalclock.Clock
+	logger           Logger
+	capabilityProbe  capabilityProber
+	capabilityCode   implementationSupport
 }
 
 func (d *systemDependencies) setLogger(logger Logger) {
@@ -45,6 +46,7 @@ func (d *systemDependencies) setLogger(logger Logger) {
 func (d systemDependencies) inspect() {
 	_ = d.tunFactory
 	_ = d.netIO
+	_ = d.allocationReader
 	_ = d.underlay
 	_ = d.dnsConfigurator
 	_ = d.splitController

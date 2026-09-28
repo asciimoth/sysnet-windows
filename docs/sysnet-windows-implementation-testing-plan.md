@@ -635,7 +635,7 @@ defer rollback to a later milestone.
 
 #### M1: implement ordinary TUN and NetIO ownership
 
-1. **Step 7 - Implement host-aware address and subnet allocation.**
+1. **Step 7 - Implement host-aware address and subnet allocation. (Completed)**
 
    - Enumerate usable host addresses, interface prefixes and routes through the
      injected NetIO reader.
