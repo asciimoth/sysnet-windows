@@ -649,7 +649,7 @@ defer rollback to a later milestone.
    - Complete this step when T25-T27 pass, including concurrent allocation and
      an enumeration error after initial selection.
 
-2. **Step 8 - Adapt Wintun without changing its packet contract.**
+2. **Step 8 - Adapt Wintun without changing its packet contract. (Completed)**
 
    - Wrap `CreateTUNWithRequestedGUID`. Store stable GUID metadata and the
      current LUID/index separately.

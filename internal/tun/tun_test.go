@@ -126,6 +126,91 @@ func TestAdapterAllowsOneReaderAndWriterTogether(t *testing.T) {
 	closeAdapter(t, adapter)
 }
 
+func TestT10T12AdapterSerializesCallsInEachDirection(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		call func(*Adapter) error
+		set  func(*fakeTun, func())
+	}{
+		{
+			name: "read",
+			call: func(adapter *Adapter) error {
+				_, err := adapter.Read([][]byte{{0}}, []int{0}, 0)
+				return err
+			},
+			set: func(native *fakeTun, entered func()) {
+				native.read = func(_ [][]byte, sizes []int, _ int) (int, error) {
+					entered()
+					sizes[0] = 1
+					return 1, nil
+				}
+			},
+		},
+		{
+			name: "write",
+			call: func(adapter *Adapter) error {
+				_, err := adapter.Write([][]byte{{0}}, 0)
+				return err
+			},
+			set: func(native *fakeTun, entered func()) {
+				native.write = func([][]byte, int) (int, error) {
+					entered()
+					return 1, nil
+				}
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			native := newFakeTun()
+			firstEntered := make(chan struct{})
+			secondEntered := make(chan struct{})
+			releaseFirst := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
+			defer release()
+			var calls atomic.Int32
+			test.set(native, func() {
+				if calls.Add(1) == 1 {
+					close(firstEntered)
+					<-releaseFirst
+					return
+				}
+				close(secondEntered)
+			})
+			adapter := mustWrap(t, native)
+			t.Cleanup(func() { closeAdapter(t, adapter) })
+
+			results := make(chan error, 2)
+			go func() { results <- test.call(adapter) }()
+			select {
+			case <-firstEntered:
+			case <-time.After(time.Second):
+				t.Fatal("first call did not enter native TUN")
+			}
+			go func() { results <- test.call(adapter) }()
+			select {
+			case <-secondEntered:
+				t.Fatal("second call entered native TUN before the first returned")
+			case <-time.After(20 * time.Millisecond):
+			}
+			release()
+			select {
+			case <-secondEntered:
+			case <-time.After(time.Second):
+				t.Fatal("second call did not enter native TUN after the first returned")
+			}
+			for range 2 {
+				if err := <-results; err != nil {
+					t.Fatalf("I/O error = %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestAdapterMTUReportDoesNotApplyNativeMTU(t *testing.T) {
 	t.Parallel()
 	native := newFakeTun()
