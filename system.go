@@ -33,7 +33,7 @@ type System struct {
 	regularTunsMu   sync.Mutex
 	regularTuns     map[*regularTun]struct{}
 	nextRegularTun  uint64
-	closeOnce       sync.Once
+	closeMu         sync.Mutex
 	closeErr        error
 	probeGeneration uint64
 }
@@ -47,8 +47,25 @@ func (s *System) Close() error {
 	if s == nil {
 		return nil
 	}
-	s.closeOnce.Do(func() { s.closeErr = s.close() })
-	return s.closeErr
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	s.mu.RLock()
+	closed := s.state == lifecycleClosed
+	s.mu.RUnlock()
+	if closed {
+		return s.closeErr
+	}
+	err := s.close()
+	s.mu.RLock()
+	closed = s.state == lifecycleClosed
+	s.mu.RUnlock()
+	// A bounded shutdown can return while a worker, resource, or journal
+	// callback is still finishing. Keep recovery-required shutdown retryable.
+	// Cache the result only after all owned state reached the closed state.
+	if closed {
+		s.closeErr = err
+	}
+	return err
 }
 
 func (s *System) close() error {

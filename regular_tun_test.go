@@ -7,7 +7,9 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/asciimoth/gonnect/sysnet"
 	gtun "github.com/asciimoth/gonnect/tun"
@@ -96,6 +98,132 @@ func TestRegularTunLifecycleAndTransactions(t *testing.T) {
 	}
 	if _, err := device.Write(nil, 0); !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("Write() after close error = %v, want os.ErrClosed", err)
+	}
+}
+
+func TestRegularTunCloseRetriesAfterTransientBusyRejection(t *testing.T) {
+	factory := &regularTunFactory{}
+	manager := newRegularTunManager()
+	system := newRegularTunTestSystem(t, factory, manager)
+	t.Cleanup(func() { _ = system.Close() })
+	device, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{"10.212.0.1/24"}})
+	if err != nil {
+		t.Fatalf("BuildTun() error = %v", err)
+	}
+	if err := system.beginApply(); err != nil {
+		t.Fatalf("beginApply() error = %v", err)
+	}
+	if err := device.Close(); !errors.Is(err, sysnet.ErrUnavailable) {
+		t.Fatalf("Close() while busy error = %v, want unavailable", err)
+	}
+	if factory.created[0].closed || system.journal.Len() != 2 {
+		t.Fatalf("busy Close() changed ownership: closed=%t journal=%d", factory.created[0].closed, system.journal.Len())
+	}
+	if err := system.finishApply(true, false); err != nil {
+		t.Fatalf("finishApply() error = %v", err)
+	}
+	if err := device.Close(); err != nil {
+		t.Fatalf("Close() retry error = %v", err)
+	}
+	if !factory.created[0].closed || system.journal.Len() != 0 {
+		t.Fatalf("Close() retry cleanup: closed=%t journal=%d", factory.created[0].closed, system.journal.Len())
+	}
+}
+
+func TestRegularTunConcurrentCloseRetriesSerializeCleanup(t *testing.T) {
+	factory := &regularTunFactory{}
+	manager := newRegularTunManager()
+	system := newRegularTunTestSystem(t, factory, manager)
+	t.Cleanup(func() { _ = system.Close() })
+	device, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{"10.213.0.1/24"}})
+	if err != nil {
+		t.Fatalf("BuildTun() error = %v", err)
+	}
+	if err := system.beginApply(); err != nil {
+		t.Fatalf("beginApply() error = %v", err)
+	}
+	if err := device.Close(); !errors.Is(err, sysnet.ErrUnavailable) {
+		t.Fatalf("Close() while busy error = %v, want unavailable", err)
+	}
+	if err := system.finishApply(true, false); err != nil {
+		t.Fatalf("finishApply() error = %v", err)
+	}
+
+	results := make(chan error, 16)
+	for range 16 {
+		go func() { results <- device.Close() }()
+	}
+	for range 16 {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent Close() error = %v", err)
+		}
+	}
+	if got := factory.created[0].closeCalls.Load(); got != 1 {
+		t.Fatalf("native Close() calls = %d, want 1", got)
+	}
+	if system.journal.Len() != 0 {
+		t.Fatalf("journal length = %d, want 0", system.journal.Len())
+	}
+}
+
+func TestRegularTunConcurrentCloseWaitsForActiveCleanup(t *testing.T) {
+	factory := &regularTunFactory{}
+	manager := &blockingCloseManager{
+		Manager: newRegularTunManager(),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	system := newRegularTunTestSystem(t, factory, manager)
+	t.Cleanup(func() { _ = system.Close() })
+	device, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{"10.214.0.1/24"}})
+	if err != nil {
+		t.Fatalf("BuildTun() error = %v", err)
+	}
+	first := make(chan error, 1)
+	go func() { first <- device.Close() }()
+	<-manager.started
+	second := make(chan error, 1)
+	go func() { second <- device.Close() }()
+	select {
+	case err := <-second:
+		close(manager.release)
+		t.Fatalf("second Close() returned before active cleanup: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(manager.release)
+	if err := <-first; err != nil {
+		t.Fatalf("first Close() error = %v", err)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	if got := factory.created[0].closeCalls.Load(); got != 1 {
+		t.Fatalf("native Close() calls = %d, want 1", got)
+	}
+}
+
+func TestRegularTunCloseRetainsTerminalVerifiedError(t *testing.T) {
+	factory := &regularTunFactory{}
+	manager := newRegularTunManager()
+	system := newRegularTunTestSystem(t, factory, manager)
+	t.Cleanup(func() { _ = system.Close() })
+	device, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{"10.215.0.1/24"}})
+	if err != nil {
+		t.Fatalf("BuildTun() error = %v", err)
+	}
+	manager.failApplyCall = 2
+	manager.failApplyAfterMutation = true
+	manager.failApplyErr = errInjectedRegularTun
+	for attempt := range 2 {
+		if err := device.Close(); !errors.Is(err, errInjectedRegularTun) {
+			t.Fatalf("Close() attempt %d error = %v, want injected error", attempt+1, err)
+		}
+	}
+	if !factory.created[0].closed {
+		t.Fatal("verified inverse error did not close native TUN")
+	}
+	if got := factory.created[0].closeCalls.Load(); got != 1 {
+		t.Fatalf("native Close() calls = %d, want 1", got)
 	}
 }
 
@@ -911,13 +1039,14 @@ func twelveDigits(value uint64) string {
 }
 
 type fakeManagedTun struct {
-	metadata  internaltun.Metadata
-	name      string
-	mtu       int
-	events    chan gtun.Event
-	closed    bool
-	updateErr error
-	closeOnce sync.Once
+	metadata   internaltun.Metadata
+	name       string
+	mtu        int
+	events     chan gtun.Event
+	closed     bool
+	updateErr  error
+	closeOnce  sync.Once
+	closeCalls atomic.Int32
 }
 
 func (t *fakeManagedTun) interfaceID() netio.Interface {
@@ -955,11 +1084,31 @@ func (t *fakeManagedTun) UpdateReportedMTU(mtu int) error {
 	return nil
 }
 func (t *fakeManagedTun) Close() error {
+	t.closeCalls.Add(1)
 	t.closeOnce.Do(func() {
 		t.closed = true
 		close(t.events)
 	})
 	return nil
+}
+
+type blockingCloseManager struct {
+	netio.Manager
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (m *blockingCloseManager) Apply(ctx context.Context, iface netio.Interface, config netio.Config) error {
+	if netIOConfigEmpty(config) {
+		m.once.Do(func() { close(m.started) })
+		select {
+		case <-m.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return m.Manager.Apply(ctx, iface, config)
 }
 
 type regularTunManager struct {

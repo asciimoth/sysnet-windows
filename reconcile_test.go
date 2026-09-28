@@ -296,6 +296,7 @@ func TestSystemCloseMarksRecoveryWhenResourceCloseFails(t *testing.T) {
 	}
 	closeErr := errors.New("close resource")
 	undoCalled := false
+	var closeCalls atomic.Int32
 	entry := reconcile.Entry{
 		Key:     reconcile.OwnershipKey{Kind: reconcile.KindRoute, ID: "owned-route"},
 		Apply:   func(context.Context) error { return nil },
@@ -305,11 +306,19 @@ func TestSystemCloseMarksRecoveryWhenResourceCloseFails(t *testing.T) {
 	if err := system.applyTransaction([]reconcile.Entry{entry}); err != nil {
 		t.Fatalf("applyTransaction() error = %v", err)
 	}
-	if _, err := system.trackResource(systemCloseFunc(func() error { return closeErr })); err != nil {
+	if _, err := system.trackResource(systemCloseFunc(func() error {
+		closeCalls.Add(1)
+		return closeErr
+	})); err != nil {
 		t.Fatalf("trackResource() error = %v", err)
 	}
-	if err := system.Close(); !errors.Is(err, closeErr) {
-		t.Fatalf("Close() error = %v, want resource close error", err)
+	for attempt := range 2 {
+		if err := system.Close(); !errors.Is(err, closeErr) {
+			t.Fatalf("Close() attempt %d error = %v, want resource close error", attempt+1, err)
+		}
+	}
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("resource Close() calls = %d, want 1", got)
 	}
 	system.mu.RLock()
 	state := system.state
@@ -363,6 +372,171 @@ func TestSystemCloseIsBoundedWhenResourceCloseBlocks(t *testing.T) {
 	system.mu.RUnlock()
 	if state != lifecycleRecoveryRequired {
 		t.Fatalf("lifecycle state = %s, want recovery-required", state)
+	}
+}
+
+func TestSystemCloseRetriesAfterResourceTimeout(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	system, err := newSystem(SystemConfig{OperationTimeout: timeout}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	var owned atomic.Bool
+	if err := system.journal.Apply(context.Background(), []reconcile.Entry{{
+		Key:   reconcile.OwnershipKey{Kind: reconcile.KindRoute, ID: "retry-owned-route"},
+		Apply: func(context.Context) error { owned.Store(true); return nil },
+		Inverse: func(context.Context) error {
+			owned.Store(false)
+			return nil
+		},
+		Verify: func(_ context.Context, expected reconcile.ExpectedState) error {
+			if owned.Load() == (expected == reconcile.ExpectedApplied) {
+				return nil
+			}
+			return errors.New("owned route state differs")
+		},
+	}}); err != nil {
+		t.Fatalf("journal Apply() error = %v", err)
+	}
+	blocked := make(chan struct{})
+	started := make(chan struct{})
+	var closeCalls atomic.Int32
+	if _, err := system.trackResource(systemCloseFunc(func() error {
+		closeCalls.Add(1)
+		close(started)
+		<-blocked
+		return nil
+	})); err != nil {
+		t.Fatalf("trackResource() error = %v", err)
+	}
+
+	first := make(chan error, 1)
+	go func() { first <- system.Close() }()
+	<-started
+	if err := <-first; !errors.Is(err, context.DeadlineExceeded) {
+		close(blocked)
+		t.Fatalf("first Close() error = %v, want deadline exceeded", err)
+	}
+	if !owned.Load() || system.journal.Len() != 1 {
+		close(blocked)
+		t.Fatalf("timed-out Close() changed journal ownership: owned=%t journal=%d", owned.Load(), system.journal.Len())
+	}
+	close(blocked)
+	if err := system.Close(); err != nil {
+		t.Fatalf("Close() retry error = %v", err)
+	}
+	if owned.Load() || system.journal.Len() != 0 {
+		t.Fatalf("Close() retry retained ownership: owned=%t journal=%d", owned.Load(), system.journal.Len())
+	}
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("resource Close() calls = %d, want 1", got)
+	}
+	if system.state != lifecycleClosed {
+		t.Fatalf("lifecycle state = %s, want closed", system.state)
+	}
+}
+
+func TestSystemCloseRetriesAfterWorkerTimeout(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	system, err := newSystem(SystemConfig{OperationTimeout: timeout}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	resourceClosed := make(chan struct{}, 1)
+	if _, err := system.trackResource(systemCloseFunc(func() error {
+		resourceClosed <- struct{}{}
+		return nil
+	})); err != nil {
+		t.Fatalf("trackResource() error = %v", err)
+	}
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	system.worker = reconcile.NewWorker(context.Background(), system.journal, func(context.Context, []reconcile.Reason) ([]reconcile.Entry, error) {
+		close(handlerStarted)
+		<-releaseHandler
+		return nil, nil
+	}, nil)
+	if !system.worker.Enqueue("blocked") {
+		t.Fatal("Enqueue() rejected work")
+	}
+	<-handlerStarted
+	if err := system.Close(); !errors.Is(err, context.DeadlineExceeded) {
+		close(releaseHandler)
+		t.Fatalf("first Close() error = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-resourceClosed:
+		close(releaseHandler)
+		t.Fatal("timed-out Close() closed a resource before worker exit")
+	default:
+	}
+	close(releaseHandler)
+	if err := system.Close(); err != nil {
+		t.Fatalf("Close() retry error = %v", err)
+	}
+	select {
+	case <-resourceClosed:
+	default:
+		t.Fatal("Close() retry did not close the retained resource")
+	}
+	if system.state != lifecycleClosed {
+		t.Fatalf("lifecycle state = %s, want closed", system.state)
+	}
+}
+
+func TestSystemCloseRetriesAfterJournalCallbackTimeout(t *testing.T) {
+	const timeout = 20 * time.Millisecond
+	system, err := newSystem(SystemConfig{OperationTimeout: timeout}, systemDependencies{})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	applyStarted := make(chan struct{})
+	releaseApply := make(chan struct{})
+	var owned atomic.Bool
+	applyResult := make(chan error, 1)
+	go func() {
+		applyResult <- system.applyTransaction([]reconcile.Entry{{
+			Key: reconcile.OwnershipKey{Kind: reconcile.KindRoute, ID: "pending-retry"},
+			Apply: func(context.Context) error {
+				owned.Store(true)
+				close(applyStarted)
+				<-releaseApply
+				return nil
+			},
+			Inverse: func(context.Context) error {
+				owned.Store(false)
+				return nil
+			},
+			Verify: func(_ context.Context, expected reconcile.ExpectedState) error {
+				if owned.Load() == (expected == reconcile.ExpectedApplied) {
+					return nil
+				}
+				return errors.New("pending route state differs")
+			},
+		}})
+	}()
+	<-applyStarted
+	if err := <-applyResult; !errors.Is(err, context.DeadlineExceeded) || !reconcile.RequiresRecovery(err) {
+		close(releaseApply)
+		t.Fatalf("applyTransaction() error = %v, want recovery deadline", err)
+	}
+	if err := system.Close(); !errors.Is(err, context.DeadlineExceeded) {
+		close(releaseApply)
+		t.Fatalf("first Close() error = %v, want deadline exceeded", err)
+	}
+	if !owned.Load() || system.journal.Len() != 1 {
+		close(releaseApply)
+		t.Fatalf("timed-out Close() changed pending ownership: owned=%t journal=%d", owned.Load(), system.journal.Len())
+	}
+	close(releaseApply)
+	if err := system.Close(); err != nil {
+		t.Fatalf("Close() retry error = %v", err)
+	}
+	if owned.Load() || system.journal.Len() != 0 {
+		t.Fatalf("Close() retry retained pending ownership: owned=%t journal=%d", owned.Load(), system.journal.Len())
+	}
+	if system.state != lifecycleClosed {
+		t.Fatalf("lifecycle state = %s, want closed", system.state)
 	}
 }
 

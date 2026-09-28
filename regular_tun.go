@@ -35,7 +35,7 @@ type regularTun struct {
 	failed           error
 	unknown          bool
 	closed           atomic.Bool
-	closeOnce        sync.Once
+	closeMu          sync.Mutex
 	closeErr         error
 }
 
@@ -61,8 +61,21 @@ func (t *regularTun) Events() <-chan gtun.Event { return t.native.Events() }
 func (t *regularTun) BatchSize() int            { return t.native.BatchSize() }
 
 func (t *regularTun) Close() error {
-	t.closeOnce.Do(func() { t.closeErr = t.owner.closeRegularTun(t) })
-	return t.closeErr
+	t.closeMu.Lock()
+	defer t.closeMu.Unlock()
+	if t.closed.Load() {
+		return t.closeErr
+	}
+	completed, err := t.owner.closeRegularTun(t)
+	// A lifecycle or worker rejection can happen before cleanup starts. Do not
+	// make that transient error terminal. Once this attempt completes registry
+	// cleanup, retain the result so concurrent and repeated Close calls remain
+	// stable. Another concurrent shutdown can close the native TUN without
+	// making this rejected attempt terminal.
+	if completed {
+		t.closeErr = err
+	}
+	return err
 }
 
 func (t *regularTun) interfaceID() netio.Interface {
@@ -582,14 +595,15 @@ func (s *System) verifyRegularTunStateAfterError(
 	return err
 }
 
-func (s *System) closeRegularTun(device *regularTun) error {
+func (s *System) closeRegularTun(device *regularTun) (bool, error) {
 	if _, err := s.lookupRegularTun(device); err != nil {
 		if device != nil && device.closed.Load() {
-			return nil
+			return true, nil
 		}
-		return err
+		return false, err
 	}
-	return s.applyOperation(func(ctx context.Context) error {
+	var completed atomic.Bool
+	err := s.applyOperation(func(ctx context.Context) error {
 		id := fmt.Sprint(device.id)
 		undoErr := s.journal.Undo(ctx,
 			reconcile.OwnershipKey{Kind: reconcile.KindAddress, Scope: "regular-tun", ID: id},
@@ -602,8 +616,10 @@ func (s *System) closeRegularTun(device *regularTun) error {
 		delete(s.regularTuns, device)
 		s.regularTunsMu.Unlock()
 		s.allocator.ReleaseOwnedIPs(fmt.Sprintf("regular-tun-%d", device.id))
+		completed.Store(true)
 		return undoErr
 	})
+	return completed.Load(), err
 }
 
 func (s *System) requireKnownRegularTun(device gtun.Tun) (*regularTun, error) {
