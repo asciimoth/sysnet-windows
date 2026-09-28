@@ -78,8 +78,10 @@ func currentImplementationSupport() implementationSupport {
 }
 
 type capabilityProbeFacts struct {
-	netIO sysnet.Capability
-	split sysnet.Capability
+	allocation sysnet.Capability
+	tunFactory sysnet.Capability
+	netIO      sysnet.Capability
+	split      sysnet.Capability
 }
 
 func initialProbeFacts() capabilityProbeFacts {
@@ -87,7 +89,10 @@ func initialProbeFacts() capabilityProbeFacts {
 		State:   sysnet.CapabilityUnknown,
 		Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeNotRun},
 	}
-	return capabilityProbeFacts{netIO: unknown.Clone(), split: unknown.Clone()}
+	return capabilityProbeFacts{
+		allocation: unknown.Clone(), tunFactory: unknown.Clone(),
+		netIO: unknown.Clone(), split: unknown.Clone(),
+	}
 }
 
 func failedProbeFacts(err error) capabilityProbeFacts {
@@ -100,7 +105,10 @@ func failedProbeFacts(err error) capabilityProbeFacts {
 		Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeFailed},
 		Detail:  detail,
 	}
-	return capabilityProbeFacts{netIO: unknown.Clone(), split: unknown.Clone()}
+	return capabilityProbeFacts{
+		allocation: unknown.Clone(), tunFactory: unknown.Clone(),
+		netIO: unknown.Clone(), split: unknown.Clone(),
+	}
 }
 
 func buildCapabilityReport(
@@ -120,7 +128,7 @@ func buildCapabilityReport(
 			{operation: sysnet.OpAllocateSubnet, implemented: support.allocateSubnet},
 		} {
 			capability := familyCapability(implementedCapability(item.implemented), config, family)
-			capability = dependentCapability(capability, facts.netIO)
+			capability = dependentCapability(capability, allocationCapability(facts))
 			report.Operations = append(report.Operations, operationCapability(
 				sysnet.TargetSystem, item.operation, family, lifecycleCapability(capability, state),
 			))
@@ -136,7 +144,7 @@ func buildCapabilityReport(
 		if family != sysnet.FamilyNone {
 			capability = familyCapability(capability, config, family)
 		}
-		capability = dependentCapability(capability, facts.netIO)
+		capability = dependentCapability(capability, regularTunCreateCapability(facts))
 		report.Operations = append(report.Operations, operationCapability(
 			sysnet.TargetTun, sysnet.OpCreate, family, lifecycleCapability(capability, state),
 		))
@@ -144,7 +152,7 @@ func buildCapabilityReport(
 		if family != sysnet.FamilyNone {
 			named = familyCapability(named, config, family)
 		}
-		named = dependentCapability(named, facts.netIO)
+		named = dependentCapability(named, regularTunCreateCapability(facts))
 		report.Operations = append(report.Operations, operationCapability(
 			sysnet.TargetTun, sysnet.OpCreateNamed, family, lifecycleCapability(named, state),
 		))
@@ -400,6 +408,26 @@ func dependentCapability(base, dependency sysnet.Capability) sysnet.Capability {
 		return base.Clone()
 	}
 	return dependency.Clone()
+}
+
+func allocationCapability(facts capabilityProbeFacts) sysnet.Capability {
+	if capabilityFactSet(facts.allocation) {
+		return facts.allocation.Clone()
+	}
+	return facts.netIO.Clone()
+}
+
+func regularTunCreateCapability(facts capabilityProbeFacts) sysnet.Capability {
+	factory := facts.tunFactory
+	if !capabilityFactSet(factory) {
+		factory = sysnet.Capability{State: sysnet.CapabilityAvailable}
+	}
+	return dependentCapability(factory, facts.netIO)
+}
+
+func capabilityFactSet(capability sysnet.Capability) bool {
+	return capability.State != sysnet.CapabilityUnknown || len(capability.Reasons) != 0 ||
+		capability.Detail != "" || len(capability.Limitations) != 0
 }
 
 func lifecycleCapability(capability sysnet.Capability, state lifecycleState) sysnet.Capability {

@@ -3,6 +3,7 @@ package windows
 import (
 	"context"
 
+	"github.com/asciimoth/gonnect/sysnet"
 	internalclock "github.com/asciimoth/sysnet-windows/internal/clock"
 	internaldns "github.com/asciimoth/sysnet-windows/internal/dns"
 	"github.com/asciimoth/sysnet-windows/internal/netio"
@@ -17,6 +18,38 @@ import (
 // an exclusive driver, install a service, or change host networking.
 type capabilityProber interface {
 	Probe(context.Context) capabilityProbeFacts
+}
+
+func (d systemDependencies) constrainCapabilityFacts(facts capabilityProbeFacts) capabilityProbeFacts {
+	// capabilityCode is a test-only override used to exercise an abstract
+	// implementation matrix without production OS dependencies. The normal
+	// constructor path uses the zero value and must include every concrete
+	// dependency in its capability facts.
+	if d.capabilityCode != (implementationSupport{}) {
+		return facts
+	}
+	if d.allocationReader == nil {
+		facts.allocation = missingDependencyCapability("host network state reader is not configured")
+	} else {
+		facts.allocation = facts.netIO.Clone()
+	}
+	if d.netIO == nil {
+		facts.netIO = missingDependencyCapability("NetIO manager is not configured")
+	}
+	if d.tunFactory == nil {
+		facts.tunFactory = missingDependencyCapability("TUN factory is not configured")
+	} else if !capabilityFactSet(facts.tunFactory) {
+		facts.tunFactory = sysnet.Capability{State: sysnet.CapabilityAvailable}
+	}
+	return facts
+}
+
+func missingDependencyCapability(detail string) sysnet.Capability {
+	return sysnet.Capability{
+		State:   sysnet.CapabilityUnavailable,
+		Reasons: []sysnet.CapabilityReason{sysnet.ReasonMissingDependency},
+		Detail:  detail,
+	}
 }
 
 // systemDependencies contains OS boundaries. Keep this private so New remains

@@ -4,6 +4,7 @@
     "native-unit": {
       "requiredTests": [
         "github.com/asciimoth/sysnet-windows::TestNativeNoResourceSmoke",
+        "github.com/asciimoth/sysnet-windows::TestNativeWintunCapabilityReflectsDLLAvailability",
         "github.com/asciimoth/sysnet-windows::TestNativeHostAwareAllocation",
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT25HostAwareAllocation",
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT26ConcurrentAllocation",

@@ -2,7 +2,30 @@
 
 package windows
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/asciimoth/gonnect/sysnet"
+	"golang.zx2c4.com/wintun"
+)
+
+func TestNativeWintunCapabilityReflectsDLLAvailability(t *testing.T) {
+	system, err := New(SystemConfig{})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	if wintun.Version() != "" {
+		return
+	}
+	capability := system.Capabilities().Operation(sysnet.OperationKey{
+		Target: sysnet.TargetTun, Operation: sysnet.OpCreate, Family: sysnet.FamilyIPv4,
+	})
+	if capability.State != sysnet.CapabilityUnavailable ||
+		!containsReason(capability.Reasons, sysnet.ReasonMissingDependency) {
+		t.Fatalf("create capability without wintun.dll = %+v, want missing dependency", capability)
+	}
+}
 
 // TestNativeNoResourceSmoke verifies that the baseline can construct and close
 // the package without Wintun, the split driver, or a network mutation.

@@ -26,6 +26,7 @@ func newSystem(config SystemConfig, dependencies systemDependencies) (*System, e
 		allocator:    internalallocator.New(dependencies.allocationReader, normalized.operationTimeout),
 		regularTuns:  make(map[*regularTun]struct{}),
 	}
+	system.publicAllocator = &systemAllocator{system: system, delegate: system.allocator}
 	if system.support == (implementationSupport{}) {
 		system.support = currentImplementationSupport()
 	}
@@ -34,6 +35,7 @@ func newSystem(config SystemConfig, dependencies systemDependencies) (*System, e
 		system.probeFacts = runCapabilityProbe(ctx, dependencies.capabilityProbe)
 		cancel()
 	}
+	system.probeFacts = dependencies.constrainCapabilityFacts(system.probeFacts)
 	if err := system.transitionLocked(lifecycleReady); err != nil {
 		return nil, err
 	}

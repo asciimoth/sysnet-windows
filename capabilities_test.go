@@ -214,6 +214,164 @@ func TestCurrentImplementationAdvertisesWorkingAllocators(t *testing.T) {
 	}
 }
 
+func TestRegularTunCapabilityRequiresFactoryDependency(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	system, err := newSystem(SystemConfig{}, systemDependencies{
+		netIO:            newRegularTunManager(),
+		allocationReader: emptyHostReader{},
+		capabilityProbe: staticCapabilityProbe{facts: capabilityProbeFacts{
+			netIO: available, split: available,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+
+	key := operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4)
+	capability := system.Capabilities().Operation(key)
+	if capability.State != sysnet.CapabilityUnavailable ||
+		!containsReason(capability.Reasons, sysnet.ReasonMissingDependency) {
+		t.Errorf("create capability = %+v, want unavailable missing dependency", capability)
+	}
+	if _, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{"10.83.0.1/24"}}); !errors.Is(err, sysnet.ErrUnavailable) {
+		t.Fatalf("BuildTun() error = %v, want unavailable with no TUN factory", err)
+	}
+}
+
+func TestConcreteDependencyCapabilityMatrix(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	tests := []struct {
+		name                  string
+		dependencies          systemDependencies
+		wantAllocation        sysnet.CapabilityState
+		wantCreate            sysnet.CapabilityState
+		wantMutation          sysnet.CapabilityState
+		wantAllocationMissing bool
+		wantCreateMissing     bool
+		wantMutationMissing   bool
+	}{
+		{
+			name: "all dependencies",
+			dependencies: systemDependencies{
+				tunFactory: &regularTunFactory{}, netIO: newRegularTunManager(), allocationReader: emptyHostReader{},
+			},
+			wantAllocation: sysnet.CapabilityAvailable,
+			wantCreate:     sysnet.CapabilityAvailable,
+			wantMutation:   sysnet.CapabilityAvailable,
+		},
+		{
+			name: "missing allocation reader",
+			dependencies: systemDependencies{
+				tunFactory: &regularTunFactory{}, netIO: newRegularTunManager(),
+			},
+			wantAllocation: sysnet.CapabilityUnavailable, wantAllocationMissing: true,
+			wantCreate: sysnet.CapabilityAvailable, wantMutation: sysnet.CapabilityAvailable,
+		},
+		{
+			name: "missing TUN factory",
+			dependencies: systemDependencies{
+				netIO: newRegularTunManager(), allocationReader: emptyHostReader{},
+			},
+			wantAllocation: sysnet.CapabilityAvailable,
+			wantCreate:     sysnet.CapabilityUnavailable, wantCreateMissing: true,
+			wantMutation: sysnet.CapabilityAvailable,
+		},
+		{
+			name: "missing NetIO manager",
+			dependencies: systemDependencies{
+				tunFactory: &regularTunFactory{}, allocationReader: emptyHostReader{},
+			},
+			wantAllocation: sysnet.CapabilityAvailable,
+			wantCreate:     sysnet.CapabilityUnavailable, wantCreateMissing: true,
+			wantMutation: sysnet.CapabilityUnavailable, wantMutationMissing: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dependencies := test.dependencies
+			dependencies.capabilityProbe = staticCapabilityProbe{facts: capabilityProbeFacts{
+				netIO: available, split: available,
+			}}
+			system, err := newSystem(SystemConfig{}, dependencies)
+			if err != nil {
+				t.Fatalf("newSystem() error = %v", err)
+			}
+			t.Cleanup(func() { _ = system.Close() })
+
+			assertCapabilityStateAndReason(t,
+				system.Capabilities().Operation(operationKey(sysnet.TargetSystem, sysnet.OpAllocateIP, sysnet.FamilyIPv4)),
+				test.wantAllocation, test.wantAllocationMissing,
+			)
+			assertCapabilityStateAndReason(t,
+				system.Capabilities().Operation(operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4)),
+				test.wantCreate, test.wantCreateMissing,
+			)
+			assertCapabilityStateAndReason(t,
+				system.Capabilities().Operation(operationKey(sysnet.TargetTun, sysnet.OpSetMTU, sysnet.FamilyNone)),
+				test.wantMutation, test.wantMutationMissing,
+			)
+		})
+	}
+}
+
+func TestFinalPreflightPreservesConcreteDependencyConstraints(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	system, err := newSystem(SystemConfig{}, systemDependencies{
+		netIO: newRegularTunManager(), allocationReader: emptyHostReader{},
+		capabilityProbe: staticCapabilityProbe{facts: capabilityProbeFacts{
+			netIO: available, split: available,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+
+	report, err := system.finalPreflight()
+	if err != nil {
+		t.Fatalf("finalPreflight() error = %v", err)
+	}
+	capability := report.Operation(operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4))
+	assertCapabilityStateAndReason(t, capability, sysnet.CapabilityUnavailable, true)
+}
+
+func TestConcreteFactoryProbeFailureIsPreserved(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	system, err := newSystem(SystemConfig{}, systemDependencies{
+		tunFactory: &regularTunFactory{}, netIO: newRegularTunManager(), allocationReader: emptyHostReader{},
+		capabilityProbe: staticCapabilityProbe{facts: capabilityProbeFacts{
+			tunFactory: missingDependencyCapability("injected factory probe failure"),
+			netIO:      available,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	capability := system.Capabilities().Operation(operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4))
+	assertCapabilityStateAndReason(t, capability, sysnet.CapabilityUnavailable, true)
+}
+
+func assertCapabilityStateAndReason(
+	t *testing.T,
+	capability sysnet.Capability,
+	wantState sysnet.CapabilityState,
+	wantMissingDependency bool,
+) {
+	t.Helper()
+	if capability.State != wantState {
+		t.Errorf("capability = %+v, want state %v", capability, wantState)
+	}
+	if got := containsReason(capability.Reasons, sysnet.ReasonMissingDependency); got != wantMissingDependency {
+		t.Errorf("capability = %+v, missing-dependency reason = %t, want %t", capability, got, wantMissingDependency)
+	}
+}
+
 func TestAllocatorCapabilityMatrix(t *testing.T) {
 	t.Parallel()
 	available := sysnet.Capability{State: sysnet.CapabilityAvailable}

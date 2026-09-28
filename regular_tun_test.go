@@ -171,6 +171,189 @@ func TestT22T24RegularTunExternalChangeHasVisibleFailedState(t *testing.T) {
 	}
 }
 
+func TestRegularTunPublicOperationsHonorLifecycleBeforeNativeRead(t *testing.T) {
+	operations := []struct {
+		name string
+		call func(*System, gtun.Tun) error
+	}{
+		{name: "capabilities", call: func(system *System, device gtun.Tun) error {
+			_, err := system.CapabilitiesForTun(device)
+			return err
+		}},
+		{name: "set MTU", call: func(system *System, device gtun.Tun) error {
+			return system.SetTunMTU(device, 1400)
+		}},
+		{name: "set addresses", call: func(system *System, device gtun.Tun) error {
+			return system.SetTunAddrs(device, []string{"10.90.0.1/24"})
+		}},
+		{name: "add address", call: func(system *System, device gtun.Tun) error {
+			return system.AddTunAddr(device, "10.90.0.2/24")
+		}},
+		{name: "get addresses", call: func(system *System, device gtun.Tun) error {
+			_, err := system.GetTunAddrs(device)
+			return err
+		}},
+		{name: "set routes", call: func(system *System, device gtun.Tun) error {
+			return system.SetTunRoutes(device, []string{"10.91.0.0/24"})
+		}},
+		{name: "add route", call: func(system *System, device gtun.Tun) error {
+			return system.AddTunRoute(device, "10.92.0.0/24")
+		}},
+		{name: "get routes", call: func(system *System, device gtun.Tun) error {
+			_, err := system.GetTunRoutes(device)
+			return err
+		}},
+		{name: "set name", call: func(system *System, device gtun.Tun) error {
+			return system.SetTunName(device, "renamed")
+		}},
+	}
+	for _, state := range []lifecycleState{lifecycleApplying, lifecycleRecoveryRequired, lifecycleClosing} {
+		t.Run(state.String(), func(t *testing.T) {
+			factory := &regularTunFactory{}
+			manager := newRegularTunManager()
+			system := newRegularTunTestSystem(t, factory, manager)
+			device, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{"10.89.0.1/24"}})
+			if err != nil {
+				t.Fatalf("BuildTun() error = %v", err)
+			}
+			system.mu.Lock()
+			if err := system.transitionLocked(state); err != nil {
+				system.mu.Unlock()
+				t.Fatalf("transition to %s: %v", state, err)
+			}
+			system.rebuildCapabilitiesLocked()
+			system.mu.Unlock()
+			manager.mu.Lock()
+			readsBefore := manager.readCalls
+			appliesBefore := manager.applyCalls
+			manager.mu.Unlock()
+
+			for _, operation := range operations {
+				t.Run(operation.name, func(t *testing.T) {
+					if err := operation.call(system, device); !errors.Is(err, sysnet.ErrUnavailable) {
+						t.Fatalf("error = %v, want unavailable", err)
+					}
+				})
+			}
+			manager.mu.Lock()
+			if manager.readCalls != readsBefore || manager.applyCalls != appliesBefore {
+				t.Errorf("rejected operations changed native calls: reads %d->%d, applies %d->%d",
+					readsBefore, manager.readCalls, appliesBefore, manager.applyCalls)
+			}
+			manager.mu.Unlock()
+			if err := system.Close(); err != nil {
+				t.Fatalf("System.Close() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestRegularTunValidationRejectsBeforeNativeRead(t *testing.T) {
+	factory := &regularTunFactory{}
+	manager := newRegularTunManager()
+	system := newRegularTunTestSystem(t, factory, manager)
+	t.Cleanup(func() { _ = system.Close() })
+	device, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{"10.93.0.1/24"}})
+	if err != nil {
+		t.Fatalf("BuildTun() error = %v", err)
+	}
+	manager.mu.Lock()
+	readsBefore := manager.readCalls
+	appliesBefore := manager.applyCalls
+	manager.mu.Unlock()
+
+	operations := []struct {
+		name string
+		call func() error
+	}{
+		{name: "MTU", call: func() error { return system.SetTunMTU(device, maxTunMTU+1) }},
+		{name: "set addresses", call: func() error { return system.SetTunAddrs(device, []string{"invalid"}) }},
+		{name: "add address", call: func() error { return system.AddTunAddr(device, "invalid") }},
+		{name: "set routes", call: func() error { return system.SetTunRoutes(device, []string{"invalid"}) }},
+		{name: "add route", call: func() error { return system.AddTunRoute(device, "invalid") }},
+		{name: "rename", call: func() error { return system.SetTunName(device, "renamed") }},
+	}
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			if err := operation.call(); err == nil {
+				t.Fatal("error = nil, want rejection")
+			}
+		})
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.readCalls != readsBefore || manager.applyCalls != appliesBefore {
+		t.Fatalf("rejections changed native calls: reads %d->%d, applies %d->%d",
+			readsBefore, manager.readCalls, appliesBefore, manager.applyCalls)
+	}
+}
+
+func TestRegularTunOperationsHonorRefreshedDependencyBeforeNativeRead(t *testing.T) {
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	unavailable := unavailableCapability(sysnet.ReasonPermissionDenied)
+	probe := &sequenceCapabilityProbe{facts: []capabilityProbeFacts{
+		{netIO: available, split: available},
+		{netIO: available, split: available},
+		{netIO: unavailable, split: available},
+	}}
+	factory := &regularTunFactory{}
+	manager := newRegularTunManager()
+	system, err := newSystem(SystemConfig{}, systemDependencies{
+		tunFactory: factory, netIO: manager, allocationReader: emptyHostReader{},
+		capabilityProbe: probe,
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	device, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{"10.94.0.1/24"}})
+	if err != nil {
+		t.Fatalf("BuildTun() error = %v", err)
+	}
+	manager.mu.Lock()
+	readsBefore := manager.readCalls
+	appliesBefore := manager.applyCalls
+	manager.mu.Unlock()
+
+	operations := []struct {
+		name string
+		call func() error
+	}{
+		{name: "capabilities", call: func() error {
+			_, err := system.CapabilitiesForTun(device)
+			return err
+		}},
+		{name: "set MTU", call: func() error { return system.SetTunMTU(device, 1400) }},
+		{name: "set addresses", call: func() error {
+			return system.SetTunAddrs(device, []string{"10.95.0.1/24"})
+		}},
+		{name: "get addresses", call: func() error {
+			_, err := system.GetTunAddrs(device)
+			return err
+		}},
+		{name: "set routes", call: func() error {
+			return system.SetTunRoutes(device, []string{"10.96.0.0/24"})
+		}},
+		{name: "get routes", call: func() error {
+			_, err := system.GetTunRoutes(device)
+			return err
+		}},
+	}
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			if err := operation.call(); !errors.Is(err, sysnet.ErrUnavailable) {
+				t.Fatalf("error = %v, want unavailable", err)
+			}
+		})
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.readCalls != readsBefore || manager.applyCalls != appliesBefore {
+		t.Fatalf("rejections changed native calls: reads %d->%d, applies %d->%d",
+			readsBefore, manager.readCalls, appliesBefore, manager.applyCalls)
+	}
+}
+
 func TestT28T30RegularTunBuildFailureRollsBack(t *testing.T) {
 	t.Run("factory failure", func(t *testing.T) {
 		factory := &regularTunFactory{createErr: errInjectedRegularTun}
@@ -556,6 +739,7 @@ type regularTunManager struct {
 	states         map[netio.Interface]netio.Config
 	identities     map[uint64]netio.Interface
 	applyCalls     int
+	readCalls      int
 	failNextApply  error
 	mutateThenFail error
 	failEmpty      error
@@ -611,6 +795,7 @@ func (m *regularTunManager) Apply(_ context.Context, iface netio.Interface, conf
 func (m *regularTunManager) Read(_ context.Context, iface netio.Interface) (netio.Config, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.readCalls++
 	if current, exists := m.identities[iface.LUID]; exists && current != iface {
 		return netio.Config{}, netio.ErrIdentityMismatch
 	}

@@ -320,9 +320,24 @@ func (s *System) failRegularTun(device *regularTun, cause error) error {
 }
 
 func (s *System) regularTunCapabilities(device gtun.Tun) (sysnet.TunCapabilityReport, error) {
-	owned, err := s.lookupRegularTun(device)
+	owned, err := s.requireKnownRegularTun(device)
 	if err != nil {
 		return sysnet.TunCapabilityReport{}, err
+	}
+	report, err := s.finalPreflight()
+	if err != nil {
+		return sysnet.TunCapabilityReport{}, err
+	}
+	desired, _, _, _, _ := owned.snapshot()
+	family := familyForNetIOConfig(desired)
+	if family == sysnet.FamilyNone {
+		family = defaultTunFamily(s.policyConfig())
+	}
+	readCapability := report.Operation(sysnet.OperationKey{
+		Target: sysnet.TargetTun, Operation: sysnet.OpGetAddresses, Family: family,
+	})
+	if readCapability.State != sysnet.CapabilityAvailable {
+		return sysnet.TunCapabilityReport{}, capabilityError("Tun.Capabilities", readCapability)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.operationTimeout)
 	_, err = s.observeRegularTun(ctx, owned)
@@ -330,7 +345,6 @@ func (s *System) regularTunCapabilities(device gtun.Tun) (sysnet.TunCapabilityRe
 	if err != nil {
 		return sysnet.TunCapabilityReport{}, err
 	}
-	report := s.Capabilities()
 	_, _, revision, _, _ := owned.snapshot()
 	result := sysnet.TunCapabilityReport{SystemRevision: report.Revision, InstanceRevision: revision}
 	for _, operation := range report.Operations {
@@ -343,7 +357,7 @@ func (s *System) regularTunCapabilities(device gtun.Tun) (sysnet.TunCapabilityRe
 }
 
 func (s *System) setRegularTunMTU(device gtun.Tun, raw int) error {
-	owned, err := s.requireRegularTun(device)
+	owned, err := s.requireKnownRegularTun(device)
 	if err != nil {
 		return err
 	}
@@ -406,6 +420,21 @@ func (s *System) changeRegularTunPrefixes(
 	if err != nil {
 		return err
 	}
+	base, mtu, _, _, _ := owned.snapshot()
+	planned, err := s.nextRegularTunConfig(base, prefixes, kind, operation, mtu)
+	if err != nil {
+		return err
+	}
+	family := familyForNetIOConfig(planned)
+	if family == sysnet.FamilyNone {
+		family = defaultTunFamily(s.config)
+	}
+	capability := capabilities.Operation(sysnet.OperationKey{
+		Target: sysnet.TargetTun, Operation: operation, Family: family,
+	})
+	if capability.State != sysnet.CapabilityAvailable {
+		return capabilityError(path, capability)
+	}
 	return s.applyOperation(func(ctx context.Context) error {
 		current, lookupErr := s.lookupRegularTun(owned)
 		if lookupErr != nil {
@@ -415,26 +444,11 @@ func (s *System) changeRegularTunPrefixes(
 		if observeErr != nil {
 			return observeErr
 		}
-		next := cloneNetIOConfig(observed)
-		switch kind {
-		case prefixAddress:
-			if operation == sysnet.OpAddAddress {
-				next.Addresses = appendUniquePrefixes(next.Addresses, prefixes...)
-			} else {
-				next.Addresses = append([]netip.Prefix(nil), prefixes...)
-			}
-		case prefixRoute:
-			routes := routesFromPrefixes(prefixes)
-			if operation == sysnet.OpAddRoute {
-				next.Routes = appendUniqueRoutes(next.Routes, routes...)
-			} else {
-				next.Routes = routes
-			}
-		default:
-			return errors.New("invalid regular TUN prefix kind")
-		}
 		_, mtu, _, _, _ := current.snapshot()
-		next.Properties = propertiesForConfig(s.config, next, mtu)
+		next, configErr := s.nextRegularTunConfig(observed, prefixes, kind, operation, mtu)
+		if configErr != nil {
+			return configErr
+		}
 		family := familyForNetIOConfig(next)
 		if family == sysnet.FamilyNone {
 			family = defaultTunFamily(s.config)
@@ -465,10 +479,60 @@ func (s *System) changeRegularTunPrefixes(
 	})
 }
 
+func (s *System) nextRegularTunConfig(
+	current netio.Config,
+	prefixes []netip.Prefix,
+	kind prefixKind,
+	operation sysnet.Operation,
+	mtu int,
+) (netio.Config, error) {
+	next := cloneNetIOConfig(current)
+	switch kind {
+	case prefixAddress:
+		if operation == sysnet.OpAddAddress {
+			next.Addresses = appendUniquePrefixes(next.Addresses, prefixes...)
+		} else {
+			next.Addresses = append([]netip.Prefix(nil), prefixes...)
+		}
+	case prefixRoute:
+		routes := routesFromPrefixes(prefixes)
+		if operation == sysnet.OpAddRoute {
+			next.Routes = appendUniqueRoutes(next.Routes, routes...)
+		} else {
+			next.Routes = routes
+		}
+	default:
+		return netio.Config{}, errors.New("invalid regular TUN prefix kind")
+	}
+	next.Properties = propertiesForConfig(s.config, next, mtu)
+	return next, nil
+}
+
 func (s *System) getRegularTunPrefixes(device gtun.Tun, kind prefixKind) ([]string, error) {
-	owned, err := s.lookupRegularTun(device)
+	owned, err := s.requireKnownRegularTun(device)
 	if err != nil {
 		return nil, err
+	}
+	desired, _, _, _, _ := owned.snapshot()
+	family := familyForNetIOConfig(desired)
+	if family == sysnet.FamilyNone {
+		family = defaultTunFamily(s.policyConfig())
+	}
+	operation := sysnet.OpGetRoutes
+	path := "Tun.TunRoutes"
+	if kind == prefixAddress {
+		operation = sysnet.OpGetAddresses
+		path = "Tun.TunAddrs"
+	}
+	capabilities, err := s.finalPreflight()
+	if err != nil {
+		return nil, err
+	}
+	capability := capabilities.Operation(sysnet.OperationKey{
+		Target: sysnet.TargetTun, Operation: operation, Family: family,
+	})
+	if capability.State != sysnet.CapabilityAvailable {
+		return nil, capabilityError(path, capability)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.operationTimeout)
 	observed, err := s.observeRegularTun(ctx, owned)
@@ -524,15 +588,12 @@ func (s *System) closeRegularTun(device *regularTun) error {
 	})
 }
 
-func (s *System) requireRegularTun(device gtun.Tun) (*regularTun, error) {
+func (s *System) requireKnownRegularTun(device gtun.Tun) (*regularTun, error) {
 	owned, err := s.lookupRegularTun(device)
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), s.config.operationTimeout)
-	_, err = s.observeRegularTun(ctx, owned)
-	cancel()
-	if err != nil {
+	if err := s.acceptingWork(); err != nil {
 		return nil, err
 	}
 	return owned, nil

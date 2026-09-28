@@ -10,6 +10,7 @@ import (
 	"github.com/asciimoth/sysnet-windows/internal/netio"
 	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
 	"golang.org/x/sys/windows"
+	"golang.zx2c4.com/wintun"
 )
 
 // New creates a Windows System. Construction does not install a driver, start
@@ -56,8 +57,14 @@ func (p nativeCapabilityProbe) Probe(ctx context.Context) capabilityProbeFacts {
 			Detail: err.Error(),
 		}
 	}
+	tunFactoryCapability := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	if version := wintun.Version(); version == "" {
+		tunFactoryCapability = missingDependencyCapability("wintun.dll is not available to the process")
+	}
 	return capabilityProbeFacts{
-		netIO: netIOCapability,
+		allocation: netIOCapability.Clone(),
+		tunFactory: tunFactoryCapability,
+		netIO:      netIOCapability,
 		split: sysnet.Capability{
 			State:   sysnet.CapabilityUnknown,
 			Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeNotRun},

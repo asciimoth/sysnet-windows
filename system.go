@@ -29,6 +29,7 @@ type System struct {
 	worker          *reconcile.Worker
 	resources       reconcile.Resources
 	allocator       *internalallocator.Allocator
+	publicAllocator *systemAllocator
 	regularTunsMu   sync.Mutex
 	regularTuns     map[*regularTun]struct{}
 	nextRegularTun  uint64
@@ -242,7 +243,7 @@ func (s *System) AllocIP() subnet.IPAllocator {
 	if s == nil {
 		return nil
 	}
-	return s.allocator
+	return s.publicAllocator
 }
 
 // AllocSubnet returns the same shared reservation state as AllocIP.
@@ -250,7 +251,7 @@ func (s *System) AllocSubnet() subnet.SubnetAllocator {
 	if s == nil {
 		return nil
 	}
-	return s.allocator
+	return s.publicAllocator
 }
 
 func (*System) OutDNS() dns.Interface { return nil }
@@ -387,7 +388,7 @@ func (s *System) SetTunName(device tun.Tun, _ string) error {
 // requireOwnedTun rejects foreign, stale, and closed handles before option or
 // capability checks.
 func (s *System) requireOwnedTun(device tun.Tun) error {
-	_, err := s.requireRegularTun(device)
+	_, err := s.requireKnownRegularTun(device)
 	return err
 }
 
@@ -426,6 +427,7 @@ func (s *System) finalPreflight() (sysnet.CapabilityReport, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.config.operationTimeout)
 	facts := runCapabilityProbe(ctx, s.dependencies.capabilityProbe)
 	cancel()
+	facts = s.dependencies.constrainCapabilityFacts(facts)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.acceptingWorkLocked(); err != nil {
