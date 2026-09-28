@@ -95,10 +95,11 @@ func TestAdapterAllowsOneReaderAndWriterTogether(t *testing.T) {
 	native := newFakeTun()
 	started := make(chan string, 2)
 	release := make(chan struct{})
-	native.read = func([][]byte, []int, int) (int, error) {
+	native.read = func(_ [][]byte, sizes []int, _ int) (int, error) {
 		started <- "read"
 		<-release
-		return 0, nil
+		sizes[0] = 1
+		return 1, nil
 	}
 	native.write = func([][]byte, int) (int, error) {
 		started <- "write"
@@ -157,8 +158,13 @@ func TestT13T15CloseUnblocksIOAndNormalizesErrors(t *testing.T) {
 	native := newFakeTun()
 	blocked := make(chan struct{})
 	var started sync.WaitGroup
+	var readCalls atomic.Int32
 	started.Add(2)
-	native.read = func([][]byte, []int, int) (int, error) {
+	native.read = func(_ [][]byte, sizes []int, _ int) (int, error) {
+		if readCalls.Add(1) == 1 {
+			sizes[0] = 0
+			return 1, nil
+		}
 		started.Done()
 		<-blocked
 		return 0, errors.New("native read stopped")
@@ -196,6 +202,9 @@ func TestT13T15CloseUnblocksIOAndNormalizesErrors(t *testing.T) {
 	}
 	if got := native.closeCalls.Load(); got != 1 {
 		t.Fatalf("native Close calls = %d, want 1", got)
+	}
+	if got := readCalls.Load(); got != 2 {
+		t.Fatalf("native Read calls = %d, want 2 after an empty batch", got)
 	}
 	for operation, result := range map[string]<-chan error{"Read": readResult, "Write": writeResult} {
 		select {

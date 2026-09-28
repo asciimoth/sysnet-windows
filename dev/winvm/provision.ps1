@@ -10,6 +10,7 @@ if (-not $Install) {
     $action = New-ScheduledTaskAction powershell.exe "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command `"$command`""
     $trigger = New-ScheduledTaskTrigger -AtStartup; $trigger.Delay = 'PT1M'
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -User SYSTEM -RunLevel Highest -Force | Out-Null
+    Start-ScheduledTask -TaskName $taskName
     exit 0
 }
 $media = Join-Path $root 'provision'
@@ -18,7 +19,9 @@ function Expand-WithTar([string]$Archive, [string]$Destination) {
     & tar.exe -xf $Archive -C $Destination
     if ($LASTEXITCODE -ne 0) { throw "Cannot extract $Archive" }
 }
-$qga = Get-Volume | Where-Object DriveLetter | ForEach-Object { Get-ChildItem ($_.DriveLetter + ':\') -Recurse -Filter qemu-ga-x86_64.msi -ErrorAction SilentlyContinue } | Select-Object -First 1
+$virtioVolume = Get-Volume | Where-Object { $_.DriveLetter -and $_.DriveType -eq 'CD-ROM' -and $_.FileSystemLabel -like 'virtio-win*' } | Select-Object -First 1
+if (-not $virtioVolume) { throw 'VirtIO installation media is absent' }
+$qga = Get-ChildItem ($virtioVolume.DriveLetter + ':\') -Recurse -Filter qemu-ga-x86_64.msi -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $qga) { throw 'QEMU Guest Agent installer is absent' }
 $virtioRoot = (Split-Path (Split-Path $qga.FullName -Parent) -Qualifier) + '\'
 Get-ChildItem $virtioRoot -Recurse -Filter *.inf | Where-Object FullName -Match '\\2k22\\amd64\\' | ForEach-Object { pnputil.exe /add-driver $_.FullName /install | Out-Default }

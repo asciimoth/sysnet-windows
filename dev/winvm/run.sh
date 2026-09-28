@@ -296,7 +296,7 @@ ssh "${ssh_opts[@]}" "$target" "powershell.exe -NoProfile -Command \"New-Item -I
 scp "${scp_opts[@]}" "$payload" "$target:$remote/worktree.tar" >/dev/null
 ssh "${ssh_opts[@]}" "$target" "tar.exe -xf \"$remote/worktree.tar\" -C \"$remote/source\""
 if [[ $mode == e2e || $mode == flow ]]; then
-    wintun_architecture=$(jq -er .architecture "$manifest")
+    wintun_architecture=$(jq -er '.architecture | ascii_downcase' "$manifest")
     python3 "$script_dir/tools/wintun-input.py" --lock "$wintun_lock" --archive "$wintun_archive" --architecture "$wintun_architecture" --output "$run_dir/wintun.dll"
     [[ -s $run_dir/wintun.dll ]] || die "Wintun $wintun_architecture DLL is absent from the locked archive"
     scp "${scp_opts[@]}" "$run_dir/wintun.dll" "$target:$remote/" >/dev/null

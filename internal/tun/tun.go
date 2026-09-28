@@ -130,11 +130,30 @@ func (a *Adapter) IsNative() bool { return a.native.IsNative() }
 func (a *Adapter) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	a.readMu.Lock()
 	defer a.readMu.Unlock()
-	if a.closed.Load() {
-		return 0, os.ErrClosed
+	for {
+		if a.closed.Load() {
+			return 0, os.ErrClosed
+		}
+		n, err := a.native.Read(bufs, sizes, offset)
+		if err != nil || batchHasPacketData(n, sizes) {
+			return n, a.ioError(err)
+		}
+		// Wintun can return a successful batch with no packet bytes while its
+		// session is stopping. Retry so Read keeps its blocking contract and
+		// observes a concurrent Close.
 	}
-	n, err := a.native.Read(bufs, sizes, offset)
-	return n, a.ioError(err)
+}
+
+func batchHasPacketData(n int, sizes []int) bool {
+	if n > len(sizes) {
+		return true
+	}
+	for _, size := range sizes[:max(n, 0)] {
+		if size > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Write delegates one batch without changing the buffers or offset.
