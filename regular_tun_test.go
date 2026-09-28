@@ -323,6 +323,66 @@ func TestRegularTunSetterFailurePreservesVerifiedState(t *testing.T) {
 	}
 }
 
+func TestRegularTunPrefixExpansionRejectsNewHostOverlap(t *testing.T) {
+	t.Parallel()
+	factory := &regularTunFactory{}
+	manager := newRegularTunManager()
+	oldPrefix := netip.MustParsePrefix("10.81.1.1/24")
+	foreignPrefix := netip.MustParsePrefix("10.81.2.0/24")
+	reader := &regularTunHostReader{states: []netio.HostState{
+		{},
+		{},
+		{
+			Addresses:         []netip.Addr{oldPrefix.Addr()},
+			InterfacePrefixes: []netip.Prefix{oldPrefix.Masked(), foreignPrefix},
+		},
+	}}
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	system, err := newSystem(SystemConfig{}, systemDependencies{
+		tunFactory: factory, netIO: manager, allocationReader: reader,
+		capabilityProbe: staticCapabilityProbe{facts: capabilityProbeFacts{
+			netIO: available, split: available,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	device, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{oldPrefix.String()}})
+	if err != nil {
+		t.Fatalf("BuildTun() error = %v", err)
+	}
+	applyCalls := manager.applyCalls
+	if err := system.SetTunAddrs(device, []string{"10.81.1.1/16"}); !errors.Is(err, internalallocator.ErrReservationConflict) {
+		t.Fatalf("SetTunAddrs() error = %v, want ErrReservationConflict", err)
+	}
+	if manager.applyCalls != applyCalls {
+		t.Fatalf("rejected prefix expansion made %d NetIO applies, want %d", manager.applyCalls, applyCalls)
+	}
+	if got := mustGetAddrs(t, system, device); !slices.Equal(got, []string{oldPrefix.String()}) {
+		t.Fatalf("GetTunAddrs() after rejection = %v, want [%s]", got, oldPrefix)
+	}
+}
+
+func TestRegularTunRejectsDuplicateAddressBeforeAdapterCreation(t *testing.T) {
+	t.Parallel()
+	factory := &regularTunFactory{}
+	manager := newRegularTunManager()
+	system := newRegularTunTestSystem(t, factory, manager)
+	t.Cleanup(func() { _ = system.Close() })
+
+	_, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{
+		"10.82.1.1/24",
+		"10.82.1.1/16",
+	}})
+	if !errors.Is(err, sysnet.ErrInvalidOptions) {
+		t.Fatalf("BuildTun() error = %v, want ErrInvalidOptions", err)
+	}
+	if len(factory.created) != 0 || manager.applyCalls != 0 {
+		t.Fatalf("invalid addresses changed resources: devices=%d applies=%d", len(factory.created), manager.applyCalls)
+	}
+}
+
 func TestRegularTunCreateUseCloseLoop(t *testing.T) {
 	factory := &regularTunFactory{}
 	manager := newRegularTunManager()

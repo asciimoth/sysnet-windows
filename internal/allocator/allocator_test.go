@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -308,6 +309,276 @@ func TestReplaceOwnedIPsConflictDoesNotChangeReservations(t *testing.T) {
 	}
 }
 
+func TestOwnedPrefixesRejectOverlappingOwners(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{name: "IPv4 exact network", first: "10.201.1.1/16", second: "10.201.2.1/16"},
+		{name: "IPv4 narrower", first: "10.202.1.1/16", second: "10.202.2.1/24"},
+		{name: "IPv4 broader", first: "10.203.1.1/24", second: "10.203.2.1/16"},
+		{name: "IPv6 exact network", first: "fd20:1::1/64", second: "fd20:1::2/64"},
+		{name: "IPv6 narrower", first: "fd20:2::1/48", second: "fd20:2:0:1::1/64"},
+		{name: "IPv6 broader", first: "fd20:3:0:1::1/64", second: "fd20:3::1/48"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			allocator := New(staticReader{}, time.Second)
+			if err := allocator.ReserveOwnedIPs("first", []netip.Prefix{
+				netip.MustParsePrefix(test.first),
+			}); err != nil {
+				t.Fatalf("first ReserveOwnedIPs() error = %v", err)
+			}
+			if err := allocator.ReserveOwnedIPs("second", []netip.Prefix{
+				netip.MustParsePrefix(test.second),
+			}); !errors.Is(err, ErrReservationConflict) {
+				t.Fatalf("second ReserveOwnedIPs() error = %v, want ErrReservationConflict", err)
+			}
+		})
+	}
+}
+
+func TestOwnedPrefixesPermitSameOwnerAndUnrelatedOwners(t *testing.T) {
+	t.Parallel()
+	allocator := New(staticReader{}, time.Second)
+	if err := allocator.ReserveOwnedIPs("first", []netip.Prefix{
+		netip.MustParsePrefix("10.204.1.1/16"),
+		netip.MustParsePrefix("10.204.2.1/24"),
+		netip.MustParsePrefix("fd20:4::1/48"),
+		netip.MustParsePrefix("fd20:4:0:1::1/64"),
+	}); err != nil {
+		t.Fatalf("same-owner ReserveOwnedIPs() error = %v", err)
+	}
+	if err := allocator.ReserveOwnedIPs("second", []netip.Prefix{
+		netip.MustParsePrefix("10.205.1.1/16"),
+		netip.MustParsePrefix("fd20:5::1/48"),
+	}); err != nil {
+		t.Fatalf("unrelated ReserveOwnedIPs() error = %v", err)
+	}
+}
+
+func TestOwnedPrefixesBlockIPAndSubnetAllocationUntilRelease(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		ownedPrefix    netip.Prefix
+		allocateIP     func(*Allocator) net.IP
+		allocateSubnet func(*Allocator) *net.IPNet
+	}{
+		{
+			name: "IPv4", ownedPrefix: netip.MustParsePrefix("10.0.0.1/8"),
+			allocateIP: func(allocator *Allocator) net.IP {
+				ip, _ := allocator.AllocIP4()
+				return ip
+			},
+			allocateSubnet: func(allocator *Allocator) *net.IPNet { return allocator.AllocSubnet4(16) },
+		},
+		{
+			name: "IPv6", ownedPrefix: defaultIPv6ParentPrefix(t),
+			allocateIP: func(allocator *Allocator) net.IP {
+				ip, _ := allocator.AllocIP6()
+				return ip
+			},
+			allocateSubnet: func(allocator *Allocator) *net.IPNet { return allocator.AllocSubnet6(64) },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			allocator := New(staticReader{}, time.Second)
+			if err := allocator.ReserveOwnedIPs("tun", []netip.Prefix{test.ownedPrefix}); err != nil {
+				t.Fatalf("ReserveOwnedIPs() error = %v", err)
+			}
+			if got := test.allocateIP(allocator); got != nil {
+				t.Fatalf("IP allocation = %v, want nil while %s is owned", got, test.ownedPrefix)
+			}
+			if got := test.allocateSubnet(allocator); got != nil {
+				t.Fatalf("subnet allocation = %v, want nil while %s is owned", got, test.ownedPrefix)
+			}
+			allocator.ReleaseOwnedIPs("tun")
+			if got := test.allocateIP(allocator); got == nil {
+				t.Fatal("IP allocation after release = nil")
+			}
+			if got := test.allocateSubnet(allocator); got == nil {
+				t.Fatal("subnet allocation after release = nil")
+			}
+		})
+	}
+}
+
+func TestOwnedPrefixesRejectCallerReservations(t *testing.T) {
+	t.Parallel()
+	t.Run("allocated IPv4 subnet", func(t *testing.T) {
+		allocator := New(staticReader{}, time.Second)
+		network := allocator.AllocSubnet4(16)
+		if network == nil {
+			t.Fatal("AllocSubnet4() = nil")
+		}
+		prefix := mustPrefix(t, network)
+		candidate := netip.PrefixFrom(prefix.Addr().Next(), prefix.Bits())
+		if err := allocator.ReserveOwnedIPs("tun", []netip.Prefix{candidate}); !errors.Is(err, ErrReservationConflict) {
+			t.Fatalf("ReserveOwnedIPs() error = %v, want ErrReservationConflict", err)
+		}
+		allocator.FreeSubnet(network)
+		if err := allocator.ReserveOwnedIPs("tun", []netip.Prefix{candidate}); err != nil {
+			t.Fatalf("ReserveOwnedIPs() after FreeSubnet() error = %v", err)
+		}
+	})
+
+	t.Run("reserved IPv6 subnet", func(t *testing.T) {
+		allocator := New(staticReader{}, time.Second)
+		prefix := netip.MustParsePrefix("fd30:1::/64")
+		network := &net.IPNet{IP: net.IP(prefix.Addr().AsSlice()), Mask: net.CIDRMask(prefix.Bits(), 128)}
+		allocator.ReserveSubnet(network)
+		candidate := netip.MustParsePrefix("fd30:1::1/80")
+		if err := allocator.ReserveOwnedIPs("tun", []netip.Prefix{candidate}); !errors.Is(err, ErrReservationConflict) {
+			t.Fatalf("ReserveOwnedIPs() error = %v, want ErrReservationConflict", err)
+		}
+		allocator.FreeAllSubnets()
+		if err := allocator.ReserveOwnedIPs("tun", []netip.Prefix{candidate}); err != nil {
+			t.Fatalf("ReserveOwnedIPs() after FreeAllSubnets() error = %v", err)
+		}
+	})
+
+	t.Run("allocated IP", func(t *testing.T) {
+		allocator := New(staticReader{}, time.Second)
+		ip, _ := allocator.AllocIP4()
+		address, ok := netip.AddrFromSlice(ip)
+		if !ok {
+			t.Fatalf("AllocIP4() = %v", ip)
+		}
+		address = address.Unmap()
+		candidate := netip.PrefixFrom(address.Next(), 24)
+		if !candidate.Masked().Contains(address) {
+			t.Fatalf("test candidate %s does not contain allocated address %s", candidate, address)
+		}
+		if err := allocator.ReserveOwnedIPs("tun", []netip.Prefix{candidate}); !errors.Is(err, ErrReservationConflict) {
+			t.Fatalf("ReserveOwnedIPs() error = %v, want ErrReservationConflict", err)
+		}
+		allocator.FreeIP(ip)
+		if err := allocator.ReserveOwnedIPs("tun", []netip.Prefix{candidate}); err != nil {
+			t.Fatalf("ReserveOwnedIPs() after FreeIP() error = %v", err)
+		}
+	})
+}
+
+func TestCallerSubnetReferenceCountsProtectOwnedReservations(t *testing.T) {
+	t.Parallel()
+	allocator := New(staticReader{}, time.Second)
+	prefix := netip.MustParsePrefix("10.209.0.0/16")
+	network := &net.IPNet{IP: net.IP(prefix.Addr().AsSlice()), Mask: net.CIDRMask(prefix.Bits(), 32)}
+	candidate := netip.MustParsePrefix("10.209.1.1/24")
+	allocator.ReserveSubnet(network)
+	allocator.ReserveSubnet(network)
+	allocator.FreeSubnet(network)
+	if err := allocator.ReserveOwnedIPs("tun", []netip.Prefix{candidate}); !errors.Is(err, ErrReservationConflict) {
+		t.Fatalf("ReserveOwnedIPs() after one FreeSubnet() error = %v, want ErrReservationConflict", err)
+	}
+	allocator.FreeSubnet(network)
+	if err := allocator.ReserveOwnedIPs("tun", []netip.Prefix{candidate}); err != nil {
+		t.Fatalf("ReserveOwnedIPs() after final FreeSubnet() error = %v", err)
+	}
+}
+
+func TestReplaceOwnedIPsRechecksPrefixLengthChanges(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		old     string
+		next    string
+		foreign string
+	}{
+		{name: "IPv4 expansion", old: "10.206.1.1/24", next: "10.206.1.1/16", foreign: "10.206.2.0/24"},
+		{name: "IPv6 expansion", old: "fd20:6:1:1::1/64", next: "fd20:6:1:1::1/48", foreign: "fd20:6:1:2::/64"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			oldPrefix := netip.MustParsePrefix(test.old)
+			reader := &sequenceReader{states: []netio.HostState{
+				{},
+				{
+					Addresses:         []netip.Addr{oldPrefix.Addr()},
+					InterfacePrefixes: []netip.Prefix{oldPrefix.Masked(), netip.MustParsePrefix(test.foreign)},
+				},
+			}}
+			allocator := New(reader, time.Second)
+			if err := allocator.ReserveOwnedIPs("tun", []netip.Prefix{oldPrefix}); err != nil {
+				t.Fatalf("ReserveOwnedIPs() error = %v", err)
+			}
+			if err := allocator.ReplaceOwnedIPs("tun", []netip.Prefix{
+				netip.MustParsePrefix(test.next),
+			}); !errors.Is(err, ErrReservationConflict) {
+				t.Fatalf("ReplaceOwnedIPs() error = %v, want ErrReservationConflict", err)
+			}
+			if got := reader.Calls(); got != 2 {
+				t.Fatalf("host-state reads = %d, want 2", got)
+			}
+			if got := allocator.ownedIPs["tun"]; !slices.Equal(got, []netip.Prefix{oldPrefix}) {
+				t.Fatalf("owned prefixes after conflict = %v, want [%s]", got, oldPrefix)
+			}
+		})
+	}
+}
+
+func TestReplaceOwnedIPsRejectsOverlapWithAnotherPendingOwner(t *testing.T) {
+	t.Parallel()
+	allocator := New(staticReader{}, time.Second)
+	first := netip.MustParsePrefix("10.207.1.1/24")
+	second := netip.MustParsePrefix("10.207.2.1/24")
+	if err := allocator.ReserveOwnedIPs("first", []netip.Prefix{first}); err != nil {
+		t.Fatalf("first ReserveOwnedIPs() error = %v", err)
+	}
+	if err := allocator.ReserveOwnedIPs("second", []netip.Prefix{second}); err != nil {
+		t.Fatalf("second ReserveOwnedIPs() error = %v", err)
+	}
+	if err := allocator.ReplaceOwnedIPs("first", []netip.Prefix{
+		netip.MustParsePrefix("10.207.1.1/16"),
+	}); !errors.Is(err, ErrReservationConflict) {
+		t.Fatalf("ReplaceOwnedIPs() error = %v, want ErrReservationConflict", err)
+	}
+}
+
+func TestRestoreOwnedIPsRestoresCompletePrefixFilters(t *testing.T) {
+	t.Parallel()
+	allocator := New(staticReader{}, time.Second)
+	oldPrefix := netip.MustParsePrefix("10.210.1.1/24")
+	newPrefix := netip.MustParsePrefix("10.211.1.1/24")
+	if err := allocator.ReserveOwnedIPs("tun", []netip.Prefix{oldPrefix}); err != nil {
+		t.Fatalf("ReserveOwnedIPs() error = %v", err)
+	}
+	if err := allocator.ReplaceOwnedIPs("tun", []netip.Prefix{newPrefix}); err != nil {
+		t.Fatalf("ReplaceOwnedIPs() error = %v", err)
+	}
+	if err := allocator.RestoreOwnedIPs("tun", []netip.Prefix{oldPrefix}); err != nil {
+		t.Fatalf("RestoreOwnedIPs() error = %v", err)
+	}
+	if !allocator.conflictsOwnedSubnetLocked(oldPrefix.Masked()) {
+		t.Fatalf("restored prefix %s does not block allocation", oldPrefix)
+	}
+	if allocator.conflictsOwnedSubnetLocked(newPrefix.Masked()) {
+		t.Fatalf("rolled-back prefix %s still blocks allocation", newPrefix)
+	}
+}
+
+func TestOwnedPrefixesRejectDuplicateAddressWithDifferentLengths(t *testing.T) {
+	t.Parallel()
+	allocator := New(staticReader{}, time.Second)
+	err := allocator.ReserveOwnedIPs("tun", []netip.Prefix{
+		netip.MustParsePrefix("10.208.1.1/24"),
+		netip.MustParsePrefix("10.208.1.1/16"),
+	})
+	if err == nil || errors.Is(err, ErrReservationConflict) {
+		t.Fatalf("ReserveOwnedIPs() error = %v, want invalid duplicate address", err)
+	}
+	if len(allocator.ownedIPs) != 0 {
+		t.Fatalf("failed reservation changed owners: %v", allocator.ownedIPs)
+	}
+}
+
 func TestT26ConcurrentAllocation(t *testing.T) {
 	t.Parallel()
 	allocator := New(staticReader{}, time.Second)
@@ -480,6 +751,17 @@ func mustPrefix(t *testing.T, network *net.IPNet) netip.Prefix {
 		t.Fatalf("parse prefix %q: %v", network, err)
 	}
 	return prefix.Masked()
+}
+
+func defaultIPv6ParentPrefix(t *testing.T) netip.Prefix {
+	t.Helper()
+	reference := New(staticReader{}, time.Second)
+	network := reference.AllocSubnet6(48)
+	if network == nil {
+		t.Fatal("reference AllocSubnet6(48) = nil")
+	}
+	prefix := mustPrefix(t, network)
+	return netip.PrefixFrom(prefix.Addr().Next(), prefix.Bits())
 }
 
 func nextIP(ip net.IP) net.IP {

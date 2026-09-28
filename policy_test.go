@@ -53,6 +53,29 @@ func TestNormalizeTunOptionsRejectsInvalidName(t *testing.T) {
 	}
 }
 
+func TestNormalizeTunOptionsRejectsOneAddressWithDifferentPrefixLengths(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		addresses []string
+	}{
+		{name: "IPv4", addresses: []string{"10.0.0.2/24", "10.0.0.2/16"}},
+		{name: "IPv6", addresses: []string{"fd00::2/64", "fd00::2/48"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			_, report := normalizeTunOpts(defaultNormalizedSystemConfig(), sysnet.TunOpts{
+				TunAddrs: test.addresses,
+			})
+			if err := report.Err(); err == nil || !errors.Is(err, sysnet.ErrInvalidOptions) ||
+				len(report.Issues) != 1 || report.Issues[0].Path != "Tun.TunAddrs[1]" {
+				t.Fatalf("normalizeTunOpts() report = %+v, want invalid duplicate address", report)
+			}
+		})
+	}
+}
+
 func TestDefaultTunDNSNormalization(t *testing.T) {
 	t.Parallel()
 

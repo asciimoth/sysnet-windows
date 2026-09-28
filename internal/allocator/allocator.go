@@ -41,6 +41,7 @@ type Allocator struct {
 	lastErr  error
 
 	ipRefs      map[netip.Addr]int
+	subnetRefs  map[netip.Prefix]int
 	ownedIPRefs map[netip.Addr]int
 	ownedIPs    map[string][]netip.Prefix
 }
@@ -56,8 +57,9 @@ type allocationAttempt struct {
 func New(reader netio.Reader, timeout time.Duration) *Allocator {
 	allocator := &Allocator{
 		reader: reader, timeout: timeout,
-		ipRefs: make(map[netip.Addr]int), ownedIPRefs: make(map[netip.Addr]int),
-		ownedIPs: make(map[string][]netip.Prefix),
+		ipRefs: make(map[netip.Addr]int), subnetRefs: make(map[netip.Prefix]int),
+		ownedIPRefs: make(map[netip.Addr]int),
+		ownedIPs:    make(map[string][]netip.Prefix),
 	}
 	allocator.delegate = gonnectsubnet.NewDefaultAllocator(gonnectsubnet.DefaultAllocatorConfig{
 		IPFilter:     allocator.allowIP,
@@ -84,6 +86,7 @@ func (a *Allocator) Close() {
 	a.delegate.FreeAllIP()
 	a.delegate.FreeAllSubnets()
 	clear(a.ipRefs)
+	clear(a.subnetRefs)
 	clear(a.ownedIPRefs)
 	clear(a.ownedIPs)
 	a.attempt = allocationAttempt{}
@@ -184,7 +187,7 @@ func (a *Allocator) ReserveOwnedIPs(owner string, prefixes []netip.Prefix) error
 	}
 	for _, prefix := range unique {
 		address := prefix.Addr()
-		if a.ownedIPRefs[address] != 0 || conflictsOwnedPrefix(state, prefix) {
+		if a.conflictsReservationLocked(prefix, "") || conflictsOwnedPrefix(state, prefix) {
 			return fmt.Errorf("%w: %s", ErrReservationConflict, address)
 		}
 	}
@@ -201,6 +204,7 @@ func (a *Allocator) ReserveOwnedIPs(owner string, prefixes []netip.Prefix) error
 
 func normalizeOwnedPrefixes(prefixes []netip.Prefix, operation string) ([]netip.Prefix, error) {
 	unique := make([]netip.Prefix, 0, len(prefixes))
+	byAddress := make(map[netip.Addr]netip.Prefix, len(prefixes))
 	for _, prefix := range prefixes {
 		address := prefix.Addr().Unmap()
 		if !usableCandidate(address) {
@@ -214,6 +218,10 @@ func normalizeOwnedPrefixes(prefixes []netip.Prefix, operation string) ([]netip.
 			return nil, fmt.Errorf("%s invalid configured prefix %s", operation, prefix)
 		}
 		normalized := netip.PrefixFrom(address, bits)
+		if previous, exists := byAddress[address]; exists && previous != normalized {
+			return nil, fmt.Errorf("%s duplicate configured address %s with different prefixes", operation, address)
+		}
+		byAddress[address] = normalized
 		if !slices.Contains(unique, normalized) {
 			unique = append(unique, normalized)
 		}
@@ -239,7 +247,7 @@ func (a *Allocator) ReplaceOwnedIPs(owner string, prefixes []netip.Prefix) error
 	}
 	hasAddition := false
 	for _, prefix := range unique {
-		if containsOwnedAddress(old, prefix.Addr()) {
+		if slices.Contains(old, prefix) {
 			continue
 		}
 		hasAddition = true
@@ -254,10 +262,10 @@ func (a *Allocator) ReplaceOwnedIPs(owner string, prefixes []netip.Prefix) error
 	}
 	for _, prefix := range unique {
 		address := prefix.Addr()
-		if containsOwnedAddress(old, address) {
+		if slices.Contains(old, prefix) {
 			continue
 		}
-		if a.ownedIPRefs[address] != 0 || conflictsPrefixExceptOwner(state, prefix, old) {
+		if a.conflictsReservationLocked(prefix, owner) || conflictsPrefixExceptOwner(state, prefix, old) {
 			return fmt.Errorf("%w: %s", ErrReservationConflict, address)
 		}
 	}
@@ -366,12 +374,43 @@ func (a *Allocator) ReleaseOwnedIPs(owner string) {
 	}
 }
 
+func (a *Allocator) conflictsReservationLocked(candidate netip.Prefix, exceptOwner string) bool {
+	assignedAddress := candidate.Addr()
+	candidate = candidate.Masked()
+	for owner, prefixes := range a.ownedIPs {
+		if owner == exceptOwner {
+			continue
+		}
+		for _, prefix := range prefixes {
+			if prefixesOverlap(candidate, prefix.Masked()) {
+				return true
+			}
+		}
+	}
+	for address := range a.ipRefs {
+		// A caller can turn its exact allocated address into a TUN address.
+		// The owned reference must not consume or invalidate that allocation.
+		if address != assignedAddress && candidate.Contains(address) {
+			return true
+		}
+	}
+	for prefix := range a.subnetRefs {
+		if prefixesOverlap(candidate, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // ReserveSubnet implements subnet.SubnetAllocator.
 func (a *Allocator) ReserveSubnet(network *net.IPNet) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.closed {
 		a.delegate.ReserveSubnet(network)
+		if prefix, ok := canonicalSubnet(network); ok {
+			a.subnetRefs[prefix]++
+		}
 	}
 }
 
@@ -383,6 +422,7 @@ func (a *Allocator) AllocSubnet4(prefix int) *net.IPNet {
 		return nil
 	}
 	network := a.delegate.AllocSubnet4(prefix)
+	a.recordAllocatedSubnet(network)
 	a.finishAttempt(network != nil)
 	return network
 }
@@ -395,6 +435,7 @@ func (a *Allocator) AllocSubnet6(prefix int) *net.IPNet {
 		return nil
 	}
 	network := a.delegate.AllocSubnet6(prefix)
+	a.recordAllocatedSubnet(network)
 	a.finishAttempt(network != nil)
 	return network
 }
@@ -405,6 +446,12 @@ func (a *Allocator) FreeSubnet(network *net.IPNet) {
 	defer a.mu.Unlock()
 	if !a.closed {
 		a.delegate.FreeSubnet(network)
+		if prefix, ok := canonicalSubnet(network); ok && a.subnetRefs[prefix] != 0 {
+			a.subnetRefs[prefix]--
+			if a.subnetRefs[prefix] == 0 {
+				delete(a.subnetRefs, prefix)
+			}
+		}
 	}
 }
 
@@ -413,6 +460,7 @@ func (a *Allocator) FreeAllSubnets() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if !a.closed {
+		clear(a.subnetRefs)
 		a.delegate.FreeAllSubnets()
 	}
 }
@@ -449,6 +497,23 @@ func (a *Allocator) recordAllocatedIP(ip net.IP) {
 	}
 }
 
+func (a *Allocator) recordAllocatedSubnet(network *net.IPNet) {
+	if prefix, ok := canonicalSubnet(network); ok {
+		a.subnetRefs[prefix]++
+	}
+}
+
+func canonicalSubnet(network *net.IPNet) (netip.Prefix, bool) {
+	if network == nil {
+		return netip.Prefix{}, false
+	}
+	prefix, err := netip.ParsePrefix(network.String())
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	return prefix.Masked(), true
+}
+
 func canonicalIP(ip net.IP) (netip.Addr, bool) {
 	address, ok := netip.AddrFromSlice(ip)
 	if !ok {
@@ -470,7 +535,7 @@ func (a *Allocator) allowIP(ip net.IP) bool {
 		return false
 	}
 	address = address.Unmap()
-	if conflictsIP(a.attempt.state, address) {
+	if a.conflictsOwnedIPLocked(address) || conflictsIP(a.attempt.state, address) {
 		return false
 	}
 	// AllocIP can create a backing pool through allowSubnet. That callback
@@ -487,7 +552,7 @@ func (a *Allocator) allowIP(ip net.IP) bool {
 		return false
 	}
 	a.attempt.state = state
-	return !conflictsIP(state, address)
+	return !a.conflictsOwnedIPLocked(address) && !conflictsIP(state, address)
 }
 
 func (a *Allocator) allowSubnet(network *net.IPNet) bool {
@@ -497,7 +562,7 @@ func (a *Allocator) allowSubnet(network *net.IPNet) bool {
 		return false
 	}
 	prefix = prefix.Masked()
-	if conflictsSubnet(a.attempt.state, prefix) {
+	if a.conflictsOwnedSubnetLocked(prefix) || conflictsSubnet(a.attempt.state, prefix) {
 		return false
 	}
 	state, err := a.readHostState()
@@ -506,11 +571,33 @@ func (a *Allocator) allowSubnet(network *net.IPNet) bool {
 		return false
 	}
 	a.attempt.state = state
-	if conflictsSubnet(state, prefix) {
+	if a.conflictsOwnedSubnetLocked(prefix) || conflictsSubnet(state, prefix) {
 		return false
 	}
 	a.attempt.verifiedIPPrefix = prefix
 	return true
+}
+
+func (a *Allocator) conflictsOwnedIPLocked(candidate netip.Addr) bool {
+	for _, prefixes := range a.ownedIPs {
+		for _, prefix := range prefixes {
+			if prefix.Masked().Contains(candidate) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (a *Allocator) conflictsOwnedSubnetLocked(candidate netip.Prefix) bool {
+	for _, prefixes := range a.ownedIPs {
+		for _, prefix := range prefixes {
+			if prefixesOverlap(candidate, prefix.Masked()) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *Allocator) failAttempt(err error) {

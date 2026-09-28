@@ -148,6 +148,7 @@ func normalizeDefaultTunOpts(config normalizedSystemConfig, opts sysnet.DefaultT
 func normalizePrefixes(config normalizedSystemConfig, raw []string, path string, kind prefixKind) ([]netip.Prefix, sysnet.ValidationReport) {
 	result := make([]netip.Prefix, 0, len(raw))
 	seen := make(map[netip.Prefix]struct{}, len(raw))
+	seenAddresses := make(map[netip.Addr]netip.Prefix, len(raw))
 	report := sysnet.ValidationReport{}
 	for index, value := range raw {
 		itemPath := fmt.Sprintf("%s[%d]", path, index)
@@ -176,6 +177,15 @@ func normalizePrefixes(config normalizedSystemConfig, raw []string, path string,
 		if issue := validateFamily(config, prefix.Addr(), itemPath); issue != nil {
 			report.Issues = append(report.Issues, *issue)
 			continue
+		}
+		if kind == prefixAddress {
+			if previous, exists := seenAddresses[prefix.Addr()]; exists && previous != prefix {
+				report.Issues = append(report.Issues, validationIssue(
+					itemPath, 0, "", "address is repeated with a different prefix length", sysnet.ErrInvalidOptions,
+				))
+				continue
+			}
+			seenAddresses[prefix.Addr()] = prefix
 		}
 		if _, exists := seen[prefix]; exists {
 			continue
