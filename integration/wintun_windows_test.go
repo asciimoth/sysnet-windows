@@ -425,6 +425,67 @@ func TestT16T24NativeRegularTunPublicLifecycle(t *testing.T) {
 	}
 }
 
+func TestNativeRegularTunEnabledFamilyFloorCoversIPv6Mutations(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*sysnetwindows.System, gtun.Tun) error
+	}{
+		{
+			name: "set addresses",
+			mutate: func(system *sysnetwindows.System, device gtun.Tun) error {
+				return system.SetTunAddrs(device, []string{"fd00:18:247::1/128"})
+			},
+		},
+		{
+			name: "add address",
+			mutate: func(system *sysnetwindows.System, device gtun.Tun) error {
+				return system.AddTunAddr(device, "fd00:18:247::1/128")
+			},
+		},
+		{
+			name: "set routes",
+			mutate: func(system *sysnetwindows.System, device gtun.Tun) error {
+				return system.SetTunRoutes(device, []string{"fd00:18:248::/64"})
+			},
+		},
+		{
+			name: "add route",
+			mutate: func(system *sysnetwindows.System, device gtun.Tun) error {
+				return system.AddTunRoute(device, "fd00:18:248::/64")
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			guid, err := windows.GenerateGUID()
+			if err != nil {
+				t.Fatalf("GenerateGUID() error = %v", err)
+			}
+			system, err := sysnetwindows.New(sysnetwindows.SystemConfig{StableGUID: guid.String()})
+			if err != nil {
+				t.Fatalf("windows.New() error = %v", err)
+			}
+			t.Cleanup(func() { _ = system.Close() })
+			device, err := system.BuildTun(sysnet.TunOpts{
+				Name:     testAdapterName("family-expansion", guid),
+				TunAddrs: []string{"198.18.247.1/32"},
+			})
+			if err != nil {
+				t.Fatalf("BuildTun() error = %v", err)
+			}
+			if err := system.SetTunMTU(device, 576); err != nil {
+				t.Fatalf("SetTunMTU() error = %v", err)
+			}
+			if mtu, err := device.MTU(); err != nil || mtu < 1280 {
+				t.Fatalf("MTU() = %d, %v; want at least 1280, nil", mtu, err)
+			}
+			if err := test.mutate(system, device); err != nil {
+				t.Fatalf("IPv6 mutation error = %v", err)
+			}
+		})
+	}
+}
+
 func TestT07T09NativeNetIOMTUReadbackAndPacketBoundary(t *testing.T) {
 	device := createNativeTun(t, "netio-mtu")
 	metadata := device.Metadata()

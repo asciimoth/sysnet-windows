@@ -3,6 +3,7 @@ package windows
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"slices"
@@ -675,6 +676,110 @@ func TestRegularTunSetterFailurePreservesVerifiedState(t *testing.T) {
 	}
 }
 
+func TestRegularTunSetMTUUsesEnabledFamilyFloor(t *testing.T) {
+	tests := []struct {
+		name   string
+		config SystemConfig
+		raw    int
+		want   int
+	}{
+		{name: "dual family IPv4 minimum", raw: minIPv4MTU, want: defaultTunMTU},
+		{name: "dual family below IPv6 minimum", raw: minIPv6MTU - 1, want: defaultTunMTU},
+		{name: "dual family IPv6 minimum", raw: minIPv6MTU, want: minIPv6MTU},
+		{name: "IPv4 only minimum", config: SystemConfig{Features: FeatureConfig{DisableIPv6: true}}, raw: minIPv4MTU, want: minIPv4MTU},
+		{name: "IPv4 only below minimum", config: SystemConfig{Features: FeatureConfig{DisableIPv6: true}}, raw: minIPv4MTU - 1, want: defaultTunMTU},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			factory := &regularTunFactory{}
+			manager := newRegularTunManager()
+			system := newRegularTunTestSystemWithConfig(t, test.config, factory, minimumMTUManager{Manager: manager})
+			t.Cleanup(func() { _ = system.Close() })
+			device, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{"10.26.1.1/24"}})
+			if err != nil {
+				t.Fatalf("BuildTun() error = %v", err)
+			}
+			if err := system.SetTunMTU(device, test.raw); err != nil {
+				t.Fatalf("SetTunMTU(%d) error = %v", test.raw, err)
+			}
+			if got, err := device.MTU(); err != nil || got != test.want {
+				t.Fatalf("MTU() = %d, %v; want %d, nil", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestRegularTunIPv4MTUDoesNotBlockEnabledIPv6Mutations(t *testing.T) {
+	tests := []struct {
+		name       string
+		operation  sysnet.Operation
+		mutate     func(*System, gtun.Tun) error
+		wantFamily sysnet.AddressFamily
+	}{
+		{
+			name: "set addresses", operation: sysnet.OpSetAddresses, wantFamily: sysnet.FamilyIPv6,
+			mutate: func(system *System, device gtun.Tun) error {
+				return system.SetTunAddrs(device, []string{"fd26::1/64"})
+			},
+		},
+		{
+			name: "add address", operation: sysnet.OpAddAddress, wantFamily: sysnet.FamilyDual,
+			mutate: func(system *System, device gtun.Tun) error {
+				return system.AddTunAddr(device, "fd26::1/64")
+			},
+		},
+		{
+			name: "set routes", operation: sysnet.OpSetRoutes, wantFamily: sysnet.FamilyDual,
+			mutate: func(system *System, device gtun.Tun) error {
+				return system.SetTunRoutes(device, []string{"fd26:1::/64"})
+			},
+		},
+		{
+			name: "add route", operation: sysnet.OpAddRoute, wantFamily: sysnet.FamilyDual,
+			mutate: func(system *System, device gtun.Tun) error {
+				return system.AddTunRoute(device, "fd26:1::/64")
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			factory := &regularTunFactory{}
+			manager := newRegularTunManager()
+			system := newRegularTunTestSystem(t, factory, minimumMTUManager{Manager: manager})
+			t.Cleanup(func() { _ = system.Close() })
+			device, err := system.BuildTun(sysnet.TunOpts{TunAddrs: []string{"10.26.1.1/24"}})
+			if err != nil {
+				t.Fatalf("BuildTun() error = %v", err)
+			}
+			if err := system.SetTunMTU(device, minIPv4MTU); err != nil {
+				t.Fatalf("SetTunMTU() error = %v", err)
+			}
+			if got, err := device.MTU(); err != nil || got != defaultTunMTU {
+				t.Fatalf("MTU() = %d, %v; want %d, nil", got, err, defaultTunMTU)
+			}
+			capabilities, err := system.CapabilitiesForTun(device)
+			if err != nil {
+				t.Fatalf("CapabilitiesForTun() error = %v", err)
+			}
+			capability := capabilities.Operation(sysnet.OperationKey{
+				Target: sysnet.TargetTun, Operation: test.operation, Family: test.wantFamily,
+			})
+			if capability.State != sysnet.CapabilityAvailable {
+				t.Fatalf("%s capability = %v, want available", test.operation, capability.State)
+			}
+			if err := test.mutate(system, device); err != nil {
+				t.Fatalf("mutation error = %v", err)
+			}
+			config := manager.config(factory.created[0].interfaceID())
+			for _, properties := range config.Properties {
+				if properties.Family == netio.FamilyIPv6 && properties.MTU < minIPv6MTU {
+					t.Fatalf("IPv6 MTU = %d, want at least %d", properties.MTU, minIPv6MTU)
+				}
+			}
+		})
+	}
+}
+
 func TestRegularTunVerifiedNetIOErrorsRemainRetryable(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -953,9 +1058,18 @@ func TestRegularTunCreateUseCloseLoop(t *testing.T) {
 }
 
 func newRegularTunTestSystem(t *testing.T, factory *regularTunFactory, manager netio.Manager) *System {
+	return newRegularTunTestSystemWithConfig(t, SystemConfig{}, factory, manager)
+}
+
+func newRegularTunTestSystemWithConfig(
+	t *testing.T,
+	config SystemConfig,
+	factory *regularTunFactory,
+	manager netio.Manager,
+) *System {
 	t.Helper()
 	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
-	system, err := newSystem(SystemConfig{}, systemDependencies{
+	system, err := newSystem(config, systemDependencies{
 		tunFactory:       factory,
 		netIO:            manager,
 		allocationReader: emptyHostReader{},
@@ -1097,6 +1211,22 @@ type blockingCloseManager struct {
 	started chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+type minimumMTUManager struct{ netio.Manager }
+
+func (m minimumMTUManager) Apply(ctx context.Context, iface netio.Interface, config netio.Config) error {
+	for _, properties := range config.Properties {
+		minimum := uint32(minIPv4MTU)
+		if properties.Family == netio.FamilyIPv6 {
+			minimum = minIPv6MTU
+		}
+		if properties.MTU < minimum {
+			return fmt.Errorf("%w: IPv%d MTU %d is below %d", netio.ErrInvalidConfig,
+				properties.Family, properties.MTU, minimum)
+		}
+	}
+	return m.Manager.Apply(ctx, iface, config)
 }
 
 func (m *blockingCloseManager) Apply(ctx context.Context, iface netio.Interface, config netio.Config) error {

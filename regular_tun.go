@@ -360,8 +360,11 @@ func (s *System) setRegularTunMTU(device gtun.Tun, raw int) error {
 	if err != nil {
 		return err
 	}
-	want, _, _, _, _ := owned.snapshot()
-	mtu, validation := normalizeMTU(s.policyConfig(), raw, "Tun.MTU", configContainsIPv6(want))
+	// Keep the MTU valid for every family that this System can add later.
+	// Otherwise an IPv4-only TUN can accept an IPv4-sized MTU and then reject
+	// an advertised IPv6 address or route operation at the NetIO boundary.
+	config := s.policyConfig()
+	mtu, validation := normalizeMTU(config, raw, "Tun.MTU", config.ipv6)
 	if err := validation.Err(); err != nil {
 		return err
 	}
@@ -676,16 +679,6 @@ func familyForNetIOConfig(config netio.Config) sysnet.AddressFamily {
 		prefixes = append(prefixes, route.Destination)
 	}
 	return familyForPrefixes(prefixes)
-}
-
-func configContainsIPv6(config netio.Config) bool {
-	for _, properties := range config.Properties {
-		if properties.Family == netio.FamilyIPv6 {
-			return true
-		}
-	}
-	family := familyForNetIOConfig(config)
-	return family == sysnet.FamilyIPv6 || family == sysnet.FamilyDual
 }
 
 func appendUniquePrefixes(current []netip.Prefix, values ...netip.Prefix) []netip.Prefix {
