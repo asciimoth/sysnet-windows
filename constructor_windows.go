@@ -48,6 +48,8 @@ func nativeDependencies() systemDependencies {
 		splitDependencies: split.Dependencies{
 			Verifier: split.NativeVerifier{}, Opener: split.NativeOpener{},
 			WFP:            wfp.NativeFactory{TransactionStartTimeout: defaultOperationTimeout},
+			Snapshot:       split.NativeProcessSnapshotter{},
+			Resolver:       split.NativePathResolver{},
 			CleanupTimeout: defaultOperationTimeout,
 		},
 		capabilityProbe: nativeCapabilityProbe{reader: reader},

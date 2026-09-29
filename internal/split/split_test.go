@@ -279,7 +279,16 @@ func (f *fakeController) State(context.Context) (State, error) {
 	f.events.add("state")
 	return f.state, f.stateErr
 }
-func (f *fakeController) Close() error { f.events.add("close-controller"); return f.closeErr }
+func (f *fakeController) Initialize(context.Context, Sublayers) error            { return nil }
+func (f *fakeController) RegisterProcesses(context.Context, []Process) error     { return nil }
+func (f *fakeController) SetAddresses(context.Context, Addresses) error          { return nil }
+func (f *fakeController) SetExcludedDevicePaths(context.Context, []string) error { return nil }
+func (f *fakeController) ReadEvent(ctx context.Context) (Event, error) {
+	<-ctx.Done()
+	return Event{}, ctx.Err()
+}
+func (f *fakeController) Reset(context.Context) error { return nil }
+func (f *fakeController) Close() error                { f.events.add("close-controller"); return f.closeErr }
 
 type fakeWFP struct {
 	resources                                 wfp.Resources

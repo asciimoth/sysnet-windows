@@ -64,6 +64,12 @@ type Verifier interface {
 // Controller is the part of the pinned controller used during acquisition.
 type Controller interface {
 	State(context.Context) (State, error)
+	Initialize(context.Context, Sublayers) error
+	RegisterProcesses(context.Context, []Process) error
+	SetAddresses(context.Context, Addresses) error
+	SetExcludedDevicePaths(context.Context, []string) error
+	ReadEvent(context.Context) (Event, error)
+	Reset(context.Context) error
 	Close() error
 }
 
@@ -77,6 +83,8 @@ type Dependencies struct {
 	Verifier Verifier
 	Opener   Opener
 	WFP      wfp.Factory
+	Snapshot ProcessSnapshotter
+	Resolver PathResolver
 	// CleanupTimeout bounds rollback and close cleanup. Zero uses 30 seconds.
 	CleanupTimeout time.Duration
 }

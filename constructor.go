@@ -60,6 +60,7 @@ func newSystem(config SystemConfig, dependencies systemDependencies) (*System, e
 			return nil, monitorErr
 		}
 		system.underlayMonitor = monitor
+		monitor.SetObserver(func() { system.enqueueReconcileReason(reconcile.Reason("underlay-change")) })
 		if err := system.buildOutboundNetwork(); err != nil {
 			_ = monitor.Close()
 			return nil, err

@@ -79,6 +79,8 @@ func currentImplementationSupport() implementationSupport {
 		defaultTun:              true,
 		defaultTunDual:          true,
 		defaultTunNamed:         true,
+		exclusions:              true,
+		exclusionsDual:          true,
 		exclusionRuleValidation: true,
 		matcherRuleValidation:   true,
 		outNet:                  true,

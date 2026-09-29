@@ -63,6 +63,16 @@ func (d systemDependencies) constrainCapabilityFacts(facts capabilityProbeFacts)
 		// and process access failures remain per-match errors.
 		facts.ownerLookup = sysnet.Capability{State: sysnet.CapabilityAvailable}
 	}
+	if d.splitDependencies.Verifier == nil || d.splitDependencies.Opener == nil ||
+		d.splitDependencies.WFP == nil || d.splitDependencies.Snapshot == nil || d.splitDependencies.Resolver == nil {
+		facts.split = missingDependencyCapability("split-driver bootstrap dependencies are not configured")
+	} else if !capabilityFactSet(facts.split) {
+		facts.split = sysnet.Capability{
+			State:   sysnet.CapabilityUnknown,
+			Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeNotRun},
+			Detail:  "split-driver ownership is resolved only when exclusions are requested",
+		}
+	}
 	return facts
 }
 

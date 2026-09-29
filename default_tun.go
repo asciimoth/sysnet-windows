@@ -15,6 +15,7 @@ import (
 	internaldns "github.com/asciimoth/sysnet-windows/internal/dns"
 	"github.com/asciimoth/sysnet-windows/internal/netio"
 	"github.com/asciimoth/sysnet-windows/internal/reconcile"
+	"github.com/asciimoth/sysnet-windows/internal/split"
 	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
 	"github.com/asciimoth/sysnet-windows/internal/underlay"
 )
@@ -31,6 +32,7 @@ type defaultTun struct {
 	dnsProxy      internaldns.ManagedProxy
 	dnsPrior      internaldns.State
 	dnsApplied    internaldns.State
+	splitPolicy   *split.Policy
 }
 
 // SetDNS atomically replaces the provider used by this TUN's local proxy. A nil
@@ -52,9 +54,6 @@ func (t *defaultTun) Close() error {
 func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefaultTun) (sysnet.DefaultTun, error) {
 	if s.dependencies.tunFactory == nil || s.dependencies.netIO == nil || s.dependencies.dnsConfigurator == nil || s.dependencies.dnsProxyFactory == nil || s.underlayMonitor == nil {
 		return nil, stateValidationError(sysnet.ReasonMissingDependency, "default TUN dependencies are not configured")
-	}
-	if len(desired.excludes) != 0 {
-		return nil, sysnet.ErrNotSupported
 	}
 	if err := requireUnderlays(s.underlayMonitor.Snapshot(), desired.family); err != nil {
 		return nil, err
@@ -95,6 +94,7 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 	configKey := reconcile.OwnershipKey{Kind: reconcile.KindAddress, Scope: "default-tun", ID: fmt.Sprint(id)}
 	dnsKey := reconcile.OwnershipKey{Kind: reconcile.KindDNS, Scope: "default-tun", ID: fmt.Sprint(id)}
 	routeKey := reconcile.OwnershipKey{Kind: reconcile.KindRoute, Scope: "default-tun", ID: fmt.Sprint(id)}
+	splitKey := reconcile.OwnershipKey{Kind: reconcile.KindSplit, Scope: "default-tun", ID: fmt.Sprint(id)}
 	preRoute := defaultTunPreRouteConfig(s.config, desired)
 	final := defaultTunFinalConfig(preRoute, desired.family)
 	base := netio.Config{Properties: append([]netio.Properties(nil), preRoute.Properties...)}
@@ -190,6 +190,7 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 	err := s.applyOperation(func(ctx context.Context) error {
 		configApplied := false
 		dnsApplied := false
+		splitApplied := false
 		routeApplied := false
 		retireOld := func() error {
 			retireErr := s.undoDefaultTun(ctx, old)
@@ -228,6 +229,9 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 			}
 			if routeApplied {
 				keys = append([]reconcile.OwnershipKey{routeKey}, keys...)
+			}
+			if splitApplied {
+				keys = append([]reconcile.OwnershipKey{splitKey}, keys...)
 			}
 			cleanupErr := s.journal.Undo(cleanupCtx, keys...)
 			return errors.Join(primary, cleanupErr)
@@ -339,6 +343,64 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 		if err := requireUnderlays(s.underlayMonitor.Snapshot(), desired.family); err != nil {
 			return cleanupNew(err)
 		}
+		if len(desired.excludes) != 0 {
+			splitEntry := reconcile.Entry{
+				Key: splitKey,
+				Apply: func(ctx context.Context) error {
+					session, acquireErr := split.Acquire(ctx, s.dependencies.splitDependencies)
+					if acquireErr != nil {
+						s.recordSplitCapability(acquireErr)
+						return acquireErr
+					}
+					addresses, addressErr := splitAddresses(desired.tun.addresses, s.underlayMonitor.Snapshot())
+					if addressErr != nil {
+						return errors.Join(addressErr, session.Close())
+					}
+					paths := make([]string, len(desired.excludes))
+					for index, rule := range desired.excludes {
+						paths[index] = rule.value
+					}
+					policy, bootstrapErr := split.Bootstrap(ctx, session, s.dependencies.splitDependencies, split.BootstrapConfig{
+						Generation: id,
+						Addresses:  addresses,
+						Paths:      paths,
+						OnEvent: func(split.Event) {
+							s.enqueueReconcileReason(reconcile.Reason("split-process-change"))
+						},
+						OnError: func(eventErr error) {
+							if s.dependencies.logger != nil {
+								s.dependencies.logger.Printf("split event reader stopped: %v", eventErr)
+							}
+						},
+					})
+					if bootstrapErr != nil {
+						return errors.Join(bootstrapErr, session.Close())
+					}
+					result.splitPolicy = policy
+					s.recordSplitCapability(nil)
+					return nil
+				},
+				Inverse: func(context.Context) error {
+					if result == nil || result.splitPolicy == nil {
+						return nil
+					}
+					return result.splitPolicy.Close()
+				},
+				Verify: func(_ context.Context, expected reconcile.ExpectedState) error {
+					if expected == reconcile.ExpectedApplied {
+						if result == nil || result.splitPolicy == nil || result.splitPolicy.AppliedGeneration() != id {
+							return errors.New("split policy generation was not applied")
+						}
+					}
+					return nil
+				},
+			}
+			if err := s.journal.Apply(ctx, []reconcile.Entry{splitEntry}); err != nil {
+				splitApplied = s.journal.Has(splitKey)
+				return cleanupNew(err)
+			}
+			splitApplied = true
+		}
 		routeEntry := reconcile.Entry{
 			Key: routeKey,
 			Apply: func(ctx context.Context) error {
@@ -375,17 +437,44 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 
 func (s *System) undoDefaultTun(ctx context.Context, device *defaultTun) error {
 	id := fmt.Sprint(device.id)
-	err := s.journal.Undo(ctx,
-		reconcile.OwnershipKey{Kind: reconcile.KindRoute, Scope: "default-tun", ID: id},
-		reconcile.OwnershipKey{Kind: reconcile.KindDNS, Scope: "default-tun", ID: id},
-		reconcile.OwnershipKey{Kind: reconcile.KindAddress, Scope: "default-tun", ID: id},
-		reconcile.OwnershipKey{Kind: reconcile.KindAddress, Scope: "default-tun-base", ID: id},
-		reconcile.OwnershipKey{Kind: reconcile.KindAdapter, Scope: "default-tun", ID: id},
-	)
+	keys := []reconcile.OwnershipKey{
+		{Kind: reconcile.KindRoute, Scope: "default-tun", ID: id},
+		{Kind: reconcile.KindDNS, Scope: "default-tun", ID: id},
+		{Kind: reconcile.KindAddress, Scope: "default-tun", ID: id},
+		{Kind: reconcile.KindAddress, Scope: "default-tun-base", ID: id},
+		{Kind: reconcile.KindAdapter, Scope: "default-tun", ID: id},
+	}
+	if device.splitPolicy != nil {
+		keys = slices.Insert(keys, 1, reconcile.OwnershipKey{Kind: reconcile.KindSplit, Scope: "default-tun", ID: id})
+	}
+	err := s.journal.Undo(ctx, keys...)
 	if err == nil {
 		device.retired.Store(true)
 	}
 	return err
+}
+
+func splitAddresses(prefixes []netip.Prefix, snapshot underlay.Snapshot) (split.Addresses, error) {
+	var result split.Addresses
+	for _, prefix := range prefixes {
+		address := prefix.Addr()
+		if address.Is4() && !result.TunnelIPv4.IsValid() {
+			result.TunnelIPv4 = address
+		}
+		if address.Is6() && !address.Is4In6() && !result.TunnelIPv6.IsValid() {
+			result.TunnelIPv6 = address
+		}
+	}
+	if result.TunnelIPv4.IsValid() && snapshot.IPv4 != nil {
+		result.InternetIPv4 = snapshot.IPv4.Source
+	}
+	if result.TunnelIPv6.IsValid() && snapshot.IPv6 != nil {
+		result.InternetIPv6 = snapshot.IPv6.Source
+	}
+	if result.TunnelIPv4.IsValid() != result.InternetIPv4.IsValid() || result.TunnelIPv6.IsValid() != result.InternetIPv6.IsValid() {
+		return split.Addresses{}, errors.New("split policy requires a current local underlay address for each tunnel family")
+	}
+	return result, nil
 }
 
 func (s *System) setDefaultTunDNS(device *defaultTun, provider dns.Interface) error {

@@ -24,11 +24,13 @@ func TestRetryNameInspection(t *testing.T) {
 		results   []error
 		cancelled bool
 		wantCalls int
+		wantWaits []time.Duration
 		wantErr   error
 	}{
 		{name: "success", results: []error{nil}, wantCalls: 1},
-		{name: "recovery retry", results: []error{transient, nil}, wantCalls: 2},
-		{name: "bounded transient failures", results: []error{transient, transient}, wantCalls: 2, wantErr: transient},
+		{name: "recovery retry", results: []error{transient, nil}, wantCalls: 2, wantWaits: []time.Duration{100 * time.Millisecond}},
+		{name: "third attempt", results: []error{transient, transient, nil}, wantCalls: 3, wantWaits: []time.Duration{100 * time.Millisecond, 200 * time.Millisecond}},
+		{name: "bounded transient failures", results: []error{transient, transient, transient}, wantCalls: 3, wantWaits: []time.Duration{100 * time.Millisecond, 200 * time.Millisecond}, wantErr: transient},
 		{name: "terminal failure", results: []error{terminal}, wantCalls: 1, wantErr: terminal},
 		{name: "cancelled before inspection", cancelled: true, wantErr: context.Canceled},
 	}
@@ -42,15 +44,51 @@ func TestRetryNameInspection(t *testing.T) {
 				defer cancel()
 			}
 			calls := 0
-			err := retryNameInspection(ctx, func() error {
+			var waits []time.Duration
+			err := retryNameInspectionWithWait(ctx, func() error {
 				result := test.results[calls]
 				calls++
 				return result
-			}, func(err error) bool { return errors.Is(err, transient) })
+			}, func(err error) bool { return errors.Is(err, transient) }, func(_ context.Context, delay time.Duration) error {
+				waits = append(waits, delay)
+				return nil
+			})
 			if calls != test.wantCalls || !errors.Is(err, test.wantErr) || test.wantErr == nil && err != nil {
 				t.Fatalf("retryNameInspection() calls = %d, error = %v; want %d, %v", calls, err, test.wantCalls, test.wantErr)
 			}
+			if !reflect.DeepEqual(waits, test.wantWaits) {
+				t.Fatalf("retryNameInspection() waits = %v, want %v", waits, test.wantWaits)
+			}
 		})
+	}
+}
+
+func TestRetryNameInspectionCancellationDuringBackoff(t *testing.T) {
+	t.Parallel()
+	transient := errors.New("transient inspection failure")
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	err := retryNameInspectionWithWait(ctx, func() error {
+		calls++
+		return transient
+	}, func(error) bool { return true }, func(ctx context.Context, _ time.Duration) error {
+		cancel()
+		return ctx.Err()
+	})
+	if calls != 1 || !errors.Is(err, context.Canceled) || !errors.Is(err, transient) {
+		t.Fatalf("calls = %d, error = %v; want one call with cancellation and native causes", calls, err)
+	}
+}
+
+func TestRetryNameInspectionImmediateSuccessDoesNotWait(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	err := retryNameInspection(context.Background(), func() error {
+		calls++
+		return nil
+	}, func(error) bool { return true })
+	if err != nil || calls != 1 {
+		t.Fatalf("calls = %d, error = %v; want one successful call", calls, err)
 	}
 }
 

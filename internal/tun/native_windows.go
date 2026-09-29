@@ -101,7 +101,12 @@ func rejectExistingName(ctx context.Context, name string) error {
 		}
 		return fmt.Errorf("inspect Wintun adapter name %q: %w", name, err)
 	}, func(err error) bool {
-		return errors.Is(err, windows.WAIT_TIMEOUT)
+		// An adapter left by an abruptly terminated process can be visible
+		// before its device object is usable. Opening it triggers Wintun's
+		// orphan cleanup, so inspect the name once more instead of treating the
+		// short cleanup window as a permanent native failure.
+		return errors.Is(err, windows.WAIT_TIMEOUT) ||
+			errors.Is(err, windows.ERROR_DEVICE_NOT_AVAILABLE)
 	})
 }
 

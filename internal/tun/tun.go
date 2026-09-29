@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf16"
 
 	gtun "github.com/asciimoth/gonnect/tun"
@@ -18,10 +19,12 @@ const (
 	// DefaultNamePrefix is used when a caller does not request an adapter name.
 	DefaultNamePrefix = "gonnect"
 	maxAdapterNameLen = 128
-	// Wintun can return a transient timeout after its open operation removes an
-	// abandoned adapter. One retry observes the post-recovery state without
-	// turning arbitrary native failures into an unbounded creation delay.
-	maxNameInspectionAttempts = 2
+	// Wintun can return a transient timeout or device-not-available result while
+	// its open operation removes an abandoned adapter. Two bounded retries with
+	// exponential backoff observe the post-recovery state without turning
+	// arbitrary native failures into an unbounded creation delay.
+	maxNameInspectionAttempts    = 3
+	initialNameInspectionBackoff = 100 * time.Millisecond
 )
 
 var (
@@ -71,10 +74,25 @@ type Factory interface {
 }
 
 func retryNameInspection(ctx context.Context, inspect func() error, transient func(error) bool) error {
+	return retryNameInspectionWithWait(ctx, inspect, transient, waitNameInspectionBackoff)
+}
+
+func retryNameInspectionWithWait(
+	ctx context.Context,
+	inspect func() error,
+	transient func(error) bool,
+	wait func(context.Context, time.Duration) error,
+) error {
 	var lastErr error
 	for attempt := 0; attempt < maxNameInspectionAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(err, lastErr)
+		}
+		if attempt > 0 {
+			delay := initialNameInspectionBackoff << (attempt - 1)
+			if err := wait(ctx, delay); err != nil {
+				return errors.Join(err, lastErr)
+			}
 		}
 		lastErr = inspect()
 		if lastErr == nil || !transient(lastErr) {
@@ -82,6 +100,17 @@ func retryNameInspection(ctx context.Context, inspect func() error, transient fu
 		}
 	}
 	return lastErr
+}
+
+func waitNameInspectionBackoff(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type mtuReporter interface {

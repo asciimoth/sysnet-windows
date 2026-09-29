@@ -161,6 +161,29 @@ func TestMonitorReadFailureMakesBothFamiliesUnavailable(t *testing.T) {
 	}
 }
 
+func TestMonitorObserverRunsAfterReplacementPublication(t *testing.T) {
+	source := &fakeSource{}
+	monitor, err := newMonitor(source, "", nil, time.Second, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = monitor.Close() })
+	observed := make(chan Snapshot, 1)
+	monitor.SetObserver(func() { observed <- monitor.Snapshot() })
+	source.replace([]Candidate{
+		candidate("changed", 9, false, "192.0.2.9", netip.MustParsePrefix("0.0.0.0/0"), 1, 1),
+	})
+	source.signal()
+	select {
+	case snapshot := <-observed:
+		if snapshot.IPv4 == nil || snapshot.IPv4.InterfaceIndex != 9 {
+			t.Fatalf("observer snapshot = %+v, want replacement", snapshot)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("observer was not called")
+	}
+}
+
 func TestMonitorStartupAndCloseFailures(t *testing.T) {
 	t.Run("subscribe failure", func(t *testing.T) {
 		wantErr := errors.New("subscribe failed")

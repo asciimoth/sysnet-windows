@@ -15,6 +15,7 @@ import (
 	internalallocator "github.com/asciimoth/sysnet-windows/internal/allocator"
 	internaldns "github.com/asciimoth/sysnet-windows/internal/dns"
 	"github.com/asciimoth/sysnet-windows/internal/reconcile"
+	"github.com/asciimoth/sysnet-windows/internal/split"
 	"github.com/asciimoth/sysnet-windows/internal/underlay"
 )
 
@@ -171,6 +172,18 @@ func (s *System) handleReconcileFailure(err error) {
 	if s.state == lifecycleReady || s.state == lifecycleActive || s.state == lifecycleApplying {
 		_ = s.transitionLocked(lifecycleRecoveryRequired)
 		s.rebuildCapabilitiesLocked()
+	}
+}
+
+func (s *System) enqueueReconcileReason(reason reconcile.Reason) {
+	if s == nil {
+		return
+	}
+	s.mu.RLock()
+	worker := s.worker
+	s.mu.RUnlock()
+	if worker != nil {
+		worker.Enqueue(reason)
 	}
 }
 
@@ -390,10 +403,35 @@ func (s *System) BuildDefaultTun(opts sysnet.DefaultTunOpts) (sysnet.DefaultTun,
 		mode = sysnet.RoutingExclude
 	}
 	capability := capabilities.DefaultTunProfile(sysnet.RoutingProfileKey{Family: desired.family, Mode: mode}).Capability
-	if capability.State != sysnet.CapabilityAvailable {
+	// Split ownership is deliberately unknown until this explicit exclusion
+	// operation lazily acquires and verifies the global driver session.
+	resolveSplit := len(desired.excludes) != 0 && capability.State == sysnet.CapabilityUnknown
+	if capability.State != sysnet.CapabilityAvailable && !resolveSplit {
 		return nil, capabilityError("DefaultTun.Profile", capability)
 	}
 	return s.buildDefaultTun(opts, desired)
+}
+
+func (s *System) recordSplitCapability(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	capability := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	if err != nil {
+		reason := sysnet.ReasonProbeFailed
+		switch {
+		case errors.Is(err, split.ErrUnavailable):
+			reason = sysnet.ReasonMissingDependency
+		case errors.Is(err, split.ErrBusy):
+			reason = sysnet.ReasonResourceBusy
+		case errors.Is(err, split.ErrIncompatible):
+			reason = sysnet.ReasonDependencyIncompatible
+		case errors.Is(err, split.ErrDirty), errors.Is(err, split.ErrRecoveryRequired):
+			reason = sysnet.ReasonRecoveryRequired
+		}
+		capability = sysnet.Capability{State: sysnet.CapabilityUnavailable, Reasons: []sysnet.CapabilityReason{reason}, Detail: err.Error()}
+	}
+	s.probeFacts.split = capability
+	s.rebuildCapabilitiesLocked()
 }
 
 // DefaultTunWarnings reports limits which remain true for every active default

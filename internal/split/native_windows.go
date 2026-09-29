@@ -121,7 +121,81 @@ func (c nativeController) State(ctx context.Context) (State, error) {
 	return State(state), err
 }
 
+func (c nativeController) Initialize(ctx context.Context, sublayers Sublayers) error {
+	baseline, err := splittunnel.ParseGUID(sublayers.Baseline)
+	if err != nil {
+		return fmt.Errorf("parse baseline sublayer GUID: %w", err)
+	}
+	dns, err := splittunnel.ParseGUID(sublayers.DNS)
+	if err != nil {
+		return fmt.Errorf("parse DNS sublayer GUID: %w", err)
+	}
+	return c.controller.Initialize(ctx, splittunnel.Sublayers{Baseline: baseline, DNS: dns})
+}
+
+func (c nativeController) RegisterProcesses(ctx context.Context, input []Process) error {
+	processes := make([]splittunnel.Process, len(input))
+	for index, process := range input {
+		processes[index] = splittunnel.Process(process)
+	}
+	return c.controller.RegisterProcesses(ctx, processes)
+}
+
+func (c nativeController) SetAddresses(ctx context.Context, addresses Addresses) error {
+	return c.controller.SetAddresses(ctx, splittunnel.Addresses(addresses))
+}
+
+func (c nativeController) SetExcludedDevicePaths(ctx context.Context, paths []string) error {
+	return c.controller.SetExcludedDevicePaths(ctx, paths)
+}
+
+func (c nativeController) ReadEvent(ctx context.Context) (Event, error) {
+	event, err := c.controller.ReadEvent(ctx)
+	return Event{ID: uint32(event.ID), PID: event.PID, Reason: uint32(event.Reason), ImagePath: event.ImagePath,
+		NTStatus: event.NTStatus, Message: event.Message, Raw: append([]byte(nil), event.Raw...)}, err
+}
+
+func (c nativeController) Reset(ctx context.Context) error { return c.controller.Reset(ctx) }
+
 func (c nativeController) Close() error { return c.controller.Close() }
+
+// NativeProcessSnapshotter reads the Toolhelp snapshot after initialization.
+type NativeProcessSnapshotter struct{}
+
+func (NativeProcessSnapshotter) Snapshot(ctx context.Context) (ProcessSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return ProcessSnapshot{}, err
+	}
+	snapshot, err := splittunnel.SnapshotProcesses()
+	if err != nil {
+		return ProcessSnapshot{}, err
+	}
+	result := ProcessSnapshot{Processes: make([]Process, len(snapshot.Processes)), Warnings: make([]ProcessWarning, len(snapshot.Warnings))}
+	for index, process := range snapshot.Processes {
+		result.Processes[index] = Process(process)
+	}
+	for index, warning := range snapshot.Warnings {
+		result.Warnings[index] = ProcessWarning(warning)
+	}
+	if err := ctx.Err(); err != nil {
+		return ProcessSnapshot{}, err
+	}
+	return result, nil
+}
+
+// NativePathResolver resolves junctions and volume mappings with a file handle.
+type NativePathResolver struct{}
+
+func (NativePathResolver) Resolve(ctx context.Context, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	resolved, err := splittunnel.ResolveDevicePath(path)
+	if err == nil {
+		err = ctx.Err()
+	}
+	return resolved, err
+}
 
 func validServicePath(configured, absolute string) bool {
 	configured = strings.Trim(strings.TrimSpace(configured), `"`)

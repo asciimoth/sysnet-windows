@@ -103,9 +103,11 @@ type Monitor struct {
 	subClosed bool
 	closeErr  error
 
-	errMu     sync.RWMutex
-	err       error
-	refreshMu sync.Mutex
+	errMu      sync.RWMutex
+	err        error
+	refreshMu  sync.Mutex
+	observerMu sync.RWMutex
+	observer   func()
 }
 
 // NewMonitor subscribes before its first read so a change during startup is
@@ -206,6 +208,18 @@ func (m *Monitor) NotifyOwnedChange() {
 	}
 }
 
+// SetObserver replaces the callback invoked after each complete snapshot is
+// published. The callback must return quickly; it is intended to enqueue work
+// on a policy reconciler. A nil callback disables notification.
+func (m *Monitor) SetObserver(observer func()) {
+	if m == nil {
+		return
+	}
+	m.observerMu.Lock()
+	m.observer = observer
+	m.observerMu.Unlock()
+}
+
 func (m *Monitor) notify() {
 	select {
 	case m.changes <- struct{}{}:
@@ -255,6 +269,12 @@ func (m *Monitor) publish(snapshot Snapshot, err error) {
 	m.errMu.Lock()
 	m.err = err
 	m.errMu.Unlock()
+	m.observerMu.RLock()
+	observer := m.observer
+	m.observerMu.RUnlock()
+	if observer != nil {
+		observer()
+	}
 }
 
 // Select chooses each family independently. It considers only operational,

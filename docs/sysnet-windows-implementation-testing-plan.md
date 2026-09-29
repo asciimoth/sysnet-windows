@@ -885,7 +885,7 @@ defer rollback to a later milestone.
     - Complete this step when C01-C03, R37-R40 and native foreign-owner sentinel
       tests pass.
 
-2. **Step 25 - Bootstrap process state and apply exclusions.**
+2. **Step 25 - Bootstrap process state and apply exclusions. (Completed)**
 
     - Call Initialize, snapshot processes and register the full snapshot in the
       required order. Preserve usable partial entries and their diagnostics.
