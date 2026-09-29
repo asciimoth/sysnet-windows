@@ -65,6 +65,8 @@ build-windows:
 vulncheck:
     govulncheck ./...
 
+test-win: test-windows-vm test-windows-e2e
+
 test-total: test fuzz test-windows-vm test-windows-e2e
 
 test-release: test-total test-windows-resource test-windows-flow
