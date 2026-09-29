@@ -54,6 +54,80 @@ try {
         $runPattern = '^TestPacketFlow'
         $env:FLOW_ARTIFACT_DIR = $ArtifactDir
         $env:SYSNET_FLOW_EXE = Join-Path (Split-Path $SourceDir -Parent) 'sysnetflow.exe'
+        $sysnetIntegrationExecutable = Join-Path (Split-Path $SourceDir -Parent) `
+            'sysnetintegration.test.exe'
+        if (-not (Test-Path -LiteralPath $sysnetIntegrationExecutable -PathType Leaf)) {
+            throw 'The staged sysnet integration test executable is absent'
+        }
+        $splitConformanceExecutable = Join-Path (Split-Path $SourceDir -Parent) `
+            'splitconformance.test.exe'
+        if (-not (Test-Path -LiteralPath $splitConformanceExecutable -PathType Leaf)) {
+            throw 'The staged split-controller conformance test executable is absent'
+        }
+
+        # Run the pinned controller's complete nine-mode gate before the
+        # sysnet-windows public API gate. Keep its observations separate until
+        # both suites pass, then validate all markers against the same captures.
+        $dependencyArtifacts = Join-Path $ArtifactDir 'dependency-conformance'
+        New-Item -ItemType Directory -Force -Path $dependencyArtifacts | Out-Null
+        $controllerModule = 'github.com/asciimoth/mullvad-split-tunnel-go'
+        $controllerRequirement = Select-String -LiteralPath (Join-Path $SourceDir 'go.mod') `
+            -Pattern ('^\s*' + [regex]::Escape($controllerModule) + '\s+(\S+)')
+        if (@($controllerRequirement).Count -ne 1) {
+            throw 'Cannot resolve the split-controller module version from go.mod'
+        }
+        $controllerVersion = $controllerRequirement.Matches[0].Groups[1].Value
+        $savedFlowArtifactDir = $env:FLOW_ARTIFACT_DIR
+        $env:FLOW_ARTIFACT_DIR = $dependencyArtifacts
+        $savedPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & $splitConformanceExecutable '-test.v' `
+            '-test.run=^TestPacketFlow(Characterization|PolicyTable)$' `
+            '-test.timeout=20m' 2>&1 |
+            Tee-Object -FilePath (Join-Path $dependencyArtifacts 'test-output.log')
+        $dependencyExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $savedPreference
+        $env:FLOW_ARTIFACT_DIR = $savedFlowArtifactDir
+        if ($dependencyExitCode -ne 0) {
+            throw "split-controller nine-mode conformance failed with exit code $dependencyExitCode"
+        }
+        # The dependency gate models its VPN with the physical tunnel link.
+        # Remove the dependency fixture's preferred physical-tunnel routes,
+        # but keep its equal-prefix underlay routes. The public gate adds the
+        # preferred service routes to Wintun. The split driver then moves an
+        # excluded flow to the retained underlay route. High-metric underlay
+        # defaults also keep OutNet directly reachable.
+        $tunnelAdapter = @(Get-NetAdapter | Where-Object MacAddress -eq '52-54-00-12-34-10')
+        $underlayAdapter = @(Get-NetAdapter | Where-Object MacAddress -eq '52-54-00-12-34-11')
+        if ($tunnelAdapter.Count -ne 1 -or $underlayAdapter.Count -ne 1) {
+            throw 'Cannot identify the packet-flow adapters for the public API transition'
+        }
+        foreach ($route in @(
+            @{ Index=$tunnelAdapter[0].ifIndex; Family='IPv4'; Prefix='203.0.113.1/32'; Hop='198.18.0.1' },
+            @{ Index=$tunnelAdapter[0].ifIndex; Family='IPv6'; Prefix='2001:db8:ffff::1/128'; Hop='fd00:18:0::1' }
+        )) {
+            $owned = @(Get-NetRoute -PolicyStore ActiveStore `
+                -InterfaceIndex $route.Index `
+                -AddressFamily $route.Family -DestinationPrefix $route.Prefix |
+                Where-Object NextHop -eq $route.Hop)
+            if ($owned.Count -gt 1) { throw "Dependency route $($route.Prefix) is duplicated" }
+            if ($owned.Count -eq 1) { $owned[0] | Remove-NetRoute -Confirm:$false }
+        }
+        foreach ($route in @(
+            @{ Family='IPv4'; Prefix='0.0.0.0/0'; Hop='198.18.1.1' },
+            @{ Family='IPv6'; Prefix='::/0'; Hop='fd00:18:1::1' }
+        )) {
+            New-NetRoute -PolicyStore ActiveStore `
+                -InterfaceIndex $underlayAdapter[0].ifIndex `
+                -AddressFamily $route.Family -DestinationPrefix $route.Prefix `
+                -NextHop $route.Hop -RouteMetric 5000 | Out-Null
+        }
+        [ordered]@{
+            module=$controllerModule
+            version=$controllerVersion
+            modes=9
+            tests=@('TestPacketFlowPolicyTable', 'TestPacketFlowCharacterization')
+        } | ConvertTo-Json | Set-Content (Join-Path $ArtifactDir 'dependency-conformance-passed.json')
     }
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -66,13 +140,36 @@ try {
             "-coverprofile=$coverProfile"
         )
     }
-    & $GoExecutable test -json -count=1 "-tags=$tags" "-run=$runPattern" -p=1 -timeout $timeout `
-        @coverageArguments ./integration 2>&1 |
-        Tee-Object -FilePath (Join-Path $ArtifactDir 'e2e-events.jsonl') |
-        Format-GoTestOutput
+    if ($Flow) {
+        & $GoExecutable tool test2json -t `
+            -p github.com/asciimoth/sysnet-windows/integration `
+            $sysnetIntegrationExecutable '-test.v' "-test.run=$runPattern" `
+            "-test.timeout=$timeout" 2>&1 |
+            Tee-Object -FilePath (Join-Path $ArtifactDir 'e2e-events.jsonl') |
+            Format-GoTestOutput
+    } else {
+        & $GoExecutable test -json -count=1 "-tags=$tags" "-run=$runPattern" -p=1 -timeout $timeout `
+            @coverageArguments ./integration 2>&1 |
+            Tee-Object -FilePath (Join-Path $ArtifactDir 'e2e-events.jsonl') |
+            Format-GoTestOutput
+    }
     $testExitCode = $LASTEXITCODE
     $ErrorActionPreference = $savedPreference
     if ($testExitCode -ne 0) { throw "live-driver tests failed with exit code $testExitCode" }
+    if ($Flow) {
+        $observationInputs = @(
+            (Join-Path $ArtifactDir 'dependency-conformance\packet-flow-observations.jsonl'),
+            (Join-Path $ArtifactDir 'packet-flow-outnet-observations.jsonl'),
+            (Join-Path $ArtifactDir 'packet-flow-public-api-observations.jsonl')
+        )
+        foreach ($input in $observationInputs) {
+            if (-not (Test-Path -LiteralPath $input -PathType Leaf)) {
+                throw "packet observation input is absent: $input"
+            }
+        }
+        Get-Content -LiteralPath $observationInputs |
+            Set-Content (Join-Path $ArtifactDir 'packet-flow-observations.jsonl')
+    }
     $events = @(Get-Content (Join-Path $ArtifactDir 'e2e-events.jsonl') | Where-Object { $_ -match '^\s*\{' } | ConvertFrom-Json)
     $testManifest = Get-Content (Join-Path $PSScriptRoot 'test-manifest.json') -Raw | ConvertFrom-Json
     if ($testManifest.schemaVersion -ne 1) { throw 'Unsupported test manifest schema' }

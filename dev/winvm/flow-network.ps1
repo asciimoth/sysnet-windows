@@ -43,17 +43,20 @@ if ($Role -eq 'Client') {
     New-NetIPAddress -InterfaceIndex $underlay.ifIndex -IPAddress '198.18.1.2' -PrefixLength 24 | Out-Null
     New-NetIPAddress -InterfaceIndex $underlay.ifIndex -IPAddress 'fd00:18:1::2' -PrefixLength 64 | Out-Null
 
+    # The dependency conformance gate starts with a preferred physical tunnel
+    # route. e2e.ps1 removes these two routes before the public Wintun gate.
+    New-NetRoute -InterfaceIndex $tunnel.ifIndex -DestinationPrefix '203.0.113.1/32' `
+        -NextHop '198.18.0.1' -RouteMetric 5 | Out-Null
     New-NetRoute -InterfaceIndex $underlay.ifIndex -DestinationPrefix '203.0.113.1/32' `
         -NextHop '198.18.1.1' -RouteMetric 50 | Out-Null
-    # Underlay discovery requires an Internet-capable candidate. These high
-    # metric defaults make the isolated link eligible without replacing the
-    # management default route.
-    New-NetRoute -InterfaceIndex $underlay.ifIndex -DestinationPrefix '0.0.0.0/0' `
-        -NextHop '198.18.1.1' -RouteMetric 5000 | Out-Null
+    New-NetRoute -InterfaceIndex $tunnel.ifIndex -DestinationPrefix '2001:db8:ffff::1/128' `
+        -NextHop 'fd00:18:0::1' -RouteMetric 5 | Out-Null
     New-NetRoute -InterfaceIndex $underlay.ifIndex -DestinationPrefix '2001:db8:ffff::1/128' `
         -NextHop 'fd00:18:1::1' -RouteMetric 50 | Out-Null
-    New-NetRoute -InterfaceIndex $underlay.ifIndex -DestinationPrefix '::/0' `
-        -NextHop 'fd00:18:1::1' -RouteMetric 5000 | Out-Null
+    # OutDNS discovers these controlled numeric upstreams before the default
+    # TUN replaces its own resolver configuration with the managed proxy.
+    Set-DnsClientServerAddress -InterfaceIndex $underlay.ifIndex `
+        -ServerAddresses @('203.0.113.1', '2001:db8:ffff::1')
 } else {
     New-NetIPAddress -InterfaceIndex $tunnel.ifIndex -IPAddress '198.18.0.1' -PrefixLength 24 | Out-Null
     New-NetIPAddress -InterfaceIndex $tunnel.ifIndex -IPAddress 'fd00:18:0::1' -PrefixLength 64 | Out-Null

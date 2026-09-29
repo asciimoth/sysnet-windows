@@ -311,6 +311,11 @@ if [[ $mode == flow ]]; then
     GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o "$run_dir/flowecho.exe" "$repo_root/cmd/flowecho"
     GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o "$run_dir/tunnelpeer.exe" "$repo_root/cmd/tunnelpeer"
     GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o "$run_dir/sysnetflow.exe" "$repo_root/cmd/sysnetflow"
+    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -tags=winintegration,winflow \
+        -o "$run_dir/sysnetintegration.test.exe" "$repo_root/integration"
+    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -tags=winintegration,winflow \
+        -o "$run_dir/splitconformance.test.exe" \
+        github.com/asciimoth/mullvad-split-tunnel-go/integration
     endpoint_remote="C:/winvm/runs/${run_id//[^A-Za-z0-9-]/}"
     ssh "${endpoint_ssh_opts[@]}" "$endpoint_target" "powershell.exe -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$endpoint_remote'|Out-Null\""
     scp "${endpoint_scp_opts[@]}" "$run_dir/flowecho.exe" "$run_dir/tunnelpeer.exe" "$script_dir/flow-network.ps1" "$endpoint_target:$endpoint_remote/" >/dev/null
@@ -320,7 +325,9 @@ if [[ $mode == flow ]]; then
     guest_remote=${remote//\//\\}
     "$script_dir/tools/qga.py" --socket "$qga" --timeout 60 exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$guest_remote\\source\\dev\\winvm\\flow-network.ps1" -Role Client >"$run_dir/client-network.json"
     "$script_dir/tools/qga.py" --socket "$qga" --timeout 30 exec powershell.exe -NoProfile -Command "Set-NetFirewallProfile -All -Enabled False" >/dev/null
-    scp "${scp_opts[@]}" "$run_dir/sysnetflow.exe" "$target:$remote/" >/dev/null
+    scp "${scp_opts[@]}" "$run_dir/sysnetflow.exe" \
+        "$run_dir/sysnetintegration.test.exe" "$run_dir/splitconformance.test.exe" \
+        "$target:$remote/" >/dev/null
 fi
 stage='test'
 test_timeout=$(jq -r .machine.testTimeoutSeconds "$config_file")

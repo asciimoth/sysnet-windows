@@ -95,6 +95,17 @@ native state, it verifies the recorded WFP objects, driver package and service
 identity, and current driver state. Recovery is bounded and does not loop on a
 Zombie driver. Each call returns all observed cleanup errors.
 
+The packet-flow release gate first runs the pinned controller's nine address
+mode conformance suite. It then creates the default TUN only through `New` and
+`BuildDefaultTun` and tests the IPv4-only, IPv6-only, and dual-stack exclusion
+profiles. Each profile covers included, excluded, newly created descendant, and
+pre-existing IPC-target processes. Each absence assertion has an immediately
+preceding positive control on the opposite captured link. The independent
+validator rejects missing profiles, roles, families, controls, and markers on
+the wrong link. Direct application DNS and the shared Windows DNS Client path
+are separate evidence cases. Shared resolver traffic is attributed to the DNS
+Client and managed proxy path, not to the process that requested the lookup.
+
 ## Local network
 
 `System.LocalNet` supports native TCP and UDP sockets only on IPv4 and IPv6

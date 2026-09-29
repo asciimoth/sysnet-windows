@@ -17,7 +17,10 @@
     "D10-nil-dns-no-leak",
     "E01-included-process-tunnel",
     "E02-excluded-process-underlay",
-    "E03-excluded-descendant-underlay"
+    "E03-excluded-descendant-underlay",
+    "E04-pre-existing-ipc-target-tunnel",
+    "E05-explicit-application-dns-underlay",
+    "E06-shared-windows-dns-client"
   ],
   "entries": [
     {

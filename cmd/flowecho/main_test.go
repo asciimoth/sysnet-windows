@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net"
@@ -123,5 +124,83 @@ func TestEchoRejectsInvalidListenAddress(t *testing.T) {
 	}
 	if err := serveUDP("invalid address"); err == nil || !strings.Contains(err.Error(), "listen UDP") {
 		t.Fatalf("serveUDP: %v", err)
+	}
+}
+
+func TestDNSResponsePreservesQuestionMarkerAndAnswersEachFamily(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		queryType uint16
+		wantSize  uint16
+	}{
+		{name: "A", queryType: 1, wantSize: 4},
+		{name: "AAAA", queryType: 28, wantSize: 16},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			query := []byte{0x73, 0x57, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0,
+				6, 'M', 'A', 'R', 'K', 'E', 'R', 4, 't', 'e', 's', 't', 0,
+				byte(test.queryType >> 8), byte(test.queryType), 0, 1}
+			response, err := dnsResponse(query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response[2]&0x80 == 0 || binary.BigEndian.Uint16(response[6:8]) != 1 {
+				t.Fatalf("DNS response header = %x", response[:12])
+			}
+			if !bytes.Contains(response, []byte("MARKER")) {
+				t.Fatal("DNS response lost the capture marker")
+			}
+			if got := binary.BigEndian.Uint16(response[len(response)-int(test.wantSize)-2:]); got != test.wantSize {
+				t.Fatalf("RDLENGTH = %d, want %d", got, test.wantSize)
+			}
+		})
+	}
+}
+
+func TestDNSResponseRejectsMalformedQueries(t *testing.T) {
+	for _, query := range [][]byte{
+		nil,
+		make([]byte, 12),
+		{0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 64},
+		{0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 3, 'a'},
+		{0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0},
+	} {
+		if response, err := dnsResponse(query); err == nil {
+			t.Fatalf("dnsResponse(%x) = %x, nil", query, response)
+		}
+	}
+}
+
+func TestDNSPortTCPAlsoSupportsDependencyConformanceMarker(t *testing.T) {
+	server, client := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		handleDNSTCP(server)
+		close(done)
+	}()
+	token := []byte("FLOW_00000001")
+	if err := client.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := client.Write(token)
+		writeDone <- err
+	}()
+	reply := make([]byte, len(token))
+	if _, err := io.ReadFull(client, reply); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(reply, token) {
+		t.Fatalf("dependency marker reply = %q, want %q", reply, token)
+	}
+	_ = client.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("DNS TCP marker handler did not stop")
 	}
 }

@@ -3,6 +3,9 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
+	"encoding/json"
 	"net"
 	"strings"
 	"testing"
@@ -58,6 +61,56 @@ func TestFlowCasesHaveUniqueCaptureMarkersAndRequiredPaths(t *testing.T) {
 				t.Errorf("supported operation %q is absent", want)
 			}
 		}
+	}
+}
+
+func TestSplitCaptureTokensAreFixedWidthAndNonoverlapping(t *testing.T) {
+	h := &splitFlow{}
+	tokens := make([]string, 0, 20)
+	for range 20 {
+		tokens = append(tokens, h.token("CONTROL"))
+	}
+	for index, token := range tokens {
+		if len(token) != len("SNW_CONTROL_00000000") {
+			t.Fatalf("token %d length = %d", index, len(token))
+		}
+		for otherIndex, other := range tokens {
+			if index != otherIndex && (strings.Contains(token, other) || strings.Contains(other, token)) {
+				t.Fatalf("tokens overlap: %q and %q", token, other)
+			}
+		}
+	}
+}
+
+func TestDNSQueryContainsStableMarkerAndRejectsInvalidLabels(t *testing.T) {
+	query, err := dnsQuery("735700000001.sysnet-flow.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binary.BigEndian.Uint16(query[:2]) != 0x7357 || !bytes.Contains(query, []byte("735700000001")) {
+		t.Fatalf("DNS query = %x", query)
+	}
+	for _, name := range []string{"", ".invalid", strings.Repeat("x", 64) + ".test"} {
+		if _, err := dnsQuery(name); err == nil {
+			t.Fatalf("dnsQuery(%q) succeeded", name)
+		}
+	}
+}
+
+func TestProcessHelperReportsUnknownOperationWithoutLosingProtocol(t *testing.T) {
+	var input, output bytes.Buffer
+	if err := json.NewEncoder(&input).Encode(processRequest{Operation: "invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := serveProcessRequests(&input, &output); err != nil {
+		t.Fatal(err)
+	}
+	var response processResponse
+	if err := json.NewDecoder(&output).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(response.Error, "unknown helper operation") || response.PID == 0 {
+		t.Fatalf("helper response = %+v", response)
 	}
 }
 

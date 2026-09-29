@@ -82,11 +82,12 @@
     },
     "packet-flow": {
       "requiredTests": [
-        "github.com/asciimoth/sysnet-windows/integration::TestPacketFlowOutNetUnderlay"
+        "github.com/asciimoth/sysnet-windows/integration::TestPacketFlowDependencyConformanceRanFirst",
+        "github.com/asciimoth/sysnet-windows/integration::TestPacketFlowOutNetUnderlay",
+        "github.com/asciimoth/sysnet-windows/integration::TestPacketFlowPublicAPIExclusions"
       ],
       "plannedCases": [
-        "M3 managed DNS packet paths",
-        "M5 executable exclusion packet paths"
+        "M3 managed DNS packet paths"
       ]
     }
   }

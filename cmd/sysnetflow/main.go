@@ -47,11 +47,29 @@ type observation struct {
 
 func main() {
 	output := flag.String("output", "", "JSON-lines observation output")
+	scenario := flag.String("scenario", "outnet", "outnet or split")
+	helper := flag.String("helper", "", "internal packet-flow helper mode")
+	child := flag.String("child", "", "descendant helper executable")
 	flag.Parse()
+	if *helper != "" {
+		if err := runProcessHelper(*helper, *child); err != nil {
+			fatal(err)
+		}
+		return
+	}
 	if *output == "" {
 		fatal(errors.New("output path is required"))
 	}
-	if err := run(*output); err != nil {
+	var err error
+	switch *scenario {
+	case "outnet":
+		err = run(*output)
+	case "split":
+		err = runSplit(*output)
+	default:
+		err = fmt.Errorf("unknown scenario %q", *scenario)
+	}
+	if err != nil {
 		fatal(err)
 	}
 }
@@ -584,6 +602,20 @@ type testTunnel struct {
 }
 
 func startTestTunnel(system *windows.System) (*testTunnel, error) {
+	return startTestTunnelWith(system, func() (tun.Tun, error) {
+		return system.BuildTun(sysnet.TunOpts{
+			TunAddrs: []string{"10.77.0.2/24", "fd77::2/64"},
+			TunRoutes: []string{
+				"0.0.0.0/0", "::/0", "203.0.113.1/32", "2001:db8:ffff::1/128",
+			},
+		})
+	})
+}
+
+// startTestTunnelWith opens the transport before it publishes TUN routes. This
+// order prevents the deliberately simple test transport from recursing into
+// the TUN that it is responsible for draining.
+func startTestTunnelWith(system *windows.System, build func() (tun.Tun, error)) (*testTunnel, error) {
 	local, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(tunnelIPv4, "0"))
 	if err != nil {
 		return nil, err
@@ -596,12 +628,7 @@ func startTestTunnel(system *windows.System) (*testTunnel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open test tunnel transport: %w", err)
 	}
-	device, err := system.BuildTun(sysnet.TunOpts{
-		TunAddrs: []string{"10.77.0.2/24", "fd77::2/64"},
-		TunRoutes: []string{
-			"0.0.0.0/0", "::/0", "203.0.113.1/32", "2001:db8:ffff::1/128",
-		},
-	})
+	device, err := build()
 	if err != nil {
 		_ = transport.Close()
 		return nil, fmt.Errorf("create test TUN: %w", err)

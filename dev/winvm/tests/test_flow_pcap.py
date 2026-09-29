@@ -122,35 +122,81 @@ class FlowPcapTest(unittest.TestCase):
                 self.assertFalse(evidence[0]["packetPathValid"])
 
     def test_accepts_public_api_encapsulation_and_preserves_metadata(self):
-        observations = [
-            {
-                "token": "SYSNET_INCLUDED",
-                "case": "E01-included-process-tunnel",
-                "phase": "public-api",
-                "role": "included",
-                "network": "tcp4",
-                "expectedPath": "tunnel",
-            },
-            {
-                "token": "SYSNET_DESCENDANT",
-                "case": "E03-excluded-descendant-underlay",
-                "phase": "public-api",
-                "role": "descendant",
-                "network": "udp6",
-                "expectedPath": "underlay",
-            },
-        ]
+        observations = []
+        tunnel = bytearray()
+        underlay = bytearray()
+        sequence = 0
+        cases = {
+            "E01-included-process-tunnel": ["tcp4", "udp4", "tcp6", "udp6"],
+            "E02-excluded-process-underlay": ["tcp4", "udp4", "tcp6", "udp6"],
+            "E03-excluded-descendant-underlay": ["tcp4", "udp4", "tcp6", "udp6"],
+            "E04-pre-existing-ipc-target-tunnel": ["tcp4", "udp4", "tcp6", "udp6"],
+            "E05-explicit-application-dns-underlay": ["udp4", "udp6"],
+            "E06-shared-windows-dns-client": ["ip4", "ip6"],
+        }
+        profiles = {
+            "ipv4": {"tcp4", "udp4", "ip4"},
+            "ipv6": {"tcp6", "udp6", "ip6"},
+            "dual": {"tcp4", "udp4", "tcp6", "udp6", "ip4", "ip6"},
+        }
+        for case, networks in cases.items():
+            expected = "tunnel" if case.startswith(("E01", "E04")) else "underlay"
+            for profile, profile_networks in profiles.items():
+                for network in (value for value in networks if value in profile_networks):
+                    sequence += 1
+                    control = f"CONTROL_{sequence:08d}"
+                    token = f"ASSERT_{sequence:08d}"
+                    control_path = "underlay" if expected == "tunnel" else "tunnel"
+                    observations.append({
+                        "token": control, "case": f"CTRL-{sequence}",
+                        "phase": "public-api", "profile": profile, "network": network,
+                        "expectedPath": control_path, "positiveControl": True,
+                    })
+                    observations.append({
+                        "token": token, "case": case, "phase": "public-api",
+                        "profile": profile, "role": "included", "network": network,
+                        "expectedPath": expected, "controlToken": control,
+                        **({"preExistingTarget": True, "requestingRole": "excluded"} if case.startswith("E04") else {}),
+                        **({"limitation": "no per-process attribution"} if case.startswith("E06") else {}),
+                    })
+                    (tunnel if control_path == "tunnel" else underlay).extend(control.encode())
+                    (tunnel if expected == "tunnel" else underlay).extend(token.encode())
         result, evidence = self.run_validator(
             observations,
-            tunnel=b"encapsulated SYSNET_INCLUDED",
-            underlay=b"direct-ip SYSNET_DESCENDANT",
+            tunnel=bytes(tunnel),
+            underlay=bytes(underlay),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(evidence[0]["phase"], "public-api")
-        self.assertEqual(evidence[0]["role"], "included")
-        self.assertEqual(evidence[0]["case"], "E01-included-process-tunnel")
-        self.assertEqual(evidence[1]["network"], "udp6")
+        self.assertTrue(evidence[0]["positiveControl"])
+        self.assertEqual(evidence[1]["case"], "E01-included-process-tunnel")
         self.assertTrue(all(value["packetPathValid"] for value in evidence))
+
+    def test_rejects_public_assertion_without_valid_positive_control(self):
+        cases = [
+            [{"token": "ASSERT", "case": "E01-included-process-tunnel", "phase": "public-api", "network": "tcp4", "expectedPath": "tunnel", "controlToken": "CONTROL"}],
+            [
+                {"token": "CONTROL", "case": "CTRL-1", "phase": "public-api", "network": "tcp4", "expectedPath": "underlay", "positiveControl": True},
+                {"token": "ASSERT", "case": "E02-excluded-process-underlay", "phase": "public-api", "network": "tcp4", "expectedPath": "underlay", "controlToken": "CONTROL"},
+            ],
+        ]
+        for observations in cases:
+            with self.subTest(observations=observations):
+                result, _ = self.run_validator(observations, tunnel=b"ASSERT", underlay=b"CONTROL")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("positive control", result.stderr)
+
+    def test_rejects_public_controls_without_assertions(self):
+        result, _ = self.run_validator(
+            [{
+                "token": "CONTROL", "case": "CTRL-only", "phase": "public-api",
+                "profile": "ipv4", "network": "tcp4", "expectedPath": "tunnel",
+                "positiveControl": True,
+            }],
+            tunnel=b"CONTROL",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing public API coverage", result.stderr)
 
     def test_rejects_empty_manifest(self):
         result, evidence = self.run_validator("\n")

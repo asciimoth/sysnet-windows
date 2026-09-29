@@ -927,7 +927,7 @@ defer rollback to a later milestone.
     - Complete this step when R37-R44 and failure injection at every controller
       transition leave the documented state with no foreign changes.
 
-5. **Step 28 - Prove application path behavior through the public API.**
+5. **Step 28 - Prove application path behavior through the public API. (Completed)**
 
     - Run the controller's nine-mode dependency conformance gate first.
     - Through the sysnet-windows constructor, test an included process, an
