@@ -234,10 +234,15 @@ func makeFlowKey(flow sockowner.FlowTuple) (flowKey, error) {
 		return flowKey{}, sockowner.ErrInvIP
 	}
 	remote, ok := netip.AddrFromSlice(flow.RemoteIP)
-	if !ok || local.Is4() != remote.Is4() {
+	if !ok {
 		return flowKey{}, sockowner.ErrInvIP
 	}
-	return flowKey{proto: flow.Proto, local: local.Unmap(), remote: remote.Unmap(), localPort: flow.LocalPort, remotePort: flow.RemotePort}, nil
+	local = local.Unmap()
+	remote = remote.Unmap()
+	if local.Is4() != remote.Is4() {
+		return flowKey{}, sockowner.ErrInvIP
+	}
+	return flowKey{proto: flow.Proto, local: local, remote: remote, localPort: flow.LocalPort, remotePort: flow.RemotePort}, nil
 }
 
 func classifyLookupError(err error) error {

@@ -191,6 +191,18 @@ func testFlow(port uint16) sockowner.FlowTuple {
 	return sockowner.FlowTuple{Proto: "tcp", LocalIP: net.ParseIP("192.0.2.1"), LocalPort: port, RemoteIP: net.ParseIP("198.51.100.2"), RemotePort: 443}
 }
 
+func TestMakeFlowKeyNormalizesIPv4Representations(t *testing.T) {
+	flow := testFlow(80)
+	flow.LocalIP = flow.LocalIP.To4()
+	key, err := makeFlowKey(flow)
+	if err != nil {
+		t.Fatalf("makeFlowKey() error = %v", err)
+	}
+	if !key.local.Is4() || !key.remote.Is4() {
+		t.Fatalf("normalized addresses = (%s, %s), want IPv4", key.local, key.remote)
+	}
+}
+
 type fakeProcessSource struct {
 	mu            sync.Mutex
 	creation      map[int]time.Time

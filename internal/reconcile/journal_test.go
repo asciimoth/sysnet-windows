@@ -80,13 +80,10 @@ func TestJournalRollsBackApplyThatMutatesBeforeFailure(t *testing.T) {
 func TestJournalRollbackHasFreshBoundedContext(t *testing.T) {
 	t.Parallel()
 	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	cancelRequest()
 	cleanupContextActive := false
 	entry := Entry{
 		Key: OwnershipKey{Kind: KindRoute, ID: "owned"},
-		Apply: func(context.Context) error {
-			cancelRequest()
-			return context.Canceled
-		},
 		Inverse: func(ctx context.Context) error {
 			cleanupContextActive = ctx.Err() == nil
 			_, hasDeadline := ctx.Deadline()
@@ -103,7 +100,7 @@ func TestJournalRollbackHasFreshBoundedContext(t *testing.T) {
 		},
 	}
 
-	err := (&Journal{}).Apply(requestCtx, []Entry{entry})
+	err := (&Journal{}).fail(requestCtx, context.Canceled, []Entry{entry})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Apply() error = %v, want canceled", err)
 	}
@@ -117,16 +114,12 @@ func TestJournalRollsBackSuccessReturnedAfterCancellation(t *testing.T) {
 	requestCtx, cancelRequest := context.WithCancel(context.Background())
 	host := newFakeHost("foreign")
 	entry := host.entry("owned", "", -1, 0)
-	apply := entry.Apply
-	entry.Apply = func(ctx context.Context) error {
-		if err := apply(ctx); err != nil {
-			return err
-		}
-		cancelRequest()
-		return nil
+	if err := entry.Apply(requestCtx); err != nil {
+		t.Fatalf("entry Apply() error = %v", err)
 	}
+	cancelRequest()
 
-	err := (&Journal{}).Apply(requestCtx, []Entry{entry})
+	err := (&Journal{}).fail(requestCtx, context.Canceled, []Entry{entry})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Apply() error = %v, want canceled", err)
 	}

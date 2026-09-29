@@ -67,14 +67,23 @@ func TestWorkerCallbackDoesNotWaitAndCoalesces(t *testing.T) {
 	if !reflect.DeepEqual(first, []Reason{"initial"}) {
 		t.Fatalf("first reasons = %v, want initial", first)
 	}
-	start := time.Now()
-	for _, reason := range []Reason{"route-change", "address-change", "route-change"} {
-		if !worker.Enqueue(reason) {
+	enqueued := make(chan bool, 1)
+	go func() {
+		for _, reason := range []Reason{"route-change", "address-change", "route-change"} {
+			if !worker.Enqueue(reason) {
+				enqueued <- false
+				return
+			}
+		}
+		enqueued <- true
+	}()
+	select {
+	case accepted := <-enqueued:
+		if !accepted {
 			t.Fatal("Enqueue() rejected work before stop")
 		}
-	}
-	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-		t.Fatalf("callback enqueue took %s", elapsed)
+	case <-time.After(time.Second):
+		t.Fatal("Enqueue() waited for the active callback")
 	}
 	close(release)
 	second := <-received

@@ -28,11 +28,14 @@ func TestNativeSocketBinderTCPAndUDP(t *testing.T) {
 		{name: "IPv4", family: FamilyIPv4, path: snapshot.IPv4},
 		{name: "IPv6", family: FamilyIPv6, path: snapshot.IPv6},
 	}
+	tested := 0
 	for _, test := range tests {
+		if test.path == nil {
+			t.Logf("host has no selected %s underlay", test.name)
+			continue
+		}
+		tested++
 		t.Run(test.name, func(t *testing.T) {
-			if test.path == nil {
-				t.Skip("host has no selected underlay for this family")
-			}
 			paths := staticPaths{snapshot: snapshotFor(test.family, *test.path)}
 			binder, err := NewBinder(paths)
 			if err != nil {
@@ -41,6 +44,9 @@ func TestNativeSocketBinderTCPAndUDP(t *testing.T) {
 			t.Run("TCP", func(t *testing.T) { testNativeTCPSource(t, binder, test.family, test.path.Source) })
 			t.Run("UDP", func(t *testing.T) { testNativeUDPSource(t, binder, test.family, test.path.Source) })
 		})
+	}
+	if tested == 0 {
+		t.Fatal("host has no selected underlay")
 	}
 }
 
@@ -111,11 +117,14 @@ func TestN05N08NativeUnconnectedUDPRetainsUnderlayPolicy(t *testing.T) {
 		{name: "IPv4", network: "udp4", path: snapshot.IPv4},
 		{name: "IPv6", network: "udp6", path: snapshot.IPv6},
 	}
+	tested := 0
 	for _, test := range tests {
+		if test.path == nil {
+			t.Logf("host has no selected %s underlay", test.name)
+			continue
+		}
+		tested++
 		t.Run(test.name, func(t *testing.T) {
-			if test.path == nil {
-				t.Skip("host has no selected underlay for this family")
-			}
 			paths := staticPaths{snapshot: snapshot}
 			binder, err := NewBinder(paths)
 			if err != nil {
@@ -153,6 +162,9 @@ func TestN05N08NativeUnconnectedUDPRetainsUnderlayPolicy(t *testing.T) {
 				}
 			}
 		})
+	}
+	if tested == 0 {
+		t.Fatal("host has no selected underlay")
 	}
 }
 

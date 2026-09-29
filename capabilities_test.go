@@ -1122,7 +1122,6 @@ func TestFinalPreflightCloseSupersedesPendingProbe(t *testing.T) {
 
 func TestFinalPreflightTimeoutCannotReplaceNewerProbeFacts(t *testing.T) {
 	t.Parallel()
-	const timeout = 20 * time.Millisecond
 	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
 	busy := unavailableCapability(sysnet.ReasonResourceBusy)
 	started := make(chan struct{})
@@ -1135,12 +1134,12 @@ func TestFinalPreflightTimeoutCannotReplaceNewerProbeFacts(t *testing.T) {
 		case 2:
 			close(started)
 			<-release
-			return capabilityProbeFacts{netIO: available, split: available}
+			return failedProbeFacts(context.DeadlineExceeded)
 		default:
 			return capabilityProbeFacts{netIO: busy, split: available}
 		}
 	})
-	system, err := newSystem(SystemConfig{OperationTimeout: timeout}, systemDependencies{
+	system, err := newSystem(SystemConfig{}, systemDependencies{
 		capabilityCode: implementationSupport{regularTun: true}, capabilityProbe: probe,
 	})
 	if err != nil {
@@ -1157,10 +1156,10 @@ func TestFinalPreflightTimeoutCannotReplaceNewerProbeFacts(t *testing.T) {
 	if _, err := system.finalPreflight(); err != nil {
 		t.Fatalf("newer finalPreflight() error = %v", err)
 	}
+	close(release)
 	if err := <-oldErr; !isSupersededProbeError(err) {
 		t.Fatalf("old finalPreflight() error = %v, want superseded probe", err)
 	}
-	close(release)
 
 	key := operationKey(sysnet.TargetTun, sysnet.OpCreate, sysnet.FamilyIPv4)
 	capability := system.Capabilities().Operation(key)
