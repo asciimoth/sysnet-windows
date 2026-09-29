@@ -71,13 +71,11 @@
         "github.com/asciimoth/sysnet-windows/integration::TestT10T12NativeWintunPacketContractAndMTUReport",
         "github.com/asciimoth/sysnet-windows/integration::TestT13T15NativeWintunCloseContract",
         "github.com/asciimoth/sysnet-windows/integration::TestT16T24NativeRegularTunPublicLifecycle",
+        "github.com/asciimoth/sysnet-windows/integration::TestD13D20NativeDNSConfigurationAndRestoration",
         "github.com/asciimoth/sysnet-windows/integration::TestNativeRegularTunEnabledFamilyFloorCoversIPv6Mutations",
         "github.com/asciimoth/sysnet-windows/integration::TestNativeRegularTunMutatesAddressesWithinOwnedSubnet"
       ],
-      "plannedCases": [
-        "M3 DNS configuration restoration",
-        "M5 split-driver lifecycle and reset recovery"
-      ]
+      "plannedCases": ["M5 split-driver lifecycle and reset recovery"]
     },
     "packet-flow": {
       "requiredTests": [

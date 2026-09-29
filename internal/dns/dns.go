@@ -8,22 +8,265 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"time"
 
+	"github.com/asciimoth/gonnect"
 	gonnectdns "github.com/asciimoth/gonnect/dns"
+	"github.com/asciimoth/sysnet-windows/internal/underlay"
 )
 
 // State records resolver mode and server values for exact restoration.
 type State struct {
-	DHCP    bool
-	Servers []netip.Addr
+	AutomaticIPv4 bool
+	AutomaticIPv6 bool
+	Servers       []netip.Addr
 }
 
 // Configurator changes resolver state for one interface.
 type Configurator interface {
 	Read(context.Context, uint64) (State, error)
 	Apply(context.Context, uint64, State) error
+}
+
+// CloneState returns a state value which does not share its server slice with
+// the input. DNS state is retained in a recovery journal and must stay stable
+// when a native reader reuses its storage.
+func CloneState(state State) State {
+	state.Servers = append([]netip.Addr(nil), state.Servers...)
+	return state
+}
+
+// EqualState reports semantic equality. Server order is significant because
+// Windows uses it as resolver preference order.
+func EqualState(left, right State) bool {
+	return left.AutomaticIPv4 == right.AutomaticIPv4 &&
+		left.AutomaticIPv6 == right.AutomaticIPv6 &&
+		slices.Equal(familyServers(left.Servers, true), familyServers(right.Servers, true)) &&
+		slices.Equal(familyServers(left.Servers, false), familyServers(right.Servers, false))
+}
+
+func familyServers(servers []netip.Addr, ipv4 bool) []netip.Addr {
+	result := make([]netip.Addr, 0, len(servers))
+	for _, server := range servers {
+		if server.Is4() == ipv4 {
+			result = append(result, server)
+		}
+	}
+	return result
+}
+
+// ValidateState rejects values which cannot be restored without changing
+// their meaning. Automatic state carries observed effective servers for
+// upstream discovery, but Apply restores the automatic mode instead of those
+// values.
+func ValidateState(state State) error {
+	for _, server := range state.Servers {
+		if !server.IsValid() || server.IsUnspecified() || server.Zone() != "" || server.Is4In6() {
+			return errors.New("DNS state contains an invalid server address")
+		}
+	}
+	if !state.AutomaticIPv4 && !hasServerFamily(state.Servers, true) {
+		return errors.New("static IPv4 DNS state has no IPv4 server")
+	}
+	if !state.AutomaticIPv6 && !hasServerFamily(state.Servers, false) {
+		return errors.New("static IPv6 DNS state has no IPv6 server")
+	}
+	return nil
+}
+
+func hasServerFamily(servers []netip.Addr, ipv4 bool) bool {
+	for _, server := range servers {
+		if server.Is4() == ipv4 {
+			return true
+		}
+	}
+	return false
+}
+
+// WithProxy returns the full interface state which keeps the other address
+// family's DNS mode and values and makes proxy the only static server for its
+// own family.
+func WithProxy(prior State, proxy netip.Addr) State {
+	result := CloneState(prior)
+	result.Servers = slices.DeleteFunc(result.Servers, func(server netip.Addr) bool {
+		return server.Is4() == proxy.Is4()
+	})
+	result.Servers = append(result.Servers, proxy)
+	if proxy.Is4() {
+		result.AutomaticIPv4 = false
+	} else {
+		result.AutomaticIPv6 = false
+	}
+	return result
+}
+
+// UpstreamProvider discovers numeric DNS endpoints from the currently selected
+// underlays for every request. It never uses the host resolver, which prevents
+// recursion after the managed proxy becomes the Windows resolver.
+type UpstreamProvider struct {
+	paths        interface{ Snapshot() underlay.Snapshot }
+	configurator Configurator
+	dial         gonnect.Dial
+	timeout      time.Duration
+	requests     chan gonnectdns.Request
+	done         chan struct{}
+	limit        chan struct{}
+
+	mu       sync.RWMutex
+	excluded map[netip.Addr]struct{}
+	close    sync.Once
+	workers  sync.WaitGroup
+}
+
+// NewUpstreamProvider creates an ownership-aware outbound DNS transport. A nil
+// configurator is accepted so systems without the native API fail individual
+// queries with a useful error instead of using an unrestricted resolver.
+func NewUpstreamProvider(
+	paths interface{ Snapshot() underlay.Snapshot },
+	configurator Configurator,
+	dial gonnect.Dial,
+	timeout time.Duration,
+) (*UpstreamProvider, error) {
+	if paths == nil || dial == nil {
+		return nil, errors.New("create outbound DNS without underlay policy")
+	}
+	if timeout <= 0 {
+		timeout = defaultRequestTimeout
+	}
+	p := &UpstreamProvider{
+		paths: paths, configurator: configurator, dial: dial, timeout: timeout,
+		requests: make(chan gonnectdns.Request), done: make(chan struct{}),
+		limit:    make(chan struct{}, maxConcurrentRequests),
+		excluded: make(map[netip.Addr]struct{}),
+	}
+	p.workers.Add(1)
+	go p.run()
+	return p, nil
+}
+
+func (p *UpstreamProvider) Requests() chan<- gonnectdns.Request { return p.requests }
+
+// SetExcluded replaces the managed proxy addresses which must not become
+// upstreams. It is safe to call while queries are active.
+func (p *UpstreamProvider) SetExcluded(addresses ...netip.Addr) {
+	next := make(map[netip.Addr]struct{}, len(addresses))
+	for _, address := range addresses {
+		if address.IsValid() {
+			next[address.Unmap()] = struct{}{}
+		}
+	}
+	p.mu.Lock()
+	p.excluded = next
+	p.mu.Unlock()
+}
+
+func (p *UpstreamProvider) Close() error {
+	p.close.Do(func() { close(p.done) })
+	p.workers.Wait()
+	return nil
+}
+
+func (p *UpstreamProvider) run() {
+	defer p.workers.Done()
+	for {
+		select {
+		case <-p.done:
+			return
+		case request := <-p.requests:
+			select {
+			case p.limit <- struct{}{}:
+			case <-p.done:
+				return
+			}
+			p.workers.Add(1)
+			go p.query(request)
+		}
+	}
+}
+
+func (p *UpstreamProvider) query(request gonnectdns.Request) {
+	defer p.workers.Done()
+	defer func() { <-p.limit }()
+	ctx := request.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	servers, err := p.upstreams(ctx)
+	if err != nil {
+		replyDNS(request, nil, err)
+		return
+	}
+	client := gonnectdns.NewClientWithOptions(p.dial, nil, nil,
+		gonnectdns.ClientOptions{RequestTimeout: p.timeout}, serverURLs(servers)...)
+	response, err := gonnectdns.Query(ctx, client, request.Message)
+	closeErr := client.Close()
+	replyDNS(request, response, errors.Join(err, closeErr))
+}
+
+func (p *UpstreamProvider) upstreams(ctx context.Context) ([]netip.Addr, error) {
+	if p.configurator == nil {
+		return nil, errors.New("windows DNS configurator is not available")
+	}
+	snapshot := p.paths.Snapshot()
+	luidSeen := make(map[uint64]struct{}, 2)
+	result := make([]netip.Addr, 0, 4)
+	for _, path := range []*underlay.Path{snapshot.IPv4, snapshot.IPv6} {
+		if path == nil {
+			continue
+		}
+		if _, found := luidSeen[path.InterfaceLUID]; found {
+			continue
+		}
+		luidSeen[path.InterfaceLUID] = struct{}{}
+		state, err := p.configurator.Read(ctx, path.InterfaceLUID)
+		if err != nil {
+			return nil, errors.Join(errors.New("read underlay DNS state"), err)
+		}
+		for _, server := range state.Servers {
+			server = server.Unmap()
+			if !p.allowed(server) || slices.Contains(result, server) {
+				continue
+			}
+			result = append(result, server)
+		}
+	}
+	if len(result) == 0 {
+		return nil, gonnectdns.ErrNoUpstream
+	}
+	return result, nil
+}
+
+func (p *UpstreamProvider) allowed(server netip.Addr) bool {
+	if !server.IsValid() || server.IsUnspecified() || server.Zone() != "" || server.Is4In6() {
+		return false
+	}
+	p.mu.RLock()
+	_, excluded := p.excluded[server]
+	p.mu.RUnlock()
+	return !excluded
+}
+
+func serverURLs(servers []netip.Addr) []string {
+	result := make([]string, 0, len(servers))
+	for _, server := range servers {
+		result = append(result, "udp://"+net.JoinHostPort(server.String(), "53"))
+	}
+	return result
+}
+
+func replyDNS(request gonnectdns.Request, message *gonnectdns.Message, err error) {
+	ctx := request.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case request.Reply <- gonnectdns.Response{Message: message, Err: err}:
+	case <-ctx.Done():
+	}
 }
 
 const (

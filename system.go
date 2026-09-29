@@ -13,6 +13,7 @@ import (
 	"github.com/asciimoth/gonnect/sysnet"
 	"github.com/asciimoth/gonnect/tun"
 	internalallocator "github.com/asciimoth/sysnet-windows/internal/allocator"
+	internaldns "github.com/asciimoth/sysnet-windows/internal/dns"
 	"github.com/asciimoth/sysnet-windows/internal/reconcile"
 	"github.com/asciimoth/sysnet-windows/internal/underlay"
 )
@@ -33,6 +34,7 @@ type System struct {
 	publicAllocator *systemAllocator
 	underlayMonitor *underlay.Monitor
 	outDNS          dns.Interface
+	upstreamDNS     *internaldns.UpstreamProvider
 	outNet          gonnect.Network
 	localNet        gonnect.Network
 	underlayOwnedMu sync.RWMutex

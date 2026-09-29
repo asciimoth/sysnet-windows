@@ -20,6 +20,7 @@ import (
 	"github.com/asciimoth/gonnect/sysnet"
 	gtun "github.com/asciimoth/gonnect/tun"
 	sysnetwindows "github.com/asciimoth/sysnet-windows"
+	internaldns "github.com/asciimoth/sysnet-windows/internal/dns"
 	"github.com/asciimoth/sysnet-windows/internal/netio"
 	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
 	"golang.org/x/sys/windows"
@@ -220,6 +221,51 @@ func TestT13T15NativeWintunCloseContract(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Events did not close")
+	}
+}
+
+func TestD13D20NativeDNSConfigurationAndRestoration(t *testing.T) {
+	device := createNativeTun(t, "dns-state")
+	luid := device.Metadata().LUID
+	configurator := internaldns.NativeConfigurator{}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	prior, err := configurator.Read(ctx, luid)
+	if err != nil {
+		t.Fatalf("read prior DNS state: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cleanupCancel()
+		if err := configurator.Apply(cleanupCtx, luid, prior); err != nil {
+			t.Errorf("restore DNS state during cleanup: %v", err)
+		}
+	})
+
+	proxy := netip.MustParseAddr("192.0.2.53")
+	applied := internaldns.WithProxy(prior, proxy)
+	if err := configurator.Apply(ctx, luid, applied); err != nil {
+		t.Fatalf("apply DNS state: %v", err)
+	}
+	// Read through winipcfg instead of NativeConfigurator to independently
+	// confirm that Windows exposes the requested effective server.
+	servers, err := winipcfg.LUID(luid).DNS()
+	if err != nil {
+		t.Fatalf("read independent DNS snapshot: %v", err)
+	}
+	if !slices.Contains(servers, proxy) {
+		t.Fatalf("effective DNS servers = %v, want %v", servers, proxy)
+	}
+
+	if err := configurator.Apply(ctx, luid, prior); err != nil {
+		t.Fatalf("restore prior DNS state: %v", err)
+	}
+	restored, err := configurator.Read(ctx, luid)
+	if err != nil {
+		t.Fatalf("read restored DNS state: %v", err)
+	}
+	if !internaldns.EqualState(restored, prior) {
+		t.Fatalf("restored DNS state = %+v, want %+v", restored, prior)
 	}
 }
 

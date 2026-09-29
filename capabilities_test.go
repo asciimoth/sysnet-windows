@@ -193,7 +193,7 @@ func TestDefaultTunAndDNSProviderCapabilitiesRequireProxyFactory(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			report := buildCapabilityReport(defaultNormalizedSystemConfig(), currentImplementationSupport(), capabilityProbeFacts{
-				netIO: available, dnsProxy: test.fact,
+				netIO: available, dnsProxy: test.fact, dnsConfig: available,
 			}, lifecycleReady)
 			for _, operation := range []sysnet.Operation{sysnet.OpCreate, sysnet.OpDNSProvider} {
 				got := report.Operation(sysnet.OperationKey{
@@ -201,6 +201,37 @@ func TestDefaultTunAndDNSProviderCapabilitiesRequireProxyFactory(t *testing.T) {
 				})
 				if got.State != test.state {
 					t.Fatalf("%s capability = %+v, want state %v", operation, got, test.state)
+				}
+			}
+		})
+	}
+}
+
+func TestDNSCapabilitiesRequireConfiguratorAndUnderlay(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	missing := missingDependencyCapability("Windows DNS configurator is not configured")
+	for _, test := range []struct {
+		name       string
+		dnsConfig  sysnet.Capability
+		want       sysnet.CapabilityState
+		wantReason sysnet.CapabilityReason
+	}{
+		{name: "available", dnsConfig: available, want: sysnet.CapabilityAvailable},
+		{name: "missing", dnsConfig: missing, want: sysnet.CapabilityUnavailable, wantReason: sysnet.ReasonMissingDependency},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			report := buildCapabilityReport(defaultNormalizedSystemConfig(), currentImplementationSupport(), capabilityProbeFacts{
+				netIO: available, underlay: available, dnsProxy: available, dnsConfig: test.dnsConfig,
+			}, lifecycleReady)
+			for _, key := range []sysnet.OperationKey{
+				{Target: sysnet.TargetDefaultTun, Operation: sysnet.OpDNSConfigure, Family: sysnet.FamilyIPv4},
+				{Target: sysnet.TargetOutDNS, Operation: sysnet.OpQueryUDP, Family: sysnet.FamilyIPv4},
+				{Target: sysnet.TargetOutDNS, Operation: sysnet.OpQueryTCP, Family: sysnet.FamilyIPv6},
+			} {
+				got := report.Operation(key)
+				if got.State != test.want || test.wantReason != "" && !containsReason(got.Reasons, test.wantReason) {
+					t.Errorf("%+v capability = %+v, want state %v reason %q", key, got, test.want, test.wantReason)
 				}
 			}
 		})

@@ -51,6 +51,11 @@ func (d systemDependencies) constrainCapabilityFacts(facts capabilityProbeFacts)
 	} else if !capabilityFactSet(facts.dnsProxy) {
 		facts.dnsProxy = sysnet.Capability{State: sysnet.CapabilityAvailable}
 	}
+	if d.dnsConfigurator == nil {
+		facts.dnsConfig = missingDependencyCapability("Windows DNS configurator is not configured")
+	} else if !capabilityFactSet(facts.dnsConfig) {
+		facts.dnsConfig = sysnet.Capability{State: sysnet.CapabilityAvailable}
+	}
 	return facts
 }
 

@@ -35,6 +35,7 @@ func nativeDependencies() systemDependencies {
 		netIO:            netIO,
 		allocationReader: reader,
 		underlay:         underlay.NativeSource{},
+		dnsConfigurator:  internaldns.NativeConfigurator{},
 		dnsProxyFactory:  internaldns.NativeProxyFactory{},
 		capabilityProbe:  nativeCapabilityProbe{reader: reader},
 	}
@@ -70,6 +71,7 @@ func (p nativeCapabilityProbe) Probe(ctx context.Context) capabilityProbeFacts {
 		tunFactory: tunFactoryCapability,
 		netIO:      netIOCapability,
 		underlay:   netIOCapability.Clone(),
+		dnsConfig:  netIOCapability.Clone(),
 		split: sysnet.Capability{
 			State:   sysnet.CapabilityUnknown,
 			Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeNotRun},

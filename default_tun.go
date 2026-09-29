@@ -29,6 +29,8 @@ type defaultTun struct {
 	reservationID string
 	retired       atomic.Bool
 	dnsProxy      internaldns.ManagedProxy
+	dnsPrior      internaldns.State
+	dnsApplied    internaldns.State
 }
 
 // SetDNS atomically replaces the provider used by this TUN's local proxy. A nil
@@ -48,7 +50,7 @@ func (t *defaultTun) Close() error {
 }
 
 func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefaultTun) (sysnet.DefaultTun, error) {
-	if s.dependencies.tunFactory == nil || s.dependencies.netIO == nil || s.dependencies.dnsProxyFactory == nil || s.underlayMonitor == nil {
+	if s.dependencies.tunFactory == nil || s.dependencies.netIO == nil || s.dependencies.dnsConfigurator == nil || s.dependencies.dnsProxyFactory == nil || s.underlayMonitor == nil {
 		return nil, stateValidationError(sysnet.ReasonMissingDependency, "default TUN dependencies are not configured")
 	}
 	if len(desired.excludes) != 0 {
@@ -235,24 +237,55 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 		if err := s.dependencies.netIO.Verify(ctx, result.interfaceID(), applied); err != nil {
 			return cleanupNew(err)
 		}
-		// Bind both transports after the address is usable and before publishing
-		// default routes. Step 18 inserts OS DNS configuration after this entry.
+		// Bind both transports and apply the resolver before publishing default
+		// routes. The inverse restores only state that still exactly matches this
+		// System's write, so an external change is never overwritten.
 		dnsEntry := reconcile.Entry{
 			Key: dnsKey,
-			Apply: func(context.Context) error {
+			Apply: func(ctx context.Context) error {
 				proxy, proxyErr := s.dependencies.dnsProxyFactory.Create(desired.dnsIP, s.config.operationTimeout)
-				if proxyErr == nil {
-					result.dnsProxy = proxy
+				if proxyErr != nil {
+					return proxyErr
 				}
-				return proxyErr
+				result.dnsProxy = proxy
+				prior, readErr := s.dependencies.dnsConfigurator.Read(ctx, result.metadata.LUID)
+				if readErr != nil {
+					return fmt.Errorf("read previous DNS state: %w", readErr)
+				}
+				result.dnsPrior = internaldns.CloneState(prior)
+				result.dnsApplied = internaldns.WithProxy(result.dnsPrior, desired.dnsIP)
+				if applyErr := s.dependencies.dnsConfigurator.Apply(ctx, result.metadata.LUID, result.dnsApplied); applyErr != nil {
+					return fmt.Errorf("apply managed DNS state: %w", applyErr)
+				}
+				current, readErr := s.dependencies.dnsConfigurator.Read(ctx, result.metadata.LUID)
+				if readErr != nil {
+					return fmt.Errorf("read back managed DNS state: %w", readErr)
+				}
+				if !internaldns.EqualState(current, result.dnsApplied) {
+					return fmt.Errorf("managed DNS readback = %+v, want %+v", current, result.dnsApplied)
+				}
+				if s.upstreamDNS != nil {
+					s.upstreamDNS.SetExcluded(desired.dnsIP)
+				}
+				return nil
 			},
-			Inverse: func(context.Context) error {
+			Inverse: func(ctx context.Context) error {
 				if result == nil || result.dnsProxy == nil {
 					return nil
 				}
-				return result.dnsProxy.Close()
+				current, readErr := s.dependencies.dnsConfigurator.Read(ctx, result.metadata.LUID)
+				var restoreErr error
+				if readErr != nil {
+					restoreErr = fmt.Errorf("read DNS state before restore: %w", readErr)
+				} else if internaldns.EqualState(current, result.dnsApplied) {
+					restoreErr = s.dependencies.dnsConfigurator.Apply(ctx, result.metadata.LUID, result.dnsPrior)
+				}
+				if s.upstreamDNS != nil {
+					s.upstreamDNS.SetExcluded()
+				}
+				return errors.Join(restoreErr, result.dnsProxy.Close())
 			},
-			Verify: func(_ context.Context, expected reconcile.ExpectedState) error {
+			Verify: func(ctx context.Context, expected reconcile.ExpectedState) error {
 				if result == nil || result.dnsProxy == nil {
 					if expected == reconcile.ExpectedUndone {
 						return nil
@@ -261,6 +294,15 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 				}
 				if result.dnsProxy.Closed() == (expected == reconcile.ExpectedApplied) {
 					return errors.New("default TUN DNS proxy state does not match journal state")
+				}
+				if expected == reconcile.ExpectedApplied {
+					current, err := s.dependencies.dnsConfigurator.Read(ctx, result.metadata.LUID)
+					if err != nil {
+						return err
+					}
+					if !internaldns.EqualState(current, result.dnsApplied) {
+						return errors.New("managed DNS state changed before publication")
+					}
 				}
 				return nil
 			},

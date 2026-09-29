@@ -29,7 +29,8 @@ func TestOutNetCapabilityRequiresSelectedFamily(t *testing.T) {
 		}},
 	}}}
 	system, err := newSystem(SystemConfig{}, systemDependencies{
-		underlay: source,
+		underlay:        source,
+		dnsConfigurator: newFakeDNSConfigurator(),
 		capabilityProbe: staticCapabilityProbe{facts: capabilityProbeFacts{
 			underlay: available,
 		}},
@@ -58,8 +59,9 @@ func TestDefaultTunCapabilityRequiresSelectedFamily(t *testing.T) {
 	t.Parallel()
 	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
 	system, err := newSystem(SystemConfig{}, systemDependencies{
-		underlay:       staticUnderlaySource{candidates: []underlay.Candidate{outNetCandidate(false)}},
-		capabilityCode: implementationSupport{defaultTun: true, defaultTunDual: true},
+		underlay:        staticUnderlaySource{candidates: []underlay.Candidate{outNetCandidate(false)}},
+		dnsConfigurator: newFakeDNSConfigurator(),
+		capabilityCode:  implementationSupport{defaultTun: true, defaultTunDual: true},
 		capabilityProbe: staticCapabilityProbe{facts: capabilityProbeFacts{
 			netIO: available, underlay: available,
 		}},
@@ -157,7 +159,8 @@ func TestOutNetCapabilitiesFollowLiveUnderlayChanges(t *testing.T) {
 func newOutNetCapabilitySystem(t *testing.T, source underlay.Source) *System {
 	t.Helper()
 	system, err := newSystem(SystemConfig{}, systemDependencies{
-		underlay: source,
+		underlay:        source,
+		dnsConfigurator: newFakeDNSConfigurator(),
 		capabilityProbe: staticCapabilityProbe{facts: capabilityProbeFacts{
 			underlay: sysnet.Capability{State: sysnet.CapabilityAvailable},
 		}},

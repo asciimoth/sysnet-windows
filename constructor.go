@@ -3,13 +3,11 @@ package windows
 import (
 	"context"
 	"errors"
-	"net"
 	"strings"
-	"time"
 
 	"github.com/asciimoth/gonnect"
-	"github.com/asciimoth/gonnect/dns"
 	internalallocator "github.com/asciimoth/sysnet-windows/internal/allocator"
+	internaldns "github.com/asciimoth/sysnet-windows/internal/dns"
 	internalnetwork "github.com/asciimoth/sysnet-windows/internal/network"
 	"github.com/asciimoth/sysnet-windows/internal/reconcile"
 	"github.com/asciimoth/sysnet-windows/internal/underlay"
@@ -88,10 +86,9 @@ func (s *System) buildLocalNetwork() error {
 }
 
 // buildOutboundNetwork connects the selected-underlay monitor to the mandatory
-// socket binder. The temporary resolver provider uses the host's current DNS
-// server list, but its UDP and TCP transports use the bound network. Step 19
-// replaces server discovery with ownership-aware original-DNS snapshots before
-// managed DNS takeover is enabled.
+// socket binder. OutDNS reads numeric servers from the selected underlay and
+// uses bound sockets. It does not call the host resolver because that resolver
+// can point back to the managed proxy after a default TUN becomes active.
 func (s *System) buildOutboundNetwork() error {
 	binder, err := internalnetwork.NewBinder(s.underlayMonitor)
 	if err != nil {
@@ -104,14 +101,13 @@ func (s *System) buildOutboundNetwork() error {
 	if err != nil {
 		return err
 	}
-	resolver := &net.Resolver{
-		PreferGo:     true,
-		StrictErrors: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			return bound.Dial(ctx, network, address)
-		},
+	provider, err := internaldns.NewUpstreamProvider(
+		s.underlayMonitor, s.dependencies.dnsConfigurator,
+		bound.Dial, s.config.operationTimeout,
+	)
+	if err != nil {
+		return err
 	}
-	provider := dns.NewResolverProvider(resolver, time.Minute, nil)
 	releaseProvider, err := s.trackResource(provider)
 	if err != nil {
 		return errors.Join(err, provider.Close())
@@ -125,6 +121,7 @@ func (s *System) buildOutboundNetwork() error {
 		return errors.Join(err, closeErr)
 	}
 	s.outDNS = provider
+	s.upstreamDNS = provider
 	s.outNet = outbound
 	return nil
 }

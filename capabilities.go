@@ -64,6 +64,8 @@ type implementationSupport struct {
 	outNet                  bool
 	localNet                bool
 	dnsProxy                bool
+	dnsConfigure            bool
+	outDNS                  bool
 }
 
 func currentImplementationSupport() implementationSupport {
@@ -84,6 +86,8 @@ func currentImplementationSupport() implementationSupport {
 		outNet:                  true,
 		localNet:                true,
 		dnsProxy:                true,
+		dnsConfigure:            true,
+		outDNS:                  true,
 	}
 }
 
@@ -94,6 +98,7 @@ type capabilityProbeFacts struct {
 	split      sysnet.Capability
 	underlay   sysnet.Capability
 	dnsProxy   sysnet.Capability
+	dnsConfig  sysnet.Capability
 }
 
 func initialProbeFacts() capabilityProbeFacts {
@@ -104,7 +109,7 @@ func initialProbeFacts() capabilityProbeFacts {
 	return capabilityProbeFacts{
 		allocation: unknown.Clone(), tunFactory: unknown.Clone(),
 		netIO: unknown.Clone(), split: unknown.Clone(),
-		underlay: unknown.Clone(), dnsProxy: unknown.Clone(),
+		underlay: unknown.Clone(), dnsProxy: unknown.Clone(), dnsConfig: unknown.Clone(),
 	}
 }
 
@@ -121,7 +126,7 @@ func failedProbeFacts(err error) capabilityProbeFacts {
 	return capabilityProbeFacts{
 		allocation: unknown.Clone(), tunFactory: unknown.Clone(),
 		netIO: unknown.Clone(), split: unknown.Clone(),
-		underlay: unknown.Clone(), dnsProxy: unknown.Clone(),
+		underlay: unknown.Clone(), dnsProxy: unknown.Clone(), dnsConfig: unknown.Clone(),
 	}
 }
 
@@ -202,13 +207,14 @@ func buildCapabilityReport(
 		base := familyCapability(implementedCapability(implemented), config, family)
 		base = dependentCapability(base, facts.netIO)
 		base = dependentCapability(base, dnsProxyCapability(facts))
+		base = dependentCapability(base, dnsConfigCapability(facts))
 		base = lifecycleCapability(base, state)
 		report.Operations = append(report.Operations,
 			operationCapability(sysnet.TargetDefaultTun, sysnet.OpCreate, family, base),
 			operationCapability(sysnet.TargetDefaultTun, sysnet.OpCreateNamed, family,
-				lifecycleCapability(dependentCapability(dependentCapability(
+				lifecycleCapability(dependentCapability(dependentCapability(dependentCapability(
 					familyCapability(implementedCapability(implemented && support.defaultTunNamed), config, family), facts.netIO,
-				), dnsProxyCapability(facts)), state)),
+				), dnsProxyCapability(facts)), dnsConfigCapability(facts)), state)),
 			operationCapability(sysnet.TargetDefaultTun, sysnet.OpSourceRoutes, family,
 				unsupported(sysnet.ReasonNotImplemented, "preferred-source routes are not implemented")),
 		)
@@ -249,7 +255,9 @@ func networkOperationCatalog(config normalizedSystemConfig, support implementati
 		operationCapability(sysnet.TargetDefaultTun, sysnet.OpSetMTU, sysnet.FamilyNone, notImplemented),
 		operationCapability(sysnet.TargetDefaultTun, sysnet.OpRename, sysnet.FamilyNone, notImplemented),
 		operationCapability(sysnet.TargetOutNet, sysnet.OpResolve, sysnet.FamilyNone,
-			lifecycleCapability(dependentCapability(implementedCapability(support.outNet), facts.underlay), state)),
+			lifecycleCapability(dependentCapability(dependentCapability(
+				implementedCapability(support.outNet), facts.underlay,
+			), dnsConfigCapability(facts)), state)),
 		operationCapability(sysnet.TargetOutNet, sysnet.OpInterfaces, sysnet.FamilyNone,
 			lifecycleCapability(dependentCapability(implementedCapability(support.outNet), facts.underlay), state)),
 		operationCapability(sysnet.TargetLocalNet, sysnet.OpResolve, sysnet.FamilyNone,
@@ -260,12 +268,20 @@ func networkOperationCatalog(config normalizedSystemConfig, support implementati
 	for _, operation := range []sysnet.Operation{
 		sysnet.OpSetAddresses, sysnet.OpAddAddress, sysnet.OpGetAddresses,
 		sysnet.OpSetRoutes, sysnet.OpAddRoute, sysnet.OpGetRoutes,
-		sysnet.OpReconfigureInPlace, sysnet.OpDNSConfigure,
+		sysnet.OpReconfigureInPlace,
 		sysnet.OpDNSPort53Exclusive, sysnet.OpDNSSystemExclusive,
 	} {
 		for _, family := range families {
 			operations = append(operations, operationCapability(sysnet.TargetDefaultTun, operation, family, notImplemented))
 		}
+	}
+	for _, family := range families {
+		operations = append(operations, operationCapability(
+			sysnet.TargetDefaultTun, sysnet.OpDNSConfigure, family,
+			lifecycleCapability(dependentCapability(
+				familyCapability(implementedCapability(support.dnsConfigure), config, family), dnsConfigCapability(facts),
+			), state),
+		))
 	}
 	for _, family := range families {
 		operations = append(operations, operationCapability(
@@ -300,7 +316,11 @@ func networkOperationCatalog(config normalizedSystemConfig, support implementati
 	}
 	for _, operation := range []sysnet.Operation{sysnet.OpQueryUDP, sysnet.OpQueryTCP} {
 		for _, family := range []sysnet.AddressFamily{sysnet.FamilyIPv4, sysnet.FamilyIPv6} {
-			operations = append(operations, operationCapability(sysnet.TargetOutDNS, operation, family, notImplemented))
+			capability := familyCapability(implementedCapability(support.outDNS), config, family)
+			capability = dependentCapability(dependentCapability(capability, facts.underlay), dnsConfigCapability(facts))
+			operations = append(operations, operationCapability(
+				sysnet.TargetOutDNS, operation, family, lifecycleCapability(capability, state),
+			))
 		}
 	}
 	return operations
@@ -523,6 +543,16 @@ func dnsProxyCapability(facts capabilityProbeFacts) sysnet.Capability {
 		return facts.dnsProxy.Clone()
 	}
 	return sysnet.Capability{State: sysnet.CapabilityAvailable}
+}
+
+func dnsConfigCapability(facts capabilityProbeFacts) sysnet.Capability {
+	if capabilityFactSet(facts.dnsConfig) {
+		return facts.dnsConfig.Clone()
+	}
+	// Direct capability-model tests from before the DNS boundary was added use
+	// the NetIO fact as their complete Windows networking probe. Production
+	// dependency normalization always supplies an explicit DNS fact.
+	return facts.netIO.Clone()
 }
 
 func capabilityFactSet(capability sysnet.Capability) bool {

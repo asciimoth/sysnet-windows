@@ -787,7 +787,7 @@ defer rollback to a later milestone.
     - Complete this step when D01-D08 pass under concurrent provider swaps and
       shutdown.
 
-3. **Step 18 - Configure and restore Windows DNS by ownership.**
+3. **Step 18 - Configure and restore Windows DNS by ownership. (Completed)**
 
     - Read and record the prior DNS mode and values. Distinguish DHCP-derived
       configuration from static configuration.
@@ -801,7 +801,7 @@ defer rollback to a later milestone.
     - Complete this step when D13-D20 pass and independent pre/post snapshots
       prove ownership-aware restoration.
 
-4. **Step 19 - Implement OutDNS and resolver-loop prevention.**
+4. **Step 19 - Implement OutDNS and resolver-loop prevention. (Completed)**
 
     - Derive numeric upstream endpoints from the original or selected underlay
       DNS state. Exclude the managed proxy address from discovery.

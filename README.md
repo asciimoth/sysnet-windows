@@ -4,8 +4,8 @@ Windows network integration for `github.com/asciimoth/gonnect`.
 
 The root package implements host-aware allocation, regular and default Wintun
 ownership, underlay selection, the outbound network bypass, confined local
-networking, and the local managed-DNS proxy. Later milestones will add Windows
-DNS configuration, matchers, and application exclusions. The repository also
+networking, Windows DNS ownership, and the local managed-DNS proxy. Later
+milestones will add matchers and application exclusions. The repository also
 contains the locked development environment and Windows test harness for the
 work in
 [`docs/sysnet-windows-implementation-testing-plan.md`](docs/sysnet-windows-implementation-testing-plan.md).
@@ -25,9 +25,11 @@ raw sockets, and multicast. An explicit local address must equal the selected
 underlay source. Loss of the selected underlay makes new operations fail; there
 is no unbound retry.
 
-OutNet resolves names through `System.OutDNS`. At this milestone, OutDNS uses
-the host DNS server list that exists before managed DNS takeover. A later step
-will replace this discovery path with saved underlay DNS state.
+OutNet resolves names through `System.OutDNS`. OutDNS reads numeric servers from
+the currently selected underlay interfaces for each request, excludes the
+managed proxy address, and sends UDP and TCP DNS traffic through bound OutNet
+sockets. It does not use the Windows host resolver and cannot loop back through
+the managed proxy after DNS takeover.
 
 ## Managed DNS proxy
 
@@ -37,8 +39,11 @@ replaces the caller-owned provider. `SetDNS(nil)` drops managed requests and
 does not use the host resolver as a fallback. Closing the default TUN cancels
 active requests, closes both listeners, and waits for proxy workers.
 
-The proxy does not configure Windows DNS yet. That ownership-aware host change
-and restoration are part of the next implementation step.
+Before default routes are published, the System records the adapter's DNS mode
+and server values, configures its effective `DnsIP`, and verifies the result.
+Close restores static values or DHCP mode only if the current state still
+matches the System's write. An administrator, DHCP, or another VPN change made
+while the TUN is active is not overwritten.
 
 ## Local network
 

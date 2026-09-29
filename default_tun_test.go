@@ -1,6 +1,7 @@
 package windows
 
 import (
+	"context"
 	"errors"
 	"net/netip"
 	"sync"
@@ -316,6 +317,130 @@ func TestDNSProxyBindsAfterAddressAndBeforeDefaultRoute(t *testing.T) {
 	}
 }
 
+func TestD13D16DNSConfigurationFailuresRollbackOwnedState(t *testing.T) {
+	t.Run("missing API", func(t *testing.T) {
+		factory := &regularTunFactory{}
+		system := newDefaultTunTestSystemWithDNSConfigurator(t, factory, newRegularTunManager(), nil, &fakeDNSProxyFactory{})
+		if _, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.104.0.1/24"}}); err == nil {
+			t.Fatal("BuildDefaultTun() error = nil")
+		}
+		if len(factory.created) != 0 {
+			t.Fatal("missing DNS API created an adapter")
+		}
+	})
+
+	for _, test := range []struct {
+		name       string
+		configure  func(*fakeDNSConfigurator)
+		wantClosed bool
+	}{
+		{name: "read denied", configure: func(configurator *fakeDNSConfigurator) {
+			configurator.readErr = errors.New("access denied")
+		}, wantClosed: true},
+		{name: "partial apply", configure: func(configurator *fakeDNSConfigurator) {
+			configurator.applyErr = errors.New("partial DNS write")
+			configurator.writeOnErr = true
+		}, wantClosed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			factory := &regularTunFactory{}
+			configurator := newFakeDNSConfigurator()
+			test.configure(configurator)
+			proxyFactory := &fakeDNSProxyFactory{}
+			system := newDefaultTunTestSystemWithDNSConfigurator(t, factory, newRegularTunManager(), configurator, proxyFactory)
+			if _, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.105.0.1/24"}}); err == nil {
+				t.Fatal("BuildDefaultTun() error = nil")
+			}
+			if system.defaultTun != nil || len(factory.created) != 1 || !factory.created[0].closed {
+				t.Fatal("DNS configuration failure leaked the default TUN")
+			}
+			if len(proxyFactory.proxies) != 1 || proxyFactory.proxies[0].Closed() != test.wantClosed {
+				t.Fatal("DNS configuration failure leaked the proxy")
+			}
+		})
+	}
+}
+
+func TestD17D20DNSRestorationIsOwnershipAware(t *testing.T) {
+	for _, prior := range []internaldns.State{
+		{AutomaticIPv4: true, AutomaticIPv6: true, Servers: []netip.Addr{netip.MustParseAddr("192.0.2.53")}},
+		{AutomaticIPv6: true, Servers: []netip.Addr{netip.MustParseAddr("198.51.100.53")}},
+	} {
+		name := "static"
+		if prior.AutomaticIPv4 {
+			name = "DHCP"
+		}
+		t.Run(name, func(t *testing.T) {
+			factory := &regularTunFactory{}
+			configurator := newFakeDNSConfigurator()
+			// The test factory assigns its first adapter LUID 101.
+			configurator.states[101] = internaldns.CloneState(prior)
+			system := newDefaultTunTestSystemWithDNSConfigurator(t, factory, newRegularTunManager(), configurator, &fakeDNSProxyFactory{})
+			device, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.106.0.1/24"}})
+			if err != nil {
+				t.Fatalf("BuildDefaultTun() error = %v", err)
+			}
+			if err := device.Close(); err != nil {
+				t.Fatalf("DefaultTun.Close() error = %v", err)
+			}
+			got, _ := configurator.Read(context.Background(), 101)
+			if !internaldns.EqualState(got, prior) {
+				t.Fatalf("restored DNS state = %+v, want %+v", got, prior)
+			}
+		})
+	}
+
+	t.Run("external edit", func(t *testing.T) {
+		factory := &regularTunFactory{}
+		configurator := newFakeDNSConfigurator()
+		system := newDefaultTunTestSystemWithDNSConfigurator(t, factory, newRegularTunManager(), configurator, &fakeDNSProxyFactory{})
+		device, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.107.0.1/24"}})
+		if err != nil {
+			t.Fatalf("BuildDefaultTun() error = %v", err)
+		}
+		external := internaldns.State{AutomaticIPv6: true, Servers: []netip.Addr{netip.MustParseAddr("203.0.113.53")}}
+		configurator.mu.Lock()
+		configurator.states[101] = external
+		configurator.mu.Unlock()
+		if err := device.Close(); err != nil {
+			t.Fatalf("DefaultTun.Close() error = %v", err)
+		}
+		got, _ := configurator.Read(context.Background(), 101)
+		if !internaldns.EqualState(got, external) {
+			t.Fatalf("external DNS state was overwritten: %+v", got)
+		}
+	})
+}
+
+func TestDNSConfigurationPreservesOtherFamilyState(t *testing.T) {
+	factory := &regularTunFactory{}
+	configurator := newFakeDNSConfigurator()
+	prior := internaldns.State{
+		AutomaticIPv4: true,
+		Servers:       []netip.Addr{netip.MustParseAddr("2001:db8::53")},
+	}
+	configurator.states[101] = internaldns.CloneState(prior)
+	system := newDefaultTunTestSystemWithDNSConfigurator(t, factory, newRegularTunManager(), configurator, &fakeDNSProxyFactory{})
+	device, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.108.0.1/24"}})
+	if err != nil {
+		t.Fatalf("BuildDefaultTun() error = %v", err)
+	}
+	wantApplied := internaldns.State{Servers: []netip.Addr{
+		netip.MustParseAddr("2001:db8::53"), netip.MustParseAddr("10.108.0.1"),
+	}}
+	got, _ := configurator.Read(context.Background(), 101)
+	if !internaldns.EqualState(got, wantApplied) {
+		t.Fatalf("applied DNS state = %+v, want %+v", got, wantApplied)
+	}
+	if err := device.Close(); err != nil {
+		t.Fatalf("DefaultTun.Close() error = %v", err)
+	}
+	got, _ = configurator.Read(context.Background(), 101)
+	if !internaldns.EqualState(got, prior) {
+		t.Fatalf("restored DNS state = %+v, want %+v", got, prior)
+	}
+}
+
 func containsRoute(routes []netio.Route, destination netip.Prefix) bool {
 	for _, route := range routes {
 		if route.Destination == destination {
@@ -330,6 +455,10 @@ func newDefaultTunTestSystem(t *testing.T, factory *regularTunFactory, manager n
 }
 
 func newDefaultTunTestSystemWithDNS(t *testing.T, factory *regularTunFactory, manager netio.Manager, dnsFactory internaldns.ProxyFactory) *System {
+	return newDefaultTunTestSystemWithDNSConfigurator(t, factory, manager, newFakeDNSConfigurator(), dnsFactory)
+}
+
+func newDefaultTunTestSystemWithDNSConfigurator(t *testing.T, factory *regularTunFactory, manager netio.Manager, configurator internaldns.Configurator, dnsFactory internaldns.ProxyFactory) *System {
 	t.Helper()
 	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
 	system, err := newSystem(SystemConfig{}, systemDependencies{
@@ -337,6 +466,7 @@ func newDefaultTunTestSystemWithDNS(t *testing.T, factory *regularTunFactory, ma
 		netIO:            manager,
 		allocationReader: emptyHostReader{},
 		underlay:         staticUnderlaySource{candidates: []underlay.Candidate{outNetCandidate(false), outNetCandidate(true)}},
+		dnsConfigurator:  configurator,
 		dnsProxyFactory:  dnsFactory,
 		capabilityProbe: staticCapabilityProbe{facts: capabilityProbeFacts{
 			netIO: available, underlay: available,
@@ -351,6 +481,49 @@ func newDefaultTunTestSystemWithDNS(t *testing.T, factory *regularTunFactory, ma
 		}
 	})
 	return system
+}
+
+type fakeDNSConfigurator struct {
+	mu         sync.Mutex
+	states     map[uint64]internaldns.State
+	readErr    error
+	applyErr   error
+	writeOnErr bool
+	applyHook  func(uint64, internaldns.State)
+}
+
+func newFakeDNSConfigurator() *fakeDNSConfigurator {
+	return &fakeDNSConfigurator{states: make(map[uint64]internaldns.State)}
+}
+
+func (f *fakeDNSConfigurator) Read(_ context.Context, luid uint64) (internaldns.State, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.readErr != nil {
+		return internaldns.State{}, f.readErr
+	}
+	state, found := f.states[luid]
+	if !found {
+		state = internaldns.State{AutomaticIPv4: true, AutomaticIPv6: true}
+	}
+	return internaldns.CloneState(state), nil
+}
+
+func (f *fakeDNSConfigurator) Apply(_ context.Context, luid uint64, state internaldns.State) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.applyHook != nil {
+		f.applyHook(luid, state)
+	}
+	applyErr := f.applyErr
+	if applyErr != nil && !f.writeOnErr {
+		return applyErr
+	}
+	f.states[luid] = internaldns.CloneState(state)
+	if f.writeOnErr {
+		f.applyErr = nil
+	}
+	return applyErr
 }
 
 type inertDNSProvider struct{ requests chan gonnectdns.Request }
