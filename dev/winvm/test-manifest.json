@@ -74,6 +74,7 @@
         "github.com/asciimoth/sysnet-windows/integration::TestT16T24NativeRegularTunPublicLifecycle",
         "github.com/asciimoth/sysnet-windows/integration::TestD13D20NativeDNSConfigurationAndRestoration",
         "github.com/asciimoth/sysnet-windows/integration::TestM3NativeDefaultTunCrashResourceRecovery",
+        "github.com/asciimoth/sysnet-windows/integration::TestC01C03R37R40NativeSplitAcquisition",
         "github.com/asciimoth/sysnet-windows/integration::TestNativeRegularTunEnabledFamilyFloorCoversIPv6Mutations",
         "github.com/asciimoth/sysnet-windows/integration::TestNativeRegularTunMutatesAddressesWithinOwnedSubnet"
       ],

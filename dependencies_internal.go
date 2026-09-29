@@ -11,7 +11,6 @@ import (
 	"github.com/asciimoth/sysnet-windows/internal/split"
 	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
 	"github.com/asciimoth/sysnet-windows/internal/underlay"
-	"github.com/asciimoth/sysnet-windows/internal/wfp"
 )
 
 // capabilityProber performs read-only dependency checks. It must not acquire
@@ -79,19 +78,18 @@ func missingDependencyCapability(detail string) sysnet.Capability {
 // the stable integration path while package tests can inject deterministic
 // fakes through newSystem.
 type systemDependencies struct {
-	tunFactory       internaltun.Factory
-	netIO            netio.Manager
-	allocationReader netio.Reader
-	underlay         underlay.Source
-	dnsConfigurator  internaldns.Configurator
-	dnsProxyFactory  internaldns.ProxyFactory
-	splitController  split.Controller
-	wfpManager       wfp.Manager
-	ownerLookup      owner.Lookup
-	clock            internalclock.Clock
-	logger           Logger
-	capabilityProbe  capabilityProber
-	capabilityCode   implementationSupport
+	tunFactory        internaltun.Factory
+	netIO             netio.Manager
+	allocationReader  netio.Reader
+	underlay          underlay.Source
+	dnsConfigurator   internaldns.Configurator
+	dnsProxyFactory   internaldns.ProxyFactory
+	splitDependencies split.Dependencies
+	ownerLookup       owner.Lookup
+	clock             internalclock.Clock
+	logger            Logger
+	capabilityProbe   capabilityProber
+	capabilityCode    implementationSupport
 }
 
 func (d *systemDependencies) setLogger(logger Logger) {
@@ -107,8 +105,7 @@ func (d systemDependencies) inspect() {
 	_ = d.underlay
 	_ = d.dnsConfigurator
 	_ = d.dnsProxyFactory
-	_ = d.splitController
-	_ = d.wfpManager
+	_ = d.splitDependencies
 	_ = d.ownerLookup
 	_ = d.clock
 	_ = d.logger

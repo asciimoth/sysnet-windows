@@ -10,8 +10,10 @@ import (
 	internaldns "github.com/asciimoth/sysnet-windows/internal/dns"
 	"github.com/asciimoth/sysnet-windows/internal/netio"
 	"github.com/asciimoth/sysnet-windows/internal/owner"
+	"github.com/asciimoth/sysnet-windows/internal/split"
 	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
 	"github.com/asciimoth/sysnet-windows/internal/underlay"
+	"github.com/asciimoth/sysnet-windows/internal/wfp"
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wintun"
 )
@@ -43,7 +45,12 @@ func nativeDependencies() systemDependencies {
 		dnsConfigurator:  internaldns.NativeConfigurator{},
 		dnsProxyFactory:  internaldns.NativeProxyFactory{},
 		ownerLookup:      ownerLookup,
-		capabilityProbe:  nativeCapabilityProbe{reader: reader},
+		splitDependencies: split.Dependencies{
+			Verifier: split.NativeVerifier{}, Opener: split.NativeOpener{},
+			WFP:            wfp.NativeFactory{TransactionStartTimeout: defaultOperationTimeout},
+			CleanupTimeout: defaultOperationTimeout,
+		},
+		capabilityProbe: nativeCapabilityProbe{reader: reader},
 	}
 }
 

@@ -872,7 +872,7 @@ defer rollback to a later milestone.
 
 #### M5: implement executable-tree exclusions
 
-1. **Step 24 - Acquire and verify the exclusive split session.**
+1. **Step 24 - Acquire and verify the exclusive split session. (Completed)**
 
     - Open the pinned driver lazily on the first exclusion request. Verify
       service identity, signed package provenance and current driver state.
@@ -980,7 +980,7 @@ defer rollback to a later milestone.
       later gates passed.
     - Record module versions, locks, source archive hash, known warnings and the
       exact qualified Windows builds.
-    - Run `just check-fast`, `just test-total` and the evidence qualifier from a
+    - Run `just check` and the evidence qualifier from a
       clean tree. Archive results before creating the release tag.
     - Complete this step only when documentation, machine-readable capabilities
       and qualification evidence describe the same support boundary.
