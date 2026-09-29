@@ -93,16 +93,47 @@ func applyNativeState(ctx context.Context, luid uint64, state State) error {
 		}
 	}
 	nativeLUID := winipcfg.LUID(luid)
-	if err := nativeLUID.SetDNS(windows.AF_INET, ipv4, nil); err != nil {
+	if err := setNameServers(nativeLUID, windows.AF_INET, ipv4); err != nil {
 		return fmt.Errorf("set IPv4 DNS servers: %w", err)
 	}
 	if err := contextError(ctx); err != nil {
 		return err
 	}
-	if err := nativeLUID.SetDNS(windows.AF_INET6, ipv6, nil); err != nil {
+	if err := setNameServers(nativeLUID, windows.AF_INET6, ipv6); err != nil {
 		return fmt.Errorf("set IPv6 DNS servers: %w", err)
 	}
 	return contextError(ctx)
+}
+
+// setNameServers changes only the per-family name-server field. LUID.SetDNS
+// also sets the search-list flag, even when its domains argument is nil. That
+// would clear an administrator-owned suffix search list. Version 1 settings do
+// not select the NRPT, encrypted-DNS, LLMNR, registration, or profile fields,
+// so Windows leaves those settings unchanged.
+func setNameServers(luid winipcfg.LUID, family winipcfg.AddressFamily, servers []netip.Addr) error {
+	values := make([]string, 0, len(servers))
+	for _, server := range servers {
+		if server.Is4() == (family == windows.AF_INET) {
+			values = append(values, server.String())
+		}
+	}
+	nameServers, err := windows.UTF16PtrFromString(strings.Join(values, ","))
+	if err != nil {
+		return err
+	}
+	guid, err := luid.GUID()
+	if err != nil {
+		return fmt.Errorf("read DNS interface GUID: %w", err)
+	}
+	settings := &winipcfg.DnsInterfaceSettings{
+		Version:    winipcfg.DnsInterfaceSettingsVersion1,
+		Flags:      winipcfg.DnsInterfaceSettingsFlagNameserver,
+		NameServer: nameServers,
+	}
+	if family == windows.AF_INET6 {
+		settings.Flags |= winipcfg.DnsInterfaceSettingsFlagIPv6
+	}
+	return winipcfg.SetInterfaceDnsSettings(*guid, settings)
 }
 
 func registryNameServers(service, guid string) (string, error) {

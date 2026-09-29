@@ -814,7 +814,7 @@ defer rollback to a later milestone.
     - Complete this step when D09-D12 and N13-N16 pass with captures that prove
       the proxy and upstream legs separately.
 
-5. **Step 20 - Finish default-TUN cleanup, warnings and scope tests.**
+5. **Step 20 - Finish default-TUN cleanup, warnings and scope tests. (Completed)**
 
     - Join default routes, DNS resources and TUN resources into one ordered
       journal without treating native subsystems as one atomic transaction.

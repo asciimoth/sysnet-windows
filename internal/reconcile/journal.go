@@ -89,6 +89,22 @@ func NewJournal(cleanupTimeout time.Duration) *Journal {
 	return &Journal{cleanupTimeout: cleanupTimeout}
 }
 
+// Has reports whether the journal still owns a retry target for key. Callers
+// use it only to assemble an exact cleanup set after a transaction fails.
+func (j *Journal) Has(key OwnershipKey) bool {
+	if j == nil {
+		return false
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	for _, entry := range j.entries {
+		if entry.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
 // Apply performs and verifies all entries. It undoes this transaction in exact
 // reverse order if an operation fails. Previously committed entries remain.
 func (j *Journal) Apply(ctx context.Context, entries []Entry) error {

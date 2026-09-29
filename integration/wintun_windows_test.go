@@ -4,11 +4,13 @@ package integration
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -267,6 +269,51 @@ func TestD13D20NativeDNSConfigurationAndRestoration(t *testing.T) {
 	if !internaldns.EqualState(restored, prior) {
 		t.Fatalf("restored DNS state = %+v, want %+v", restored, prior)
 	}
+}
+
+func TestM3NativeDefaultTunCrashResourceRecovery(t *testing.T) {
+	const childVariable = "SYSNET_WINDOWS_CRASH_CHILD"
+	if name := os.Getenv(childVariable); name != "" {
+		system, err := sysnetwindows.New(sysnetwindows.SystemConfig{})
+		if err != nil {
+			t.Fatalf("New() in crash child error = %v", err)
+		}
+		if _, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{
+			Name: name, TunAddrs: []string{"198.18.240.1/24"},
+		}); err != nil {
+			t.Fatalf("BuildDefaultTun() in crash child error = %v", err)
+		}
+		// Deliberately bypass every Go cleanup path. Windows and Wintun must
+		// release the process-owned adapter, its routes, and its DNS interface
+		// state when the process handle closes.
+		os.Exit(0)
+	}
+
+	name := fmt.Sprintf("gonnect-crash-%d", os.Getpid())
+	command := exec.Command(os.Args[0], "-test.run=^TestM3NativeDefaultTunCrashResourceRecovery$")
+	command.Env = append(os.Environ(), childVariable+"="+name)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("crash child error = %v\n%s", err, output)
+	}
+	// Wintun can retain a nonfunctional orphan until a later open performs its
+	// recovery scan. Reusing the exact name with a new GUID proves that scan
+	// removed the abandoned identity instead of adopting it as this System's
+	// adapter.
+	recoveryGUID, err := windows.GenerateGUID()
+	if err != nil {
+		t.Fatalf("GenerateGUID() for crash recovery error = %v", err)
+	}
+	recovered, err := (internaltun.NativeFactory{}).Create(context.Background(), internaltun.Config{
+		Name: name, GUID: recoveryGUID.String(), MTU: 1420,
+	})
+	if err != nil {
+		t.Fatalf("recover abandoned adapter name %q: %v", name, err)
+	}
+	if got := recovered.Metadata().GUID; !strings.EqualFold(got, recoveryGUID.String()) {
+		_ = recovered.Close()
+		t.Fatalf("recovered adapter GUID = %q, want new GUID %q", got, recoveryGUID.String())
+	}
+	closeTun(t, recovered)
 }
 
 func TestT04T06NativeNetIOExactOwnership(t *testing.T) {
@@ -819,6 +866,22 @@ func stageWintunDLL() error {
 	}
 	defer input.Close()
 	output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		staged, openErr := os.Open(target)
+		if openErr != nil {
+			return fmt.Errorf("open existing staged Wintun DLL: %w", openErr)
+		}
+		defer staged.Close()
+		inputHash, inputErr := readerSHA256(input)
+		stagedHash, stagedErr := readerSHA256(staged)
+		if hashErr := errors.Join(inputErr, stagedErr); hashErr != nil {
+			return fmt.Errorf("hash staged Wintun DLL: %w", hashErr)
+		}
+		if inputHash != stagedHash {
+			return errors.New("existing staged Wintun DLL does not match the locked input")
+		}
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -837,4 +900,12 @@ func stageWintunDLL() error {
 	}
 	remove = false
 	return nil
+}
+
+func readerSHA256(reader io.Reader) ([sha256.Size]byte, error) {
+	hash := sha256.New()
+	if _, err := io.Copy(hash, reader); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	return [sha256.Size]byte(hash.Sum(nil)), nil
 }

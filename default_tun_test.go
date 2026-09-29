@@ -3,7 +3,9 @@ package windows
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -186,7 +188,9 @@ func TestDefaultTunFinalRouteFailureCleansNewPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first BuildDefaultTun() error = %v", err)
 	}
-	manager.failApplyCall = manager.applyCalls + 4
+	// Stage the replacement twice, retire the old route, address, and base
+	// records, and then fail when the replacement default route is published.
+	manager.failApplyCall = manager.applyCalls + 6
 	manager.failApplyErr = errInjectedRegularTun
 	if _, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.100.0.1/24"}}); !errors.Is(err, errInjectedRegularTun) {
 		t.Fatalf("replacement error = %v, want injected failure", err)
@@ -438,6 +442,78 @@ func TestDNSConfigurationPreservesOtherFamilyState(t *testing.T) {
 	got, _ = configurator.Read(context.Background(), 101)
 	if !internaldns.EqualState(got, prior) {
 		t.Fatalf("restored DNS state = %+v, want %+v", got, prior)
+	}
+}
+
+func TestD21D28DefaultTunReportsNonexclusiveDNSScope(t *testing.T) {
+	system := newDefaultTunTestSystem(t, &regularTunFactory{}, newRegularTunManager())
+	device, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.109.0.1/24"}})
+	if err != nil {
+		t.Fatalf("BuildDefaultTun() error = %v", err)
+	}
+	want := []sysnet.Warning{sysnet.WarningDefaultTunDNSRouteNotExclusive}
+	if got := system.DefaultTunWarnings(device); !slices.Equal(got, want) {
+		t.Fatalf("DefaultTunWarnings(active) = %v, want %v", got, want)
+	}
+	// The result is a fresh stable-identifier slice. A caller cannot mutate the
+	// warning reported by a later call.
+	got := system.DefaultTunWarnings(device)
+	got[0] = "caller-mutation"
+	if next := system.DefaultTunWarnings(device); !slices.Equal(next, want) {
+		t.Fatalf("DefaultTunWarnings(after mutation) = %v, want %v", next, want)
+	}
+	if got := system.DefaultTunWarnings(&defaultTun{}); got != nil {
+		t.Fatalf("DefaultTunWarnings(foreign) = %v, want nil", got)
+	}
+	if err := device.Close(); err != nil {
+		t.Fatalf("DefaultTun.Close() error = %v", err)
+	}
+	if got := system.DefaultTunWarnings(device); got != nil {
+		t.Fatalf("DefaultTunWarnings(closed) = %v, want nil", got)
+	}
+}
+
+func TestM3DefaultTunResourceAccountingCycles(t *testing.T) {
+	factory := &regularTunFactory{}
+	manager := newRegularTunManager()
+	system := newDefaultTunTestSystem(t, factory, manager)
+	providers := make([]*inertDNSProvider, 2)
+	for index := range providers {
+		providers[index] = &inertDNSProvider{requests: make(chan gonnectdns.Request)}
+	}
+
+	const cycles = 16
+	for cycle := range cycles {
+		device, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{
+			TunAddrs: []string{fmt.Sprintf("10.110.%d.1/24", cycle)},
+		})
+		if err != nil {
+			t.Fatalf("cycle %d BuildDefaultTun() error = %v", cycle, err)
+		}
+		// Adapter, base interface settings, addresses/routes, DNS, and default
+		// routes have separate ordered ownership records.
+		if got := system.journal.Len(); got != 5 {
+			t.Fatalf("cycle %d journal entries = %d, want 5", cycle, got)
+		}
+		if err := device.SetDNS(providers[cycle%len(providers)]); err != nil {
+			t.Fatalf("cycle %d SetDNS(provider) error = %v", cycle, err)
+		}
+		if err := device.SetDNS(nil); err != nil {
+			t.Fatalf("cycle %d SetDNS(nil) error = %v", cycle, err)
+		}
+		owned := device.(*defaultTun)
+		if err := device.Close(); err != nil {
+			t.Fatalf("cycle %d Close() error = %v", cycle, err)
+		}
+		if got := system.journal.Len(); got != 0 {
+			t.Fatalf("cycle %d journal entries after Close() = %d, want 0", cycle, got)
+		}
+		if got := manager.config(owned.interfaceID()); !netIOConfigEmpty(got) {
+			t.Fatalf("cycle %d retained NetIO state: %+v", cycle, got)
+		}
+		if !factory.created[cycle].closed {
+			t.Fatalf("cycle %d retained an open adapter", cycle)
+		}
 	}
 }
 

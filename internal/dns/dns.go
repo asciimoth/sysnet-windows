@@ -41,10 +41,15 @@ func CloneState(state State) State {
 // EqualState reports semantic equality. Server order is significant because
 // Windows uses it as resolver preference order.
 func EqualState(left, right State) bool {
-	return left.AutomaticIPv4 == right.AutomaticIPv4 &&
-		left.AutomaticIPv6 == right.AutomaticIPv6 &&
-		slices.Equal(familyServers(left.Servers, true), familyServers(right.Servers, true)) &&
-		slices.Equal(familyServers(left.Servers, false), familyServers(right.Servers, false))
+	if left.AutomaticIPv4 != right.AutomaticIPv4 || left.AutomaticIPv6 != right.AutomaticIPv6 {
+		return false
+	}
+	// Servers in an automatic family are observations used for upstream
+	// discovery. They are not configuration values that Apply can reproduce.
+	// DHCP, router discovery, and Windows can change or omit them between two
+	// reads without changing this interface's owned DNS configuration.
+	return (left.AutomaticIPv4 || slices.Equal(familyServers(left.Servers, true), familyServers(right.Servers, true))) &&
+		(left.AutomaticIPv6 || slices.Equal(familyServers(left.Servers, false), familyServers(right.Servers, false)))
 }
 
 func familyServers(servers []netip.Addr, ipv4 bool) []netip.Addr {

@@ -45,6 +45,25 @@ Close restores static values or DHCP mode only if the current state still
 matches the System's write. An administrator, DHCP, or another VPN change made
 while the TUN is active is not overwritten.
 
+This configuration is not a system-wide DNS enforcement boundary.
+`DefaultTunWarnings` returns `default_tun_dns_route_not_exclusive` for each
+active default TUN. The System changes only the name-server field on its own
+adapter. It does not change DNS settings on other interfaces, the suffix search
+list, NRPT, encrypted-DNS policy, or application-owned DoH/DoT. Windows can use
+those paths, and a more-specific route can take priority over a default route.
+Executable exclusions are not implemented yet, so no excluded-application DNS
+behavior is claimed. A process which sends DNS itself can bypass the managed
+proxy.
+
+The proxy must own UDP and TCP port 53 on its TUN address. A port conflict makes
+the build fail before default routes are published. OutDNS returns an observable
+no-upstream error if the selected underlays provide no usable numeric server; it
+does not fall back to the host resolver. Graceful close and retryable in-process
+recovery are tested. The disposable Windows gate also exits a child process
+without Go cleanup, then opens Wintun again and requires its recovery scan to
+remove the abandoned adapter identity before the name can be reused with a new
+GUID. The route and DNS state is interface-scoped to that abandoned identity.
+
 ## Local network
 
 `System.LocalNet` supports native TCP and UDP sockets only on IPv4 and IPv6

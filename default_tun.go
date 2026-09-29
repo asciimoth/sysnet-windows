@@ -91,11 +91,13 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 
 	var result *defaultTun
 	adapterKey := reconcile.OwnershipKey{Kind: reconcile.KindAdapter, Scope: "default-tun", ID: fmt.Sprint(id)}
+	baseKey := reconcile.OwnershipKey{Kind: reconcile.KindAddress, Scope: "default-tun-base", ID: fmt.Sprint(id)}
 	configKey := reconcile.OwnershipKey{Kind: reconcile.KindAddress, Scope: "default-tun", ID: fmt.Sprint(id)}
 	dnsKey := reconcile.OwnershipKey{Kind: reconcile.KindDNS, Scope: "default-tun", ID: fmt.Sprint(id)}
+	routeKey := reconcile.OwnershipKey{Kind: reconcile.KindRoute, Scope: "default-tun", ID: fmt.Sprint(id)}
 	preRoute := defaultTunPreRouteConfig(s.config, desired)
 	final := defaultTunFinalConfig(preRoute, desired.family)
-	applied := netio.Config{Properties: append([]netio.Properties(nil), preRoute.Properties...)}
+	base := netio.Config{Properties: append([]netio.Properties(nil), preRoute.Properties...)}
 	entries := []reconcile.Entry{
 		{
 			Key: adapterKey,
@@ -147,12 +149,12 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 			},
 		},
 		{
-			Key: configKey,
+			Key: baseKey,
 			Apply: func(ctx context.Context) error {
 				if result == nil {
 					return errors.New("default TUN adapter is unavailable")
 				}
-				return s.dependencies.netIO.Apply(ctx, result.interfaceID(), applied)
+				return s.dependencies.netIO.Apply(ctx, result.interfaceID(), base)
 			},
 			Inverse: func(ctx context.Context) error {
 				if result == nil || result.closed.Load() {
@@ -167,7 +169,7 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 				if expected == reconcile.ExpectedUndone {
 					return s.dependencies.netIO.Verify(ctx, result.interfaceID(), netio.Config{})
 				}
-				return s.dependencies.netIO.Verify(ctx, result.interfaceID(), applied)
+				return s.dependencies.netIO.Verify(ctx, result.interfaceID(), base)
 			},
 		},
 	}
@@ -186,7 +188,9 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 	}
 	retireBeforeCreate := old != nil && (sameName || s.config.stableGUID != "")
 	err := s.applyOperation(func(ctx context.Context) error {
+		configApplied := false
 		dnsApplied := false
+		routeApplied := false
 		retireOld := func() error {
 			retireErr := s.undoDefaultTun(ctx, old)
 			if retireErr != nil {
@@ -215,9 +219,15 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 		cleanupNew := func(primary error) error {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.config.operationTimeout)
 			defer cancel()
-			keys := []reconcile.OwnershipKey{configKey, adapterKey}
+			keys := []reconcile.OwnershipKey{baseKey, adapterKey}
+			if configApplied {
+				keys = append([]reconcile.OwnershipKey{configKey}, keys...)
+			}
 			if dnsApplied {
 				keys = append([]reconcile.OwnershipKey{dnsKey}, keys...)
+			}
+			if routeApplied {
+				keys = append([]reconcile.OwnershipKey{routeKey}, keys...)
 			}
 			cleanupErr := s.journal.Undo(cleanupCtx, keys...)
 			return errors.Join(primary, cleanupErr)
@@ -230,13 +240,27 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 		if err := s.allocator.VerifyOwnedIPsAvailable(reservationID); err != nil {
 			return cleanupNew(fmt.Errorf("recheck default TUN addresses: %w", err))
 		}
-		applied = cloneNetIOConfig(preRoute)
-		if err := s.dependencies.netIO.Apply(ctx, result.interfaceID(), applied); err != nil {
+		configEntry := reconcile.Entry{
+			Key: configKey,
+			Apply: func(ctx context.Context) error {
+				return s.dependencies.netIO.Apply(ctx, result.interfaceID(), preRoute)
+			},
+			Inverse: func(ctx context.Context) error {
+				return s.dependencies.netIO.Apply(ctx, result.interfaceID(), base)
+			},
+			Verify: func(ctx context.Context, expected reconcile.ExpectedState) error {
+				want := preRoute
+				if expected == reconcile.ExpectedUndone {
+					want = base
+				}
+				return s.dependencies.netIO.Verify(ctx, result.interfaceID(), want)
+			},
+		}
+		if err := s.journal.Apply(ctx, []reconcile.Entry{configEntry}); err != nil {
+			configApplied = s.journal.Has(configKey)
 			return cleanupNew(err)
 		}
-		if err := s.dependencies.netIO.Verify(ctx, result.interfaceID(), applied); err != nil {
-			return cleanupNew(err)
-		}
+		configApplied = true
 		// Bind both transports and apply the resolver before publishing default
 		// routes. The inverse restores only state that still exactly matches this
 		// System's write, so an external change is never overwritten.
@@ -308,19 +332,34 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 			},
 		}
 		if err := s.journal.Apply(ctx, []reconcile.Entry{dnsEntry}); err != nil {
+			dnsApplied = s.journal.Has(dnsKey)
 			return cleanupNew(err)
 		}
 		dnsApplied = true
 		if err := requireUnderlays(s.underlayMonitor.Snapshot(), desired.family); err != nil {
 			return cleanupNew(err)
 		}
-		applied = cloneNetIOConfig(final)
-		if err := s.dependencies.netIO.Apply(ctx, result.interfaceID(), applied); err != nil {
+		routeEntry := reconcile.Entry{
+			Key: routeKey,
+			Apply: func(ctx context.Context) error {
+				return s.dependencies.netIO.Apply(ctx, result.interfaceID(), final)
+			},
+			Inverse: func(ctx context.Context) error {
+				return s.dependencies.netIO.Apply(ctx, result.interfaceID(), preRoute)
+			},
+			Verify: func(ctx context.Context, expected reconcile.ExpectedState) error {
+				want := final
+				if expected == reconcile.ExpectedUndone {
+					want = preRoute
+				}
+				return s.dependencies.netIO.Verify(ctx, result.interfaceID(), want)
+			},
+		}
+		if err := s.journal.Apply(ctx, []reconcile.Entry{routeEntry}); err != nil {
+			routeApplied = s.journal.Has(routeKey)
 			return cleanupNew(err)
 		}
-		if err := s.dependencies.netIO.Verify(ctx, result.interfaceID(), applied); err != nil {
-			return cleanupNew(err)
-		}
+		routeApplied = true
 		s.defaultTun = result
 		return nil
 	})
@@ -337,8 +376,10 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 func (s *System) undoDefaultTun(ctx context.Context, device *defaultTun) error {
 	id := fmt.Sprint(device.id)
 	err := s.journal.Undo(ctx,
+		reconcile.OwnershipKey{Kind: reconcile.KindRoute, Scope: "default-tun", ID: id},
 		reconcile.OwnershipKey{Kind: reconcile.KindDNS, Scope: "default-tun", ID: id},
 		reconcile.OwnershipKey{Kind: reconcile.KindAddress, Scope: "default-tun", ID: id},
+		reconcile.OwnershipKey{Kind: reconcile.KindAddress, Scope: "default-tun-base", ID: id},
 		reconcile.OwnershipKey{Kind: reconcile.KindAdapter, Scope: "default-tun", ID: id},
 	)
 	if err == nil {
