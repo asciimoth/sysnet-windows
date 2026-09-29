@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/asciimoth/gonnect/sysnet"
+	"github.com/asciimoth/sysnet-windows/internal/underlay"
 )
 
 const (
@@ -286,6 +287,37 @@ func networkOperationCatalog(config normalizedSystemConfig, support implementati
 		}
 	}
 	return operations
+}
+
+func constrainOutNetUnderlay(report *sysnet.CapabilityReport, snapshot underlay.Snapshot) {
+	for index := range report.Operations {
+		operation := &report.Operations[index]
+		if operation.Key.Target != sysnet.TargetOutNet || operation.State != sysnet.CapabilityAvailable {
+			continue
+		}
+		var available bool
+		detail := ""
+		switch operation.Key.Family {
+		case sysnet.FamilyNone:
+			available = snapshot.IPv4 != nil || snapshot.IPv6 != nil
+			detail = "no selected underlay"
+		case sysnet.FamilyIPv4:
+			available = snapshot.IPv4 != nil
+			detail = "no selected IPv4 underlay"
+		case sysnet.FamilyIPv6:
+			available = snapshot.IPv6 != nil
+			detail = "no selected IPv6 underlay"
+		case sysnet.FamilyDual:
+			continue
+		default:
+			continue
+		}
+		if !available {
+			operation.Capability = sysnet.Capability{
+				State: sysnet.CapabilityUnavailable, Reasons: []sysnet.CapabilityReason{sysnet.ReasonNoUnderlay}, Detail: detail,
+			}
+		}
+	}
 }
 
 func exclusionProfile(

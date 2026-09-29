@@ -75,6 +75,9 @@ func (n *BoundNetwork) Listen(ctx context.Context, network, address string) (net
 	if err != nil {
 		return nil, err
 	}
+	if err := n.requireFamily(family); err != nil {
+		return nil, err
+	}
 	control, err := n.binder.Control("listen "+strings.ToUpper(transport), family, localIP, nil)
 	if err != nil {
 		return nil, err

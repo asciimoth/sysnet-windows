@@ -186,8 +186,11 @@ func (s *System) Capabilities() sysnet.CapabilityReport {
 	if s == nil {
 		return capabilityModel{}.snapshot()
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != lifecycleNew {
+		s.rebuildCapabilitiesLocked()
+	}
 	return s.capabilities.snapshot()
 }
 
@@ -459,11 +462,12 @@ func (s *System) finalPreflight() (sysnet.CapabilityReport, error) {
 		return sysnet.CapabilityReport{}, stateValidationError(sysnet.ReasonSystemClosed, "system is nil")
 	}
 	if s.dependencies.capabilityProbe == nil {
-		s.mu.RLock()
-		defer s.mu.RUnlock()
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		if err := s.acceptingWorkLocked(); err != nil {
 			return sysnet.CapabilityReport{}, err
 		}
+		s.rebuildCapabilitiesLocked()
 		return s.capabilities.snapshot(), nil
 	}
 	s.mu.Lock()

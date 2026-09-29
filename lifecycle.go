@@ -77,7 +77,11 @@ func (s *System) transitionLocked(next lifecycleState) error {
 }
 
 func (s *System) rebuildCapabilitiesLocked() {
-	s.capabilities.replace(buildCapabilityReport(s.config, s.support, s.probeFacts, s.state))
+	report := buildCapabilityReport(s.config, s.support, s.probeFacts, s.state)
+	if s.underlayMonitor != nil {
+		constrainOutNetUnderlay(&report, s.underlayMonitor.Snapshot())
+	}
+	s.capabilities.replace(report)
 }
 
 func (s *System) beginApply() error {

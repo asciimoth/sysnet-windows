@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"reflect"
 	"sync"
 	"syscall"
 	"testing"
@@ -225,17 +226,54 @@ func TestN09N12BoundNetworkRejectsAmbiguousMappedAndRawRequests(t *testing.T) {
 
 func TestBoundNetworkRejectsDisabledFamilyBeforeSocketCreation(t *testing.T) {
 	t.Parallel()
-	paths := &fakePaths{snapshot: underlaySnapshotForTests()}
-	binder, err := NewBinder(paths)
+	paths := &fakePaths{snapshot: underlay.Snapshot{IPv4: pathPointer(underlay.Path{
+		InterfaceIndex: 41,
+		InterfaceName:  "test IPv4",
+		Source:         netip.MustParseAddr("127.0.0.1"),
+	})}}
+	options := &fakeOptions{}
+	network, err := NewBoundNetwork(&Binder{paths: paths, options: options}, paths, Families{IPv6: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	network, err := NewBoundNetwork(binder, paths, Families{IPv6: true})
-	if err != nil {
-		t.Fatal(err)
+	ctx := context.Background()
+	config := &gonnect.ListenConfig{Control: func(string, string, syscall.RawConn) error {
+		t.Fatal("disabled-family caller control ran")
+		return nil
+	}}
+	operations := []struct {
+		name string
+		run  func() (io.Closer, error)
+	}{
+		{name: "generic dial", run: func() (io.Closer, error) { return network.Dial(ctx, "tcp4", "127.0.0.1:1") }},
+		{name: "generic listen", run: func() (io.Closer, error) { return network.Listen(ctx, "tcp4", "127.0.0.1:0") }},
+		{name: "packet dial", run: func() (io.Closer, error) { return network.PacketDial(ctx, "udp4", "127.0.0.1:1") }},
+		{name: "packet listen", run: func() (io.Closer, error) { return network.ListenPacket(ctx, "udp4", "127.0.0.1:0") }},
+		{name: "TCP dial", run: func() (io.Closer, error) { return network.DialTCP(ctx, "tcp4", "", "127.0.0.1:1") }},
+		{name: "TCP listen", run: func() (io.Closer, error) { return network.ListenTCP(ctx, "tcp4", "127.0.0.1:0") }},
+		{name: "UDP dial", run: func() (io.Closer, error) { return network.DialUDP(ctx, "udp4", "", "127.0.0.1:1") }},
+		{name: "UDP listen", run: func() (io.Closer, error) { return network.ListenUDP(ctx, "udp4", "127.0.0.1:0") }},
+		{name: "configured packet listen", run: func() (io.Closer, error) {
+			return network.ListenPacketConfig(ctx, config, "udp4", "127.0.0.1:0")
+		}},
+		{name: "configured UDP listen", run: func() (io.Closer, error) {
+			return network.ListenUDPConfig(ctx, config, "udp4", "127.0.0.1:0")
+		}},
 	}
-	if _, err := network.Dial(context.Background(), "tcp4", "192.0.2.1:443"); !errors.Is(err, gonnect.ErrUnsupported) {
-		t.Fatalf("disabled IPv4 error = %v, want unsupported", err)
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			resource, operationErr := operation.run()
+			if resource != nil && !reflect.ValueOf(resource).IsNil() {
+				_ = resource.Close()
+				t.Fatal("disabled-family operation created a socket")
+			}
+			if !errors.Is(operationErr, gonnect.ErrUnsupported) {
+				t.Fatalf("error = %v, want unsupported", operationErr)
+			}
+		})
+	}
+	if calls := options.calls(); len(calls) != 0 {
+		t.Fatalf("disabled-family operations accessed socket options: %v", calls)
 	}
 }
 

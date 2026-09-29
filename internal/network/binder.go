@@ -23,6 +23,10 @@ var (
 	// selected path. A caller must not retry the operation without its binding
 	// policy because that can send traffic through an owned tunnel.
 	ErrUnderlayUnavailable = errors.New("underlay is unavailable")
+	// ErrUnderlayChanged reports that the selected path changed while the
+	// mandatory socket policy was being applied. The caller must start a new
+	// operation with the replacement path.
+	ErrUnderlayChanged = errors.New("underlay changed during socket binding")
 	// ErrLocalAddressConflict reports that an explicit local address does not
 	// belong to the selected underlay.
 	ErrLocalAddressConflict = errors.New("local address conflicts with underlay")
@@ -150,8 +154,25 @@ func (b *Binder) Control(operation string, family Family, local netip.Addr, call
 		if controlErr != nil {
 			return bindError(operation, family, path, "apply interface option", controlErr)
 		}
+		currentPath, err := b.currentPath(operation, family, local)
+		if err != nil {
+			return err
+		}
+		if !sameBindingPath(path, currentPath) {
+			return bindError(operation, family, path, "verify selected path", ErrUnderlayChanged)
+		}
 		return nil
 	}, nil
+}
+
+func sameBindingPath(left, right *underlay.Path) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.InterfaceIndex == right.InterfaceIndex &&
+		left.InterfaceLUID == right.InterfaceLUID &&
+		strings.EqualFold(left.InterfaceGUID, right.InterfaceGUID) &&
+		left.Source == right.Source
 }
 
 func (b *Binder) currentPath(operation string, family Family, local netip.Addr) (*underlay.Path, error) {

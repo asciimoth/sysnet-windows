@@ -131,6 +131,76 @@ func TestSocketBinderUsesReplacementSnapshotAfterCallerControl(t *testing.T) {
 	}
 }
 
+func TestSocketBinderRejectsSelectionChangeDuringOptionApply(t *testing.T) {
+	t.Parallel()
+	initial := testPath(4, 41)
+	initial.InterfaceLUID = 410
+	initial.InterfaceGUID = "{00000000-0000-0000-0000-000000000041}"
+	tests := []struct {
+		name        string
+		replacement underlay.Snapshot
+		want        error
+	}{
+		{name: "index", replacement: snapshotFor(FamilyIPv4, func() underlay.Path {
+			path := initial
+			path.InterfaceIndex = 42
+			return path
+		}()), want: ErrUnderlayChanged},
+		{name: "interface instance", replacement: snapshotFor(FamilyIPv4, func() underlay.Path {
+			path := initial
+			path.InterfaceLUID++
+			return path
+		}()), want: ErrUnderlayChanged},
+		{name: "source address", replacement: snapshotFor(FamilyIPv4, func() underlay.Path {
+			path := initial
+			path.Source = netip.MustParseAddr("192.0.2.11")
+			return path
+		}()), want: ErrUnderlayChanged},
+		{name: "underlay loss", replacement: underlay.Snapshot{}, want: ErrUnderlayUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			paths := &fakePaths{snapshot: snapshotFor(FamilyIPv4, initial)}
+			options := &fakeOptions{setHook: func() { paths.set(test.replacement) }}
+			binder := &Binder{paths: paths, options: options}
+			control, err := binder.Control("dial TCP", FamilyIPv4, netip.Addr{}, nil)
+			if err != nil {
+				t.Fatalf("Control: %v", err)
+			}
+			err = control("tcp4", "192.0.2.1:443", &fakeRawConn{descriptor: 10})
+			if !errors.Is(err, test.want) {
+				t.Fatalf("error = %v, want %v", err, test.want)
+			}
+			if got := strings.Join(options.calls(), ","); got != "get,set:41,get" {
+				t.Fatalf("option calls = %s, want get,set:41,get", got)
+			}
+		})
+	}
+}
+
+func TestSocketBinderAcceptsNonBindingPathMetadataChange(t *testing.T) {
+	t.Parallel()
+	initial := testPath(4, 41)
+	initial.RouteMetric = 10
+	paths := &fakePaths{snapshot: snapshotFor(FamilyIPv4, initial)}
+	options := &fakeOptions{setHook: func() {
+		replacement := initial
+		replacement.RouteMetric = 20
+		replacement.InterfaceMetric = 30
+		replacement.InterfaceName = "renamed"
+		paths.set(snapshotFor(FamilyIPv4, replacement))
+	}}
+	binder := &Binder{paths: paths, options: options}
+	control, err := binder.Control("dial TCP", FamilyIPv4, netip.Addr{}, nil)
+	if err != nil {
+		t.Fatalf("Control: %v", err)
+	}
+	if err := control("tcp4", "192.0.2.1:443", &fakeRawConn{descriptor: 10}); err != nil {
+		t.Fatalf("metadata-only change error = %v", err)
+	}
+}
+
 func TestSocketBinderExposesAllFailuresWithContext(t *testing.T) {
 	t.Parallel()
 	nativeErr := syscall.Errno(10013)
@@ -217,6 +287,7 @@ type fakeOptions struct {
 	getErr     error
 	setErr     error
 	discardSet bool
+	setHook    func()
 }
 
 func (f *fakeOptions) get(uintptr, Family) (uint32, error) {
@@ -231,13 +302,18 @@ func (f *fakeOptions) get(uintptr, Family) (uint32, error) {
 
 func (f *fakeOptions) set(_ uintptr, _ Family, value uint32) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.log = append(f.log, "set:"+strconv.FormatUint(uint64(value), 10))
 	if f.setErr != nil {
+		f.mu.Unlock()
 		return f.setErr
 	}
 	if !f.discardSet {
 		f.value = value
+	}
+	hook := f.setHook
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
 	}
 	return nil
 }
