@@ -2,12 +2,68 @@
 
 Windows network integration for `github.com/asciimoth/gonnect`.
 
+> [!WARNING]
+> This project is experimental. APIs and behavior can change without notice.
+> Do not use it for production systems without your own review and tests.
+
 The root package implements host-aware allocation, regular and default Wintun
 ownership, underlay selection, the outbound network bypass, confined local
 networking, Windows DNS ownership, the local managed-DNS proxy, and executable
 tree exclusions. The repository also contains the locked development environment
 and Windows test harness for the work in
 [`docs/sysnet-windows-implementation-testing-plan.md`](docs/sysnet-windows-implementation-testing-plan.md).
+
+## Support status
+
+The initial release scope is implemented and qualified on these matrix entries:
+
+| Platform            | Architecture | Status    |
+| ------------------- | ------------ | --------- |
+| Windows Server 2022 | amd64        | Qualified |
+| Windows 11          | amd64        | Qualified |
+| Windows 11          | arm64        | Qualified |
+
+Regular and default TUNs, IPv4 and IPv6 destination routing, OutNet, LocalNet,
+managed DNS, non-strict executable-tree exclusions, and best-effort ownership
+matchers are supported. Include-only routing, strict routing, preferred-source
+routes, multicast bypass, and adapter rename are not supported.
+
+See the [integration guide](docs/integration.md),
+[limitations](docs/limitations.md), [validation status](VALIDATION.md), and
+[remaining optional work](docs/sysnet-windows-implementation-testing-plan.md)
+for the detailed contract.
+
+## Installation
+
+Add the Go module to the application and deploy an architecture-matched
+`wintun.dll`. The module does not install drivers. Applications that use
+executable-tree exclusions must also deploy the compatible signed split-driver
+package recorded in `dev/winvm/native-driver-lock.json`. Native networking and
+driver operations can require an elevated service identity.
+
+## Basic use
+
+The zero configuration enables IPv4 and IPv6. Inspect capabilities before the
+application offers optional operations:
+
+```go
+system, err := windows.New(windows.SystemConfig{})
+if err != nil {
+    return err
+}
+
+capabilities := system.Capabilities()
+_ = capabilities
+
+if err := system.Close(); err != nil {
+    return err
+}
+return nil
+```
+
+Always check the `Close` error in production code. It reports cleanup failures
+and recovery-required state. See the integration guide for complete lifecycle,
+TUN, DNS, and error-handling requirements.
 
 ## Ownership matchers
 
@@ -157,3 +213,8 @@ that each OutNet socket operation uses the underlay link. It also removes the
 selected underlay during live traffic and rejects a run if new traffic falls
 back to the tunnel. A missing required test is not reported as a successful
 qualification.
+
+`just check` is the routine gate and intentionally omits the slow resource and
+packet-flow suites. Run `just check-release` for release qualification. The
+privileged and long-running gates run manually on disposable systems; they are
+not part of routine GitHub Actions CI.

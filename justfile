@@ -12,7 +12,8 @@ check-fast: verify tidy-check fmt-check typos lint vet test fuzz build-windows w
 # This gate needs the licensed media and KVM setup described in dev/winvm/README.md.
 check: check-fast test-total
 
-# This future release gate also includes planned packet-flow coverage.
+# This slow release gate adds resource and packet-flow qualification. Keep it
+# separate from the routine check gate.
 check-release: check-fast test-release
 
 verify:
@@ -26,13 +27,13 @@ tidy-check:
 
 fmt:
     golangci-lint fmt ./...
-    mdformat --wrap 80 README.md THIRD_PARTY_NOTICES.md dev/winvm/README.md
+    mdformat --wrap 80 README.md THIRD_PARTY_NOTICES.md VALIDATION.md dev/winvm/README.md docs/*.md
     nixfmt flake.nix
     shfmt -w -i 4 -ci $(find dev -type f -name '*.sh' | sort)
 
 fmt-check:
     test -z "$(gofmt -l .)"
-    mdformat --check --wrap 80 README.md THIRD_PARTY_NOTICES.md dev/winvm/README.md
+    mdformat --check --wrap 80 README.md THIRD_PARTY_NOTICES.md VALIDATION.md dev/winvm/README.md docs/*.md
     nixfmt --check flake.nix
     shfmt -d -i 4 -ci $(find dev -type f -name '*.sh' | sort)
 
@@ -43,7 +44,7 @@ lint:
     golangci-lint run ./...
     actionlint .github/workflows/*.yml
     deadnix --fail flake.nix
-    markdownlint README.md THIRD_PARTY_NOTICES.md dev/winvm/README.md docs/*.md
+    markdownlint README.md THIRD_PARTY_NOTICES.md VALIDATION.md dev/winvm/README.md docs/*.md
     shellcheck -x $(find dev -type f -name '*.sh' | sort)
     statix check .
 
