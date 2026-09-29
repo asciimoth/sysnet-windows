@@ -856,7 +856,7 @@ defer rollback to a later milestone.
     - Complete this step when R17-R24 pass for controlled native processes and
       cache resource limits remain stable during churn.
 
-3. **Step 23 - Compile and expose matcher rules.**
+3. **Step 23 - Compile and expose matcher rules. (Completed)**
 
     - Implement `win-pid` and `win-exe-path` validation, completion and matching.
       Use one path canonicalization policy for configuration and observed

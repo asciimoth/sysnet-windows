@@ -18,6 +18,10 @@ const (
 	// DefaultNamePrefix is used when a caller does not request an adapter name.
 	DefaultNamePrefix = "gonnect"
 	maxAdapterNameLen = 128
+	// Wintun can return a transient timeout after its open operation removes an
+	// abandoned adapter. One retry observes the post-recovery state without
+	// turning arbitrary native failures into an unbounded creation delay.
+	maxNameInspectionAttempts = 2
 )
 
 var (
@@ -64,6 +68,20 @@ type ManagedTun interface {
 // is unknown.
 type Factory interface {
 	Create(context.Context, Config) (ManagedTun, error)
+}
+
+func retryNameInspection(ctx context.Context, inspect func() error, transient func(error) bool) error {
+	var lastErr error
+	for attempt := 0; attempt < maxNameInspectionAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(err, lastErr)
+		}
+		lastErr = inspect()
+		if lastErr == nil || !transient(lastErr) {
+			return lastErr
+		}
+	}
+	return lastErr
 }
 
 type mtuReporter interface {

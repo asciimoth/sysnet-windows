@@ -56,6 +56,14 @@ func (d systemDependencies) constrainCapabilityFacts(facts capabilityProbeFacts)
 	} else if !capabilityFactSet(facts.dnsConfig) {
 		facts.dnsConfig = sysnet.Capability{State: sysnet.CapabilityAvailable}
 	}
+	if d.ownerLookup == nil {
+		facts.ownerLookup = missingDependencyCapability("owner lookup is not configured")
+	} else {
+		// A configured Lookup is the complete matcher dependency. Unlike native
+		// mutation boundaries, it needs no eager host probe: individual socket
+		// and process access failures remain per-match errors.
+		facts.ownerLookup = sysnet.Capability{State: sysnet.CapabilityAvailable}
+	}
 	return facts
 }
 

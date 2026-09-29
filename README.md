@@ -5,10 +5,22 @@ Windows network integration for `github.com/asciimoth/gonnect`.
 The root package implements host-aware allocation, regular and default Wintun
 ownership, underlay selection, the outbound network bypass, confined local
 networking, Windows DNS ownership, and the local managed-DNS proxy. Later
-milestones will add matchers and application exclusions. The repository also
-contains the locked development environment and Windows test harness for the
-work in
+milestones will add application exclusions. The repository also contains the
+locked development environment and Windows test harness for the work in
 [`docs/sysnet-windows-implementation-testing-plan.md`](docs/sysnet-windows-implementation-testing-plan.md).
+
+## Ownership matchers
+
+`System.BuildMatcher` supports `win-pid` and `win-exe-path` for IPv4 and IPv6
+TCP and UDP flows. These matchers use best-effort Windows socket ownership.
+Lookup failure, ambiguous ownership, and inaccessible executable metadata are
+errors, not confirmed nonmatches. PID rules do not require executable metadata.
+
+Executable paths use exact, Unicode case-insensitive matching after lexical
+drive-letter path normalization. Hard links remain distinct paths. UNC,
+extended/device, relative, glob, alternate-stream, and ambiguous Win32 path
+forms are rejected during validation. This feature identifies an observed flow;
+it is not a routing enforcement boundary.
 
 ## Outbound network
 

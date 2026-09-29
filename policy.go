@@ -258,6 +258,7 @@ func normalizeRule(config normalizedSystemConfig, rule sysnet.Rule, context sysn
 	}
 
 	typeName := strings.TrimSpace(rule.Type)
+	rawValue := rule.Rule
 	value := strings.TrimSpace(rule.Rule)
 	if value == "" {
 		return normalizedRule{}, invalidReport("Rule.Rule", "rule value must not be empty", nil)
@@ -274,9 +275,11 @@ func normalizeRule(config normalizedSystemConfig, rule sysnet.Rule, context sysn
 		if !config.exclusions {
 			return normalizedRule{}, unsupportedReport("Rule.Type", sysnet.ReasonDisabledByConfig, "executable exclusions are disabled")
 		}
-		if issue := validateWindowsExecutablePath(value); issue != nil {
+		canonical, issue := canonicalWindowsExecutablePath(rawValue)
+		if issue != nil {
 			return normalizedRule{}, sysnet.ValidationReport{Issues: []sysnet.ValidationIssue{*issue}}
 		}
+		value = canonical
 	case "win-pid":
 		if context.Matcher == nil {
 			return normalizedRule{}, unsupportedReport("Rule.Context", sysnet.ReasonUnsupportedCombination, "win-pid is a matcher rule")
@@ -296,9 +299,11 @@ func normalizeRule(config normalizedSystemConfig, rule sysnet.Rule, context sysn
 		if !config.matchers {
 			return normalizedRule{}, unsupportedReport("Rule.Type", sysnet.ReasonDisabledByConfig, "matchers are disabled")
 		}
-		if issue := validateWindowsExecutablePath(value); issue != nil {
+		canonical, issue := canonicalWindowsExecutablePath(rawValue)
+		if issue != nil {
 			return normalizedRule{}, sysnet.ValidationReport{Issues: []sysnet.ValidationIssue{*issue}}
 		}
+		value = canonical
 	default:
 		return normalizedRule{}, unsupportedReport("Rule.Type", sysnet.ReasonNotImplemented, "rule type is not supported")
 	}
@@ -351,20 +356,66 @@ func validateRuleContext(config normalizedSystemConfig, context sysnet.RuleConte
 	return nil
 }
 
-func validateWindowsExecutablePath(value string) *sysnet.ValidationIssue {
-	if strings.HasPrefix(value, `\\`) {
+// canonicalWindowsExecutablePath applies the same lexical Windows path policy
+// to configured rules and paths returned by QueryFullProcessImageName. It does
+// not resolve the file. Thus, a hard link remains a distinct path and a later
+// rename or replacement is observed through the next owner lookup.
+func canonicalWindowsExecutablePath(value string) (string, *sysnet.ValidationIssue) {
+	if strings.HasPrefix(value, `\\`) || strings.HasPrefix(value, `//`) {
 		issue := validationIssue("Rule.Rule", sysnet.CapabilityUnsupported, sysnet.ReasonUnsupportedCombination, "UNC executable paths are not supported", nil)
-		return &issue
+		return "", &issue
 	}
 	if strings.ContainsAny(value, "*?[]") {
 		issue := validationIssue("Rule.Rule", 0, "", "executable path must not contain a pattern", sysnet.ErrInvalidOptions)
-		return &issue
+		return "", &issue
 	}
 	if len(value) < 4 || !isASCIILetter(value[0]) || value[1] != ':' || (value[2] != '\\' && value[2] != '/') {
 		issue := validationIssue("Rule.Rule", 0, "", "executable path must be an absolute local drive path", sysnet.ErrInvalidOptions)
-		return &issue
+		return "", &issue
 	}
-	return nil
+	if strings.IndexFunc(value, func(character rune) bool { return character < ' ' || character == 0x7f }) >= 0 {
+		issue := validationIssue("Rule.Rule", 0, "", "executable path must not contain control characters", sysnet.ErrInvalidOptions)
+		return "", &issue
+	}
+	if strings.Contains(value[2:], ":") {
+		issue := validationIssue("Rule.Rule", sysnet.CapabilityUnsupported, sysnet.ReasonUnsupportedCombination, "alternate data stream paths are not supported", nil)
+		return "", &issue
+	}
+	if value[len(value)-1] == '\\' || value[len(value)-1] == '/' {
+		issue := validationIssue("Rule.Rule", 0, "", "executable path must name a file", sysnet.ErrInvalidOptions)
+		return "", &issue
+	}
+
+	components := strings.FieldsFunc(value[3:], func(character rune) bool { return character == '\\' || character == '/' })
+	cleaned := make([]string, 0, len(components))
+	for _, component := range components {
+		switch component {
+		case ".":
+			continue
+		case "..":
+			if len(cleaned) > 0 {
+				cleaned = cleaned[:len(cleaned)-1]
+			}
+		default:
+			// Win32 strips trailing spaces and dots from ordinary path
+			// components. Reject these spellings instead of silently matching a
+			// different file identity.
+			if strings.HasSuffix(component, " ") || strings.HasSuffix(component, ".") {
+				issue := validationIssue("Rule.Rule", sysnet.CapabilityUnsupported, sysnet.ReasonUnsupportedCombination, "path components ending in a space or dot are not supported", nil)
+				return "", &issue
+			}
+			cleaned = append(cleaned, component)
+		}
+	}
+	if len(cleaned) == 0 {
+		issue := validationIssue("Rule.Rule", 0, "", "executable path must name a file", sysnet.ErrInvalidOptions)
+		return "", &issue
+	}
+	drive := value[0]
+	if drive >= 'a' && drive <= 'z' {
+		drive -= 'a' - 'A'
+	}
+	return string(drive) + `:\` + strings.Join(cleaned, `\`), nil
 }
 
 func isASCIILetter(value byte) bool {

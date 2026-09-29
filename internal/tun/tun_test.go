@@ -1,6 +1,7 @@
 package tun
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -13,6 +14,45 @@ import (
 
 	gtun "github.com/asciimoth/gonnect/tun"
 )
+
+func TestRetryNameInspection(t *testing.T) {
+	t.Parallel()
+	transient := errors.New("transient inspection failure")
+	terminal := errors.New("terminal inspection failure")
+	tests := []struct {
+		name      string
+		results   []error
+		cancelled bool
+		wantCalls int
+		wantErr   error
+	}{
+		{name: "success", results: []error{nil}, wantCalls: 1},
+		{name: "recovery retry", results: []error{transient, nil}, wantCalls: 2},
+		{name: "bounded transient failures", results: []error{transient, transient}, wantCalls: 2, wantErr: transient},
+		{name: "terminal failure", results: []error{terminal}, wantCalls: 1, wantErr: terminal},
+		{name: "cancelled before inspection", cancelled: true, wantErr: context.Canceled},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			if test.cancelled {
+				cancel()
+			} else {
+				defer cancel()
+			}
+			calls := 0
+			err := retryNameInspection(ctx, func() error {
+				result := test.results[calls]
+				calls++
+				return result
+			}, func(err error) bool { return errors.Is(err, transient) })
+			if calls != test.wantCalls || !errors.Is(err, test.wantErr) || test.wantErr == nil && err != nil {
+				t.Fatalf("retryNameInspection() calls = %d, error = %v; want %d, %v", calls, err, test.wantCalls, test.wantErr)
+			}
+		})
+	}
+}
 
 var testMetadata = Metadata{
 	GUID:  "{01234567-89ab-cdef-0123-456789abcdef}",

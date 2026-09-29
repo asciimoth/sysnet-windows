@@ -267,11 +267,19 @@ func (s *System) CheckRule(rule sysnet.Rule, context sysnet.RuleContext) sysnet.
 	return result
 }
 
-func (s *System) CompleteRule(sysnet.Rule, sysnet.RuleContext) ([]string, error) {
+func (s *System) CompleteRule(rule sysnet.Rule, context sysnet.RuleContext) ([]string, error) {
 	if err := s.acceptingWork(); err != nil {
 		return nil, err
 	}
-	return nil, sysnet.ErrNotSupported
+	normalized, validation := normalizeRule(s.policyConfig(), rule, context)
+	if err := validation.Err(); err != nil {
+		return nil, err
+	}
+	ruleCapability := s.Capabilities().Rule(normalized.typeName)
+	if ruleCapability.Completion.State != sysnet.CapabilityAvailable {
+		return nil, capabilityError("Rule.Completion", ruleCapability.Completion)
+	}
+	return []string{normalized.value}, nil
 }
 
 // AllocIP returns the System's shared host-aware IP allocator.
@@ -333,7 +341,19 @@ func (s *System) BuildMatcher(rule sysnet.Rule) (sysnet.Matcher, error) {
 		for _, transport := range []sysnet.Transport{sysnet.TransportTCP, sysnet.TransportUDP} {
 			profile := matcherProfile(capabilities.Rule(normalized.typeName), sysnet.MatcherProfileKey{Family: family, Transport: transport})
 			if profile.State == sysnet.CapabilityAvailable {
-				return nil, sysnet.ErrNotSupported
+				if s.dependencies.ownerLookup == nil {
+					return nil, capabilityError("Matcher", missingDependencyCapability("owner lookup is not configured"))
+				}
+				built := newMatcher(s.dependencies.ownerLookup, s.config.operationTimeout, normalized)
+				release, trackErr := s.trackResource(built)
+				if trackErr != nil {
+					return nil, trackErr
+				}
+				if err := built.setRelease(release); err != nil {
+					release()
+					return nil, err
+				}
+				return built, nil
 			}
 			if unavailable == nil && (profile.State != sysnet.CapabilityUnknown || len(profile.Reasons) != 0) {
 				unavailable = capabilityError("Matcher", profile.Capability)

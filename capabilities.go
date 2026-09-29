@@ -69,9 +69,7 @@ type implementationSupport struct {
 }
 
 func currentImplementationSupport() implementationSupport {
-	// Host-aware allocation and regular TUN operations are implemented by M1.
-	// Later milestones enable the default TUN, network, and matcher rows only
-	// after their native and packet-path gates pass.
+	// Enable a row only after its implementation and packet-path gates pass.
 	return implementationSupport{
 		allocateIP:              true,
 		allocateSubnet:          true,
@@ -88,17 +86,19 @@ func currentImplementationSupport() implementationSupport {
 		dnsProxy:                true,
 		dnsConfigure:            true,
 		outDNS:                  true,
+		matchers:                true,
 	}
 }
 
 type capabilityProbeFacts struct {
-	allocation sysnet.Capability
-	tunFactory sysnet.Capability
-	netIO      sysnet.Capability
-	split      sysnet.Capability
-	underlay   sysnet.Capability
-	dnsProxy   sysnet.Capability
-	dnsConfig  sysnet.Capability
+	allocation  sysnet.Capability
+	tunFactory  sysnet.Capability
+	netIO       sysnet.Capability
+	split       sysnet.Capability
+	underlay    sysnet.Capability
+	dnsProxy    sysnet.Capability
+	dnsConfig   sysnet.Capability
+	ownerLookup sysnet.Capability
 }
 
 func initialProbeFacts() capabilityProbeFacts {
@@ -110,6 +110,7 @@ func initialProbeFacts() capabilityProbeFacts {
 		allocation: unknown.Clone(), tunFactory: unknown.Clone(),
 		netIO: unknown.Clone(), split: unknown.Clone(),
 		underlay: unknown.Clone(), dnsProxy: unknown.Clone(), dnsConfig: unknown.Clone(),
+		ownerLookup: unknown.Clone(),
 	}
 }
 
@@ -127,6 +128,7 @@ func failedProbeFacts(err error) capabilityProbeFacts {
 		allocation: unknown.Clone(), tunFactory: unknown.Clone(),
 		netIO: unknown.Clone(), split: unknown.Clone(),
 		underlay: unknown.Clone(), dnsProxy: unknown.Clone(), dnsConfig: unknown.Clone(),
+		ownerLookup: unknown.Clone(),
 	}
 }
 
@@ -243,8 +245,8 @@ func buildCapabilityReport(
 		)
 	}
 
-	report.Rules = ruleCapabilities(config, support, state, families)
-	report.Ownership = ownerCapabilities(config, support, state)
+	report.Rules = ruleCapabilities(config, support, facts, state, families)
+	report.Ownership = ownerCapabilities(config, support, facts, state)
 	report.Operations = append(report.Operations, networkOperationCatalog(config, support, facts, state, families)...)
 	return report
 }
@@ -423,6 +425,7 @@ func familyCapability(capability sysnet.Capability, config normalizedSystemConfi
 func ruleCapabilities(
 	config normalizedSystemConfig,
 	support implementationSupport,
+	facts capabilityProbeFacts,
 	state lifecycleState,
 	families []sysnet.AddressFamily,
 ) []sysnet.RuleCapability {
@@ -433,6 +436,9 @@ func ruleCapabilities(
 	exclusionValidation = lifecycleCapability(exclusionValidation, state)
 	matcherValidation := implementedCapability(support.matcherRuleValidation || support.matchers)
 	matcher := implementedCapability(support.matchers)
+	if capabilityFactSet(facts.ownerLookup) {
+		matcher = dependentCapability(matcher, facts.ownerLookup)
+	}
 	if !config.matchers {
 		matcherValidation = unsupported(sysnet.ReasonDisabledByConfig, "matchers are disabled")
 		matcher = unsupported(sysnet.ReasonDisabledByConfig, "matchers are disabled")
@@ -460,7 +466,7 @@ func ruleCapabilities(
 			ValueKind:   valueKind,
 			SemanticsID: semantics,
 			Validation:  matcherValidation.Clone(),
-			Completion:  unsupported(sysnet.ReasonNotImplemented, "rule completion is not implemented"),
+			Completion:  matcherValidation.Clone(),
 		}
 		for _, family := range families {
 			if family == sysnet.FamilyDual {
@@ -483,8 +489,11 @@ func ruleCapabilities(
 	return rules
 }
 
-func ownerCapabilities(config normalizedSystemConfig, support implementationSupport, state lifecycleState) []sysnet.OwnerCapability {
+func ownerCapabilities(config normalizedSystemConfig, support implementationSupport, facts capabilityProbeFacts, state lifecycleState) []sysnet.OwnerCapability {
 	capability := implementedCapability(support.matchers)
+	if capabilityFactSet(facts.ownerLookup) {
+		capability = dependentCapability(capability, facts.ownerLookup)
+	}
 	if !config.matchers {
 		capability = unsupported(sysnet.ReasonDisabledByConfig, "matchers are disabled")
 	}

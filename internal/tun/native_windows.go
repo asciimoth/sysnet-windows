@@ -52,7 +52,7 @@ func (NativeFactory) Create(ctx context.Context, config Config) (ManagedTun, err
 	if name == "" {
 		name = defaultName(config.NamePrefix, guidText)
 	}
-	if err := rejectExistingName(name); err != nil {
+	if err := rejectExistingName(ctx, name); err != nil {
 		return nil, err
 	}
 
@@ -89,16 +89,20 @@ func (NativeFactory) Create(ctx context.Context, config Config) (ManagedTun, err
 	return adapter, nil
 }
 
-func rejectExistingName(name string) error {
-	existing, err := wintun.OpenAdapter(name)
-	if err == nil {
-		closeErr := existing.Close()
-		return errors.Join(fmt.Errorf("%w: %q", ErrNameCollision, name), closeErr)
-	}
-	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_NOT_FOUND) {
-		return nil
-	}
-	return fmt.Errorf("inspect Wintun adapter name %q: %w", name, err)
+func rejectExistingName(ctx context.Context, name string) error {
+	return retryNameInspection(ctx, func() error {
+		existing, err := wintun.OpenAdapter(name)
+		if err == nil {
+			closeErr := existing.Close()
+			return errors.Join(fmt.Errorf("%w: %q", ErrNameCollision, name), closeErr)
+		}
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_NOT_FOUND) {
+			return nil
+		}
+		return fmt.Errorf("inspect Wintun adapter name %q: %w", name, err)
+	}, func(err error) bool {
+		return errors.Is(err, windows.WAIT_TIMEOUT)
+	})
 }
 
 func canonicalGUID(guid windows.GUID) string {

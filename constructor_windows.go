@@ -73,11 +73,12 @@ func (p nativeCapabilityProbe) Probe(ctx context.Context) capabilityProbeFacts {
 		tunFactoryCapability = missingDependencyCapability("wintun.dll is not available to the process")
 	}
 	return capabilityProbeFacts{
-		allocation: netIOCapability.Clone(),
-		tunFactory: tunFactoryCapability,
-		netIO:      netIOCapability,
-		underlay:   netIOCapability.Clone(),
-		dnsConfig:  netIOCapability.Clone(),
+		allocation:  netIOCapability.Clone(),
+		tunFactory:  tunFactoryCapability,
+		netIO:       netIOCapability,
+		underlay:    netIOCapability.Clone(),
+		dnsConfig:   netIOCapability.Clone(),
+		ownerLookup: sysnet.Capability{State: sysnet.CapabilityAvailable},
 		split: sysnet.Capability{
 			State:   sysnet.CapabilityUnknown,
 			Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeNotRun},
