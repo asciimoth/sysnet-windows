@@ -17,6 +17,9 @@
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT27EnumerationFailureAfterSelection",
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestReplaceOwnedIPsAllowsDerivedOwnedRoutes",
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestReplaceOwnedIPsRejectsForeignRoutesInsideOwnedPrefix",
+        "github.com/asciimoth/sysnet-windows/internal/dns::TestD01D04ProxyServesUDPAndTCPWithTruncationFallback",
+        "github.com/asciimoth/sysnet-windows/internal/dns::TestD05D08ProviderReplacementNilAndShutdown",
+        "github.com/asciimoth/sysnet-windows/internal/dns::TestD07ConcurrentQueriesAndProviderSwaps",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT04T06ExactManagerOwnedDeltaPreservesForeignRows",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT04T06ExactManagerRechecksValueImmediatelyBeforeDelete",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT04T06ExactManagerRejectsForeignDuplicateAndChangedOwnedValue",
@@ -56,7 +59,7 @@
         "github.com/asciimoth/sysnet-windows/internal/tun::TestT13T15CloseUnblocksIOAndNormalizesErrors"
       ],
       "plannedCases": [
-        "M3 native DNS cases",
+        "M3 Windows DNS configuration and restoration cases",
         "M4 native owner lookup cases"
       ]
     },

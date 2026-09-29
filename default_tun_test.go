@@ -3,9 +3,13 @@ package windows
 import (
 	"errors"
 	"net/netip"
+	"sync"
 	"testing"
+	"time"
 
+	gonnectdns "github.com/asciimoth/gonnect/dns"
 	"github.com/asciimoth/gonnect/sysnet"
+	internaldns "github.com/asciimoth/sysnet-windows/internal/dns"
 	"github.com/asciimoth/sysnet-windows/internal/netio"
 	"github.com/asciimoth/sysnet-windows/internal/underlay"
 )
@@ -231,6 +235,87 @@ func TestNamedDefaultTunReplacementRecordsEarlyRetirement(t *testing.T) {
 	}
 }
 
+func TestD05D08DefaultTunProviderLifecycle(t *testing.T) {
+	proxyFactory := &fakeDNSProxyFactory{}
+	system := newDefaultTunTestSystemWithDNS(t, &regularTunFactory{}, newRegularTunManager(), proxyFactory)
+	device, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.101.0.1/24"}})
+	if err != nil {
+		t.Fatalf("BuildDefaultTun() error = %v", err)
+	}
+	provider := &inertDNSProvider{requests: make(chan gonnectdns.Request)}
+	if err := device.SetDNS(provider); err != nil {
+		t.Fatalf("SetDNS(provider) error = %v", err)
+	}
+	proxy := proxyFactory.proxies[0]
+	proxy.mu.Lock()
+	gotProvider := proxy.provider
+	proxy.mu.Unlock()
+	if gotProvider != provider {
+		t.Fatal("SetDNS(provider) did not attach the provider")
+	}
+	if err := device.SetDNS(nil); err != nil {
+		t.Fatalf("SetDNS(nil) error = %v", err)
+	}
+	proxy.mu.Lock()
+	gotProvider = proxy.provider
+	proxy.mu.Unlock()
+	if gotProvider != nil {
+		t.Fatal("SetDNS(nil) selected an implicit provider")
+	}
+	if err := device.Close(); err != nil {
+		t.Fatalf("DefaultTun.Close() error = %v", err)
+	}
+	if !proxy.Closed() {
+		t.Fatal("DefaultTun.Close() did not close its DNS proxy")
+	}
+	if err := device.SetDNS(provider); !errors.Is(err, sysnet.ErrUnknownTun) {
+		t.Fatalf("SetDNS() after Close error = %v, want ErrUnknownTun", err)
+	}
+}
+
+func TestDNSProxyBindFailureCleansStagedDefaultTun(t *testing.T) {
+	factory := &regularTunFactory{}
+	manager := newRegularTunManager()
+	bindErr := errors.New("injected DNS bind failure")
+	system := newDefaultTunTestSystemWithDNS(t, factory, manager, &fakeDNSProxyFactory{err: bindErr})
+	if _, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.102.0.1/24"}}); !errors.Is(err, bindErr) {
+		t.Fatalf("BuildDefaultTun() error = %v, want bind failure", err)
+	}
+	if system.defaultTun != nil || len(factory.created) != 1 || !factory.created[0].closed {
+		t.Fatal("DNS bind failure left a published or open default TUN")
+	}
+	metadata := factory.created[0].Metadata()
+	iface := netio.Interface{LUID: metadata.LUID, Index: metadata.Index, GUID: metadata.GUID}
+	if config := manager.config(iface); !netIOConfigEmpty(config) {
+		t.Fatalf("DNS bind failure left NetIO state: %+v", config)
+	}
+}
+
+func TestDNSProxyBindsAfterAddressAndBeforeDefaultRoute(t *testing.T) {
+	tunFactory := &regularTunFactory{}
+	manager := newRegularTunManager()
+	var observedAddress netip.Addr
+	var observedConfig netio.Config
+	proxyFactory := &fakeDNSProxyFactory{onCreate: func(address netip.Addr) {
+		observedAddress = address
+		metadata := tunFactory.created[0].Metadata()
+		observedConfig = manager.config(netio.Interface{LUID: metadata.LUID, Index: metadata.Index, GUID: metadata.GUID})
+	}}
+	system := newDefaultTunTestSystemWithDNS(t, tunFactory, manager, proxyFactory)
+	if _, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.103.0.1/24"}}); err != nil {
+		t.Fatalf("BuildDefaultTun() error = %v", err)
+	}
+	if observedAddress != netip.MustParseAddr("10.103.0.1") {
+		t.Fatalf("proxy address = %v, want effective DnsIP", observedAddress)
+	}
+	if len(observedConfig.Addresses) != 1 || observedConfig.Addresses[0].Addr() != observedAddress {
+		t.Fatalf("config when proxy bound = %+v, want usable DNS address", observedConfig)
+	}
+	if containsRoute(observedConfig.Routes, netip.MustParsePrefix("0.0.0.0/0")) {
+		t.Fatal("default route was published before the DNS proxy bound")
+	}
+}
+
 func containsRoute(routes []netio.Route, destination netip.Prefix) bool {
 	for _, route := range routes {
 		if route.Destination == destination {
@@ -241,6 +326,10 @@ func containsRoute(routes []netio.Route, destination netip.Prefix) bool {
 }
 
 func newDefaultTunTestSystem(t *testing.T, factory *regularTunFactory, manager netio.Manager) *System {
+	return newDefaultTunTestSystemWithDNS(t, factory, manager, &fakeDNSProxyFactory{})
+}
+
+func newDefaultTunTestSystemWithDNS(t *testing.T, factory *regularTunFactory, manager netio.Manager, dnsFactory internaldns.ProxyFactory) *System {
 	t.Helper()
 	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
 	system, err := newSystem(SystemConfig{}, systemDependencies{
@@ -248,6 +337,7 @@ func newDefaultTunTestSystem(t *testing.T, factory *regularTunFactory, manager n
 		netIO:            manager,
 		allocationReader: emptyHostReader{},
 		underlay:         staticUnderlaySource{candidates: []underlay.Candidate{outNetCandidate(false), outNetCandidate(true)}},
+		dnsProxyFactory:  dnsFactory,
 		capabilityProbe: staticCapabilityProbe{facts: capabilityProbeFacts{
 			netIO: available, underlay: available,
 		}},
@@ -261,4 +351,56 @@ func newDefaultTunTestSystem(t *testing.T, factory *regularTunFactory, manager n
 		}
 	})
 	return system
+}
+
+type inertDNSProvider struct{ requests chan gonnectdns.Request }
+
+func (p *inertDNSProvider) Requests() chan<- gonnectdns.Request { return p.requests }
+func (*inertDNSProvider) Close() error                          { return nil }
+
+type fakeDNSProxyFactory struct {
+	mu       sync.Mutex
+	proxies  []*fakeDNSProxy
+	err      error
+	onCreate func(netip.Addr)
+}
+
+func (f *fakeDNSProxyFactory) Create(address netip.Addr, _ time.Duration) (internaldns.ManagedProxy, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.onCreate != nil {
+		f.onCreate(address)
+	}
+	proxy := &fakeDNSProxy{}
+	f.proxies = append(f.proxies, proxy)
+	return proxy, nil
+}
+
+type fakeDNSProxy struct {
+	mu       sync.Mutex
+	provider gonnectdns.Interface
+	closed   bool
+}
+
+func (p *fakeDNSProxy) Attach(provider gonnectdns.Interface) {
+	p.mu.Lock()
+	p.provider = provider
+	p.mu.Unlock()
+}
+
+func (p *fakeDNSProxy) Close() error {
+	p.mu.Lock()
+	p.closed = true
+	p.provider = nil
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *fakeDNSProxy) Closed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closed
 }

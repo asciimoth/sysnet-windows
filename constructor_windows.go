@@ -7,6 +7,7 @@ import (
 	"errors"
 
 	"github.com/asciimoth/gonnect/sysnet"
+	internaldns "github.com/asciimoth/sysnet-windows/internal/dns"
 	"github.com/asciimoth/sysnet-windows/internal/netio"
 	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
 	"github.com/asciimoth/sysnet-windows/internal/underlay"
@@ -34,6 +35,7 @@ func nativeDependencies() systemDependencies {
 		netIO:            netIO,
 		allocationReader: reader,
 		underlay:         underlay.NativeSource{},
+		dnsProxyFactory:  internaldns.NativeProxyFactory{},
 		capabilityProbe:  nativeCapabilityProbe{reader: reader},
 	}
 }

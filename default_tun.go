@@ -12,6 +12,7 @@ import (
 	"github.com/asciimoth/gonnect/dns"
 	"github.com/asciimoth/gonnect/sysnet"
 	gtun "github.com/asciimoth/gonnect/tun"
+	internaldns "github.com/asciimoth/sysnet-windows/internal/dns"
 	"github.com/asciimoth/sysnet-windows/internal/netio"
 	"github.com/asciimoth/sysnet-windows/internal/reconcile"
 	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
@@ -27,11 +28,17 @@ type defaultTun struct {
 	*regularTun
 	reservationID string
 	retired       atomic.Bool
+	dnsProxy      internaldns.ManagedProxy
 }
 
-// SetDNS is enabled with the local DNS proxy in Step 17. Returning an explicit
-// error here prevents a caller from believing that unmanaged DNS was changed.
-func (*defaultTun) SetDNS(dns.Interface) error { return sysnet.ErrNotSupported }
+// SetDNS atomically replaces the provider used by this TUN's local proxy. A nil
+// provider intentionally drops requests; it never selects a host resolver.
+func (t *defaultTun) SetDNS(provider dns.Interface) error {
+	if t == nil || t.owner == nil {
+		return sysnet.ErrUnknownTun
+	}
+	return t.owner.setDefaultTunDNS(t, provider)
+}
 
 func (t *defaultTun) Close() error {
 	if t == nil || t.owner == nil {
@@ -41,7 +48,7 @@ func (t *defaultTun) Close() error {
 }
 
 func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefaultTun) (sysnet.DefaultTun, error) {
-	if s.dependencies.tunFactory == nil || s.dependencies.netIO == nil || s.underlayMonitor == nil {
+	if s.dependencies.tunFactory == nil || s.dependencies.netIO == nil || s.dependencies.dnsProxyFactory == nil || s.underlayMonitor == nil {
 		return nil, stateValidationError(sysnet.ReasonMissingDependency, "default TUN dependencies are not configured")
 	}
 	if len(desired.excludes) != 0 {
@@ -83,6 +90,7 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 	var result *defaultTun
 	adapterKey := reconcile.OwnershipKey{Kind: reconcile.KindAdapter, Scope: "default-tun", ID: fmt.Sprint(id)}
 	configKey := reconcile.OwnershipKey{Kind: reconcile.KindAddress, Scope: "default-tun", ID: fmt.Sprint(id)}
+	dnsKey := reconcile.OwnershipKey{Kind: reconcile.KindDNS, Scope: "default-tun", ID: fmt.Sprint(id)}
 	preRoute := defaultTunPreRouteConfig(s.config, desired)
 	final := defaultTunFinalConfig(preRoute, desired.family)
 	applied := netio.Config{Properties: append([]netio.Properties(nil), preRoute.Properties...)}
@@ -176,6 +184,7 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 	}
 	retireBeforeCreate := old != nil && (sameName || s.config.stableGUID != "")
 	err := s.applyOperation(func(ctx context.Context) error {
+		dnsApplied := false
 		retireOld := func() error {
 			retireErr := s.undoDefaultTun(ctx, old)
 			if retireErr != nil {
@@ -204,7 +213,11 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 		cleanupNew := func(primary error) error {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.config.operationTimeout)
 			defer cancel()
-			cleanupErr := s.journal.Undo(cleanupCtx, configKey, adapterKey)
+			keys := []reconcile.OwnershipKey{configKey, adapterKey}
+			if dnsApplied {
+				keys = append([]reconcile.OwnershipKey{dnsKey}, keys...)
+			}
+			cleanupErr := s.journal.Undo(cleanupCtx, keys...)
 			return errors.Join(primary, cleanupErr)
 		}
 		if old != nil && !retireBeforeCreate {
@@ -222,6 +235,40 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 		if err := s.dependencies.netIO.Verify(ctx, result.interfaceID(), applied); err != nil {
 			return cleanupNew(err)
 		}
+		// Bind both transports after the address is usable and before publishing
+		// default routes. Step 18 inserts OS DNS configuration after this entry.
+		dnsEntry := reconcile.Entry{
+			Key: dnsKey,
+			Apply: func(context.Context) error {
+				proxy, proxyErr := s.dependencies.dnsProxyFactory.Create(desired.dnsIP, s.config.operationTimeout)
+				if proxyErr == nil {
+					result.dnsProxy = proxy
+				}
+				return proxyErr
+			},
+			Inverse: func(context.Context) error {
+				if result == nil || result.dnsProxy == nil {
+					return nil
+				}
+				return result.dnsProxy.Close()
+			},
+			Verify: func(_ context.Context, expected reconcile.ExpectedState) error {
+				if result == nil || result.dnsProxy == nil {
+					if expected == reconcile.ExpectedUndone {
+						return nil
+					}
+					return errors.New("default TUN DNS proxy was not created")
+				}
+				if result.dnsProxy.Closed() == (expected == reconcile.ExpectedApplied) {
+					return errors.New("default TUN DNS proxy state does not match journal state")
+				}
+				return nil
+			},
+		}
+		if err := s.journal.Apply(ctx, []reconcile.Entry{dnsEntry}); err != nil {
+			return cleanupNew(err)
+		}
+		dnsApplied = true
 		if err := requireUnderlays(s.underlayMonitor.Snapshot(), desired.family); err != nil {
 			return cleanupNew(err)
 		}
@@ -248,6 +295,7 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 func (s *System) undoDefaultTun(ctx context.Context, device *defaultTun) error {
 	id := fmt.Sprint(device.id)
 	err := s.journal.Undo(ctx,
+		reconcile.OwnershipKey{Kind: reconcile.KindDNS, Scope: "default-tun", ID: id},
 		reconcile.OwnershipKey{Kind: reconcile.KindAddress, Scope: "default-tun", ID: id},
 		reconcile.OwnershipKey{Kind: reconcile.KindAdapter, Scope: "default-tun", ID: id},
 	)
@@ -255,6 +303,16 @@ func (s *System) undoDefaultTun(ctx context.Context, device *defaultTun) error {
 		device.retired.Store(true)
 	}
 	return err
+}
+
+func (s *System) setDefaultTunDNS(device *defaultTun, provider dns.Interface) error {
+	s.defaultTunMu.Lock()
+	defer s.defaultTunMu.Unlock()
+	if device.retired.Load() || device.closed.Load() || s.defaultTun != device || device.dnsProxy == nil || device.dnsProxy.Closed() {
+		return sysnet.ErrUnknownTun
+	}
+	device.dnsProxy.Attach(provider)
+	return nil
 }
 
 func (s *System) closeDefaultTun(device *defaultTun) error {

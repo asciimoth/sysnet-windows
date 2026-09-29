@@ -2,11 +2,12 @@
 
 Windows network integration for `github.com/asciimoth/gonnect`.
 
-The root package implements host-aware allocation, regular Wintun ownership,
-underlay selection, the outbound network bypass, and confined local networking.
-Later milestones will add the default TUN, managed DNS, matchers, and
-application exclusions. The repository also contains the locked development
-environment and Windows test harness for the work in
+The root package implements host-aware allocation, regular and default Wintun
+ownership, underlay selection, the outbound network bypass, confined local
+networking, and the local managed-DNS proxy. Later milestones will add Windows
+DNS configuration, matchers, and application exclusions. The repository also
+contains the locked development environment and Windows test harness for the
+work in
 [`docs/sysnet-windows-implementation-testing-plan.md`](docs/sysnet-windows-implementation-testing-plan.md).
 
 ## Outbound network
@@ -25,8 +26,19 @@ underlay source. Loss of the selected underlay makes new operations fail; there
 is no unbound retry.
 
 OutNet resolves names through `System.OutDNS`. At this milestone, OutDNS uses
-the host DNS server list that exists before managed DNS takeover. The managed
-DNS milestone will replace this discovery path with saved underlay DNS state.
+the host DNS server list that exists before managed DNS takeover. A later step
+will replace this discovery path with saved underlay DNS state.
+
+## Managed DNS proxy
+
+A default TUN binds a private DNS proxy to its effective `DnsIP` on UDP and TCP
+port 53 before it publishes default routes. `DefaultTun.SetDNS` atomically
+replaces the caller-owned provider. `SetDNS(nil)` drops managed requests and
+does not use the host resolver as a fallback. Closing the default TUN cancels
+active requests, closes both listeners, and waits for proxy workers.
+
+The proxy does not configure Windows DNS yet. That ownership-aware host change
+and restoration are part of the next implementation step.
 
 ## Local network
 
@@ -38,8 +50,8 @@ physical or TUN interface.
 
 LocalNet tracks listeners, accepted TCP connections, and UDP sockets as System
 resources. `System.Close` closes them, and new operations fail after close
-starts. LocalNet is separate from the private listener that a later managed DNS
-implementation can bind to a TUN-owned DNS address.
+starts. LocalNet is separate from the private managed-DNS listener on the
+TUN-owned DNS address.
 
 ## Development
 

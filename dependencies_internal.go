@@ -46,6 +46,11 @@ func (d systemDependencies) constrainCapabilityFacts(facts capabilityProbeFacts)
 	} else if !capabilityFactSet(facts.underlay) {
 		facts.underlay = sysnet.Capability{State: sysnet.CapabilityAvailable}
 	}
+	if d.dnsProxyFactory == nil {
+		facts.dnsProxy = missingDependencyCapability("DNS proxy factory is not configured")
+	} else if !capabilityFactSet(facts.dnsProxy) {
+		facts.dnsProxy = sysnet.Capability{State: sysnet.CapabilityAvailable}
+	}
 	return facts
 }
 
@@ -66,6 +71,7 @@ type systemDependencies struct {
 	allocationReader netio.Reader
 	underlay         underlay.Source
 	dnsConfigurator  internaldns.Configurator
+	dnsProxyFactory  internaldns.ProxyFactory
 	splitController  split.Controller
 	wfpManager       wfp.Manager
 	ownerLookup      owner.Lookup
@@ -87,6 +93,7 @@ func (d systemDependencies) inspect() {
 	_ = d.allocationReader
 	_ = d.underlay
 	_ = d.dnsConfigurator
+	_ = d.dnsProxyFactory
 	_ = d.splitController
 	_ = d.wfpManager
 	_ = d.ownerLookup

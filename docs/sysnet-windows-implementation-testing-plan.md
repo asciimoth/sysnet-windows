@@ -775,7 +775,7 @@ defer rollback to a later milestone.
     - Complete this step when T19-T21 pass for every failure point and ordinary
       invalid input leaves the old object unchanged.
 
-2. **Step 17 - Implement the local DNS proxy.**
+2. **Step 17 - Implement the local DNS proxy. (Completed)**
 
     - Bind UDP and TCP port 53 at the effective DnsIP before OS DNS changes.
     - Forward requests to an atomically replaceable `gonnect/dns.Interface`.

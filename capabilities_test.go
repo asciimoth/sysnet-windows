@@ -179,6 +179,34 @@ func TestCurrentImplementationAdvertisesOnlyCompletedGates(t *testing.T) {
 	}
 }
 
+func TestDefaultTunAndDNSProviderCapabilitiesRequireProxyFactory(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	missing := missingDependencyCapability("DNS proxy factory is not configured")
+	for _, test := range []struct {
+		name  string
+		fact  sysnet.Capability
+		state sysnet.CapabilityState
+	}{
+		{name: "available", fact: available, state: sysnet.CapabilityAvailable},
+		{name: "missing", fact: missing, state: sysnet.CapabilityUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			report := buildCapabilityReport(defaultNormalizedSystemConfig(), currentImplementationSupport(), capabilityProbeFacts{
+				netIO: available, dnsProxy: test.fact,
+			}, lifecycleReady)
+			for _, operation := range []sysnet.Operation{sysnet.OpCreate, sysnet.OpDNSProvider} {
+				got := report.Operation(sysnet.OperationKey{
+					Target: sysnet.TargetDefaultTun, Operation: operation, Family: sysnet.FamilyIPv4,
+				})
+				if got.State != test.state {
+					t.Fatalf("%s capability = %+v, want state %v", operation, got, test.state)
+				}
+			}
+		})
+	}
+}
+
 func TestCurrentImplementationAdvertisesLocalNetByFamily(t *testing.T) {
 	t.Parallel()
 	report := buildCapabilityReport(
