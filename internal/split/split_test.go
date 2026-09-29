@@ -282,7 +282,9 @@ func (f *fakeController) State(context.Context) (State, error) {
 func (f *fakeController) Initialize(context.Context, Sublayers) error            { return nil }
 func (f *fakeController) RegisterProcesses(context.Context, []Process) error     { return nil }
 func (f *fakeController) SetAddresses(context.Context, Addresses) error          { return nil }
+func (f *fakeController) Addresses(context.Context) (Addresses, error)           { return Addresses{}, nil }
 func (f *fakeController) SetExcludedDevicePaths(context.Context, []string) error { return nil }
+func (f *fakeController) ExcludedDevicePaths(context.Context) ([]string, error)  { return nil, nil }
 func (f *fakeController) ReadEvent(ctx context.Context) (Event, error) {
 	<-ctx.Done()
 	return Event{}, ctx.Err()

@@ -33,6 +33,7 @@ type defaultTun struct {
 	dnsPrior      internaldns.State
 	dnsApplied    internaldns.State
 	splitPolicy   *split.Policy
+	splitPrefixes []netip.Prefix
 }
 
 // SetDNS atomically replaces the provider used by this TUN's local proxy. A nil
@@ -200,12 +201,14 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 					// Cleanup did not restore a usable old policy. The journal keeps
 					// any uncertain ownership, but callers must see no active default.
 					s.defaultTun = nil
+					s.activeSplitTun.CompareAndSwap(old, nil)
 					retired = true
 				}
 				return retireErr
 			}
 			old.retired.Store(true)
 			s.defaultTun = nil
+			s.activeSplitTun.CompareAndSwap(old, nil)
 			retired = true
 			return nil
 		}
@@ -371,12 +374,17 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 							if s.dependencies.logger != nil {
 								s.dependencies.logger.Printf("split event reader stopped: %v", eventErr)
 							}
+							var splitEventErr *split.EventError
+							if errors.As(eventErr, &splitEventErr) {
+								s.enqueueReconcileReason(reconcile.Reason("split-driver-error"))
+							}
 						},
 					})
 					if bootstrapErr != nil {
 						return errors.Join(bootstrapErr, session.Close())
 					}
 					result.splitPolicy = policy
+					result.splitPrefixes = append([]netip.Prefix(nil), desired.tun.addresses...)
 					s.recordSplitCapability(nil)
 					return nil
 				},
@@ -423,11 +431,15 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 		}
 		routeApplied = true
 		s.defaultTun = result
+		if result.splitPolicy != nil {
+			s.activeSplitTun.Store(result)
+		}
 		return nil
 	})
 	if err != nil {
 		if retired {
 			s.defaultTun = nil
+			s.activeSplitTun.Store(nil)
 		}
 		return nil, err
 	}
@@ -499,6 +511,7 @@ func (s *System) closeDefaultTun(device *defaultTun) error {
 	err := s.applyOperation(func(ctx context.Context) error { return s.undoDefaultTun(ctx, device) })
 	if err == nil {
 		s.defaultTun = nil
+		s.activeSplitTun.CompareAndSwap(device, nil)
 	}
 	return err
 }

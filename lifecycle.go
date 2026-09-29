@@ -91,7 +91,7 @@ func (s *System) beginApply() error {
 		return err
 	}
 	if s.worker == nil {
-		s.worker = reconcile.NewWorker(context.Background(), s.journal, nil, s.handleReconcileFailure)
+		s.worker = reconcile.NewWorker(context.Background(), s.journal, s.handleReconcileReasons, s.handleReconcileFailure)
 	}
 	if err := s.transitionLocked(lifecycleApplying); err != nil {
 		return err

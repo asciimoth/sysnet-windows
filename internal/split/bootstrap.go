@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Sublayers identifies the committed WFP sublayers passed to the driver.
@@ -71,6 +72,28 @@ type Event struct {
 	Raw       []byte
 }
 
+const (
+	EventErrorStartSplitting uint32 = 0x80000001
+	EventErrorStopSplitting  uint32 = 0x80000002
+	EventErrorMessage        uint32 = 0x80000003
+)
+
+// IsSplittingError reports an event for which the pinned driver could not
+// change a process classification. The event ID does not reliably identify
+// the attempted direction, so callers must read back policy instead.
+func (e Event) IsSplittingError() bool {
+	return e.ID == EventErrorStartSplitting || e.ID == EventErrorStopSplitting
+}
+
+// EventError reports a driver event which makes process policy uncertain until
+// a readback reconciliation completes.
+type EventError struct{ Event Event }
+
+func (e *EventError) Error() string {
+	return fmt.Sprintf("split-driver process policy error for PID %d (event %#x, status %#x)",
+		e.Event.PID, e.Event.ID, e.Event.NTStatus)
+}
+
 // BootstrapConfig is one fully compiled exclusion-policy generation.
 type BootstrapConfig struct {
 	Generation uint64
@@ -84,13 +107,17 @@ type BootstrapConfig struct {
 
 // Policy owns the event-reader lifetime for an initialized split session.
 type Policy struct {
-	session *Session
-	cancel  context.CancelFunc
-	done    chan struct{}
+	session  *Session
+	resolver PathResolver
+	timeout  time.Duration
+	cancel   context.CancelFunc
+	done     chan struct{}
 
 	generation atomic.Uint64
 	mu         sync.RWMutex
 	warnings   []ProcessWarning
+	addresses  Addresses
+	paths      []string
 	closeOnce  sync.Once
 	closed     bool
 	closeErr   error
@@ -137,16 +164,15 @@ func Bootstrap(ctx context.Context, session *Session, dependencies Dependencies,
 	if err := session.controller.RegisterProcesses(ctx, cloneProcesses(snapshot.Processes)); err != nil {
 		return nil, fmt.Errorf("bootstrap split policy: register processes: %w", err)
 	}
-	if err := session.controller.SetAddresses(ctx, config.Addresses); err != nil {
-		return nil, fmt.Errorf("bootstrap split policy: set addresses: %w", err)
-	}
-	if err := session.controller.SetExcludedDevicePaths(ctx, paths); err != nil {
-		return nil, fmt.Errorf("bootstrap split policy: set exclusions: %w", err)
-	}
-
 	eventCtx, cancel := context.WithCancel(context.Background())
-	policy := &Policy{session: session, cancel: cancel, done: make(chan struct{}), warnings: cloneWarnings(snapshot.Warnings)}
-	policy.generation.Store(config.Generation)
+	policy := &Policy{
+		session: session, resolver: dependencies.Resolver, timeout: session.cleanupTimeout,
+		cancel: cancel, done: make(chan struct{}), warnings: cloneWarnings(snapshot.Warnings),
+	}
+	if err := policy.applyGeneration(ctx, config.Generation, config.Addresses, paths); err != nil {
+		cancel()
+		return nil, fmt.Errorf("bootstrap split policy: %w", err)
+	}
 	go policy.readEvents(eventCtx, config.OnEvent, config.OnError)
 	return policy, nil
 }
@@ -206,6 +232,189 @@ func validateAddresses(addresses Addresses) error {
 	return nil
 }
 
+// Update replaces the complete exclusion set and all four address roles as one
+// policy generation. It resolves every path before native mutation. The driver
+// can reclassify processes after this call, but established TCP and UDP flows
+// are not guaranteed to move to the newly selected path.
+func (p *Policy) Update(ctx context.Context, config BootstrapConfig) error {
+	if p == nil || p.session == nil {
+		return errors.New("update split policy: policy is not configured")
+	}
+	if ctx == nil {
+		return errors.New("update split policy: nil context")
+	}
+	if config.Generation == 0 {
+		return errors.New("update split policy: generation must be nonzero")
+	}
+	if err := validateAddresses(config.Addresses); err != nil {
+		return fmt.Errorf("update split policy: %w", err)
+	}
+	paths, err := resolvePaths(ctx, p.resolver, config.Paths)
+	if err != nil {
+		return fmt.Errorf("update split policy: %w", err)
+	}
+	if err := p.applyGeneration(ctx, config.Generation, config.Addresses, paths); err != nil {
+		return fmt.Errorf("update split policy: %w", err)
+	}
+	return nil
+}
+
+// ReconcileAddresses publishes a new generation with a coherent replacement
+// of the tunnel and Internet address roles. It also reads back the complete
+// exclusion set, so a prior splitting error cannot be treated as success from
+// its event ID alone.
+func (p *Policy) ReconcileAddresses(ctx context.Context, generation uint64, addresses Addresses) error {
+	if p == nil {
+		return errors.New("reconcile split policy: policy is not configured")
+	}
+	p.mu.RLock()
+	paths := append([]string(nil), p.paths...)
+	p.mu.RUnlock()
+	if err := validateAddresses(addresses); err != nil {
+		return fmt.Errorf("reconcile split policy: %w", err)
+	}
+	if err := p.applyGeneration(ctx, generation, addresses, paths); err != nil {
+		return fmt.Errorf("reconcile split policy: %w", err)
+	}
+	return nil
+}
+
+func (p *Policy) applyGeneration(ctx context.Context, generation uint64, addresses Addresses, paths []string) error {
+	if ctx == nil {
+		return errors.New("nil context")
+	}
+	if generation == 0 {
+		return errors.New("generation must be nonzero")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return errors.New("split policy is closed")
+	}
+	if current := p.generation.Load(); current != 0 && generation <= current {
+		return fmt.Errorf("generation %d must be greater than applied generation %d", generation, current)
+	}
+
+	priorAddresses, priorPaths, err := p.readPolicy(ctx)
+	if err != nil {
+		return fmt.Errorf("read current driver policy: %w", err)
+	}
+	rollback := func(primary error) error {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), p.readbackTimeout())
+		defer cancel()
+		currentAddresses, currentPaths, readErr := p.readPolicy(cleanupCtx)
+		if readErr != nil {
+			return errors.Join(primary, ErrRecoveryRequired, fmt.Errorf("read policy before restore: %w", readErr))
+		}
+		var addressErr, pathErr error
+		if currentAddresses != priorAddresses {
+			addressErr = p.setAddressesVerified(cleanupCtx, priorAddresses)
+		}
+		if !equalPaths(currentPaths, priorPaths) {
+			pathErr = p.setPathsVerified(cleanupCtx, priorPaths)
+		}
+		cleanupErr := errors.Join(addressErr, pathErr)
+		if cleanupErr != nil {
+			return errors.Join(primary, ErrRecoveryRequired, fmt.Errorf("restore prior split policy: %w", cleanupErr))
+		}
+		return primary
+	}
+
+	if addresses != priorAddresses {
+		if err := p.setAddressesVerified(ctx, addresses); err != nil {
+			return rollback(fmt.Errorf("set addresses: %w", err))
+		}
+	}
+	if !equalPaths(paths, priorPaths) {
+		if err := p.setPathsVerified(ctx, paths); err != nil {
+			return rollback(fmt.Errorf("set exclusions: %w", err))
+		}
+	}
+	// A final combined read prevents publication if an external or delayed
+	// driver change raced either individual verification.
+	observedAddresses, observedPaths, err := p.readPolicyFresh()
+	if err != nil {
+		return rollback(fmt.Errorf("read back complete policy: %w", err))
+	}
+	if observedAddresses != addresses || !equalPaths(observedPaths, paths) {
+		return rollback(fmt.Errorf("complete policy readback differs from generation %d", generation))
+	}
+	p.addresses = addresses
+	p.paths = append([]string(nil), observedPaths...)
+	p.generation.Store(generation)
+	return nil
+}
+
+func (p *Policy) setAddressesVerified(ctx context.Context, want Addresses) error {
+	mutationErr := p.session.controller.SetAddresses(ctx, want)
+	got, readErr := p.readAddressesFresh()
+	if readErr != nil {
+		return errors.Join(mutationErr, ErrRecoveryRequired, fmt.Errorf("read addresses after mutation: %w", readErr))
+	}
+	if got == want {
+		return nil
+	}
+	return errors.Join(mutationErr, fmt.Errorf("address readback = %+v, want %+v", got, want))
+}
+
+func (p *Policy) setPathsVerified(ctx context.Context, want []string) error {
+	mutationErr := p.session.controller.SetExcludedDevicePaths(ctx, append([]string(nil), want...))
+	got, readErr := p.readPathsFresh()
+	if readErr != nil {
+		return errors.Join(mutationErr, ErrRecoveryRequired, fmt.Errorf("read exclusions after mutation: %w", readErr))
+	}
+	if equalPaths(got, want) {
+		return nil
+	}
+	return errors.Join(mutationErr, fmt.Errorf("exclusion readback differs from complete desired set"))
+}
+
+func (p *Policy) readPolicy(ctx context.Context) (Addresses, []string, error) {
+	addresses, err := p.session.controller.Addresses(ctx)
+	if err != nil {
+		return Addresses{}, nil, err
+	}
+	paths, err := p.session.controller.ExcludedDevicePaths(ctx)
+	return addresses, paths, err
+}
+
+func (p *Policy) readPolicyFresh() (Addresses, []string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), p.readbackTimeout())
+	defer cancel()
+	return p.readPolicy(ctx)
+}
+
+func (p *Policy) readAddressesFresh() (Addresses, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), p.readbackTimeout())
+	defer cancel()
+	return p.session.controller.Addresses(ctx)
+}
+
+func (p *Policy) readPathsFresh() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), p.readbackTimeout())
+	defer cancel()
+	return p.session.controller.ExcludedDevicePaths(ctx)
+}
+
+func (p *Policy) readbackTimeout() time.Duration {
+	if p.timeout > 0 {
+		return p.timeout
+	}
+	return 30 * time.Second
+}
+
+func equalPaths(left, right []string) bool {
+	canonical := func(input []string) []string {
+		result := make([]string, len(input))
+		for index, path := range input {
+			result[index] = strings.ToLower(strings.TrimSpace(path))
+		}
+		slices.Sort(result)
+		return slices.Compact(result)
+	}
+	return slices.Equal(canonical(left), canonical(right))
+}
+
 func (p *Policy) readEvents(ctx context.Context, onEvent func(Event), onError func(error)) {
 	defer close(p.done)
 	for {
@@ -217,6 +426,9 @@ func (p *Policy) readEvents(ctx context.Context, onEvent func(Event), onError fu
 			return
 		}
 		event.Raw = append([]byte(nil), event.Raw...)
+		if event.IsSplittingError() && onError != nil {
+			onError(&EventError{Event: event})
+		}
 		if onEvent != nil {
 			onEvent(event)
 		}
@@ -230,6 +442,17 @@ func (p *Policy) AppliedGeneration() uint64 {
 		return 0
 	}
 	return p.generation.Load()
+}
+
+// AppliedAddresses returns the four roles from the last completely verified
+// generation.
+func (p *Policy) AppliedAddresses() Addresses {
+	if p == nil {
+		return Addresses{}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.addresses
 }
 
 // Warnings returns a copy of non-fatal process snapshot diagnostics.

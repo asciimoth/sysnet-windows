@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/asciimoth/gonnect"
 	"github.com/asciimoth/gonnect/dns"
@@ -45,6 +46,7 @@ type System struct {
 	nextRegularTun  uint64
 	defaultTunMu    sync.Mutex
 	defaultTun      *defaultTun
+	activeSplitTun  atomic.Pointer[defaultTun]
 	nextDefaultTun  uint64
 	closeMu         sync.Mutex
 	closeErr        error
@@ -164,7 +166,10 @@ func (s *System) applyOperation(operation reconcile.Operation) error {
 }
 
 func (s *System) handleReconcileFailure(err error) {
-	if !reconcile.RequiresRecovery(err) {
+	if s.dependencies.logger != nil {
+		s.dependencies.logger.Printf("asynchronous network policy reconciliation failed: %v", err)
+	}
+	if !reconcile.RequiresRecovery(err) && !errors.Is(err, split.ErrRecoveryRequired) {
 		return
 	}
 	s.mu.Lock()
@@ -173,6 +178,43 @@ func (s *System) handleReconcileFailure(err error) {
 		_ = s.transitionLocked(lifecycleRecoveryRequired)
 		s.rebuildCapabilitiesLocked()
 	}
+}
+
+func (s *System) handleReconcileReasons(ctx context.Context, reasons []reconcile.Reason) ([]reconcile.Entry, error) {
+	reconcileSplit := false
+	forceReadback := false
+	for _, reason := range reasons {
+		if reason == reconcile.Reason("underlay-change") || reason == reconcile.Reason("split-driver-error") {
+			reconcileSplit = true
+		}
+		if reason == reconcile.Reason("split-driver-error") {
+			forceReadback = true
+		}
+	}
+	if !reconcileSplit {
+		return nil, nil
+	}
+	device := s.activeSplitTun.Load()
+	if device == nil || device.splitPolicy == nil || device.retired.Load() || device.closed.Load() {
+		return nil, nil
+	}
+	addresses, err := splitAddresses(device.splitPrefixes, s.underlayMonitor.Snapshot())
+	if err != nil {
+		return nil, err
+	}
+	if !forceReadback && device.splitPolicy.AppliedAddresses() == addresses {
+		return nil, nil
+	}
+	generation := device.splitPolicy.AppliedGeneration()
+	if generation == ^uint64(0) {
+		return nil, errors.New("split policy generation overflow")
+	}
+	operationCtx, cancel := context.WithTimeout(ctx, s.config.operationTimeout)
+	defer cancel()
+	if err := device.splitPolicy.ReconcileAddresses(operationCtx, generation+1, addresses); err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
 func (s *System) enqueueReconcileReason(reason reconcile.Reason) {

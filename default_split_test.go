@@ -6,9 +6,11 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/asciimoth/gonnect/sysnet"
 	"github.com/asciimoth/sysnet-windows/internal/split"
+	"github.com/asciimoth/sysnet-windows/internal/underlay"
 	"github.com/asciimoth/sysnet-windows/internal/wfp"
 )
 
@@ -87,6 +89,77 @@ func TestDefaultTunRejectsMissingSplitBootstrapBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestDefaultTunReconcilesSplitAddressesAndDriverErrorsAsNewGenerations(t *testing.T) {
+	source := &mutableUnderlaySource{candidates: []underlay.Candidate{outNetCandidate(false)}}
+	controller := &defaultSplitController{state: split.StateStarted, events: make(chan split.Event, 2)}
+	native := &defaultSplitNative{controller: controller}
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	system, err := newSystem(SystemConfig{OperationTimeout: time.Second}, systemDependencies{
+		tunFactory: &regularTunFactory{}, netIO: newRegularTunManager(), allocationReader: emptyHostReader{},
+		underlay: source, dnsConfigurator: newFakeDNSConfigurator(), dnsProxyFactory: &fakeDNSProxyFactory{},
+		capabilityProbe: staticCapabilityProbe{facts: capabilityProbeFacts{netIO: available, underlay: available}},
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := system.Close(); err != nil {
+			t.Errorf("System.Close() error = %v", err)
+		}
+	})
+	system.dependencies.splitDependencies = split.Dependencies{
+		Verifier: defaultSplitVerifier{}, Opener: native,
+		WFP:      defaultSplitWFPFactory{manager: native},
+		Snapshot: defaultSplitSnapshotter{snapshot: split.ProcessSnapshot{Processes: []split.Process{{PID: 4}}}},
+		Resolver: defaultSplitResolver{}, CleanupTimeout: time.Second,
+	}
+	system.probeFacts.split = sysnet.Capability{State: sysnet.CapabilityUnknown, Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeNotRun}}
+	system.rebuildCapabilitiesLocked()
+
+	device, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{
+		TunAddrs: []string{"10.99.0.1/24"},
+		Exclude:  []sysnet.Rule{{Type: ruleExecutableTree, Rule: `C:\excluded.exe`}},
+	})
+	if err != nil {
+		t.Fatalf("BuildDefaultTun() error = %v", err)
+	}
+	owned := device.(*defaultTun)
+	initialGeneration := owned.splitPolicy.AppliedGeneration()
+
+	candidate := outNetCandidate(false)
+	candidate.Addresses = []underlay.Address{{Address: netip.MustParseAddr("198.51.100.20"), Usable: true}}
+	source.set([]underlay.Candidate{candidate})
+	if err := system.underlayMonitor.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	waitForSplitGeneration(t, owned.splitPolicy, initialGeneration+1)
+	if got := owned.splitPolicy.AppliedAddresses().InternetIPv4; got != netip.MustParseAddr("198.51.100.20") {
+		t.Fatalf("reconciled Internet IPv4 = %s", got)
+	}
+
+	beforeError := owned.splitPolicy.AppliedGeneration()
+	controller.events <- split.Event{ID: split.EventErrorStopSplitting, PID: 99, NTStatus: 0xc0000001}
+	waitForSplitGeneration(t, owned.splitPolicy, beforeError+1)
+	controller.mu.Lock()
+	gotPaths := append([]string(nil), controller.paths...)
+	controller.mu.Unlock()
+	if want := []string{`\Device\Volume1\Program Files\Excluded App\app.exe`}; !reflect.DeepEqual(gotPaths, want) {
+		t.Fatalf("error readback changed exclusions: %v, want %v", gotPaths, want)
+	}
+}
+
+func waitForSplitGeneration(t *testing.T, policy *split.Policy, minimum uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if policy.AppliedGeneration() >= minimum {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("split generation = %d, want at least %d", policy.AppliedGeneration(), minimum)
+}
+
 type defaultSplitVerifier struct{}
 
 func (defaultSplitVerifier) Verify(context.Context) (split.Deployment, error) {
@@ -140,6 +213,7 @@ type defaultSplitController struct {
 	processes  []split.Process
 	addresses  split.Addresses
 	paths      []string
+	events     chan split.Event
 	resetCalls int
 }
 
@@ -167,6 +241,11 @@ func (c *defaultSplitController) SetAddresses(_ context.Context, addresses split
 	c.mu.Unlock()
 	return nil
 }
+func (c *defaultSplitController) Addresses(context.Context) (split.Addresses, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.addresses, nil
+}
 func (c *defaultSplitController) SetExcludedDevicePaths(_ context.Context, paths []string) error {
 	c.mu.Lock()
 	c.paths = append([]string(nil), paths...)
@@ -174,9 +253,22 @@ func (c *defaultSplitController) SetExcludedDevicePaths(_ context.Context, paths
 	c.mu.Unlock()
 	return nil
 }
-func (*defaultSplitController) ReadEvent(ctx context.Context) (split.Event, error) {
-	<-ctx.Done()
-	return split.Event{}, ctx.Err()
+func (c *defaultSplitController) ExcludedDevicePaths(context.Context) ([]string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.paths...), nil
+}
+func (c *defaultSplitController) ReadEvent(ctx context.Context) (split.Event, error) {
+	if c.events == nil {
+		<-ctx.Done()
+		return split.Event{}, ctx.Err()
+	}
+	select {
+	case event := <-c.events:
+		return event, nil
+	case <-ctx.Done():
+		return split.Event{}, ctx.Err()
+	}
 }
 func (c *defaultSplitController) Reset(context.Context) error {
 	c.mu.Lock()

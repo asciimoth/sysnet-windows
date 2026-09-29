@@ -145,8 +145,17 @@ func (c nativeController) SetAddresses(ctx context.Context, addresses Addresses)
 	return c.controller.SetAddresses(ctx, splittunnel.Addresses(addresses))
 }
 
+func (c nativeController) Addresses(ctx context.Context) (Addresses, error) {
+	addresses, err := c.controller.Addresses(ctx)
+	return Addresses(addresses), err
+}
+
 func (c nativeController) SetExcludedDevicePaths(ctx context.Context, paths []string) error {
 	return c.controller.SetExcludedDevicePaths(ctx, paths)
+}
+
+func (c nativeController) ExcludedDevicePaths(ctx context.Context) ([]string, error) {
+	return c.controller.ExcludedDevicePaths(ctx)
 }
 
 func (c nativeController) ReadEvent(ctx context.Context) (Event, error) {

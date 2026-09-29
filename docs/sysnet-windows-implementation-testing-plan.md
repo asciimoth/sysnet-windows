@@ -899,7 +899,7 @@ defer rollback to a later milestone.
     - Complete this step when R09-R16 and R33-R36 pass, including births during
       snapshot and a missing-family case.
 
-3. **Step 26 - Handle live policy changes and uncertain driver results.**
+3. **Step 26 - Handle live policy changes and uncertain driver results. (Completed)**
 
     - Replace exclusions as one complete desired set. Observe and document the
       effect on established TCP and UDP flows.

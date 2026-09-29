@@ -67,7 +67,9 @@ type Controller interface {
 	Initialize(context.Context, Sublayers) error
 	RegisterProcesses(context.Context, []Process) error
 	SetAddresses(context.Context, Addresses) error
+	Addresses(context.Context) (Addresses, error)
 	SetExcludedDevicePaths(context.Context, []string) error
+	ExcludedDevicePaths(context.Context) ([]string, error)
 	ReadEvent(context.Context) (Event, error)
 	Reset(context.Context) error
 	Close() error
