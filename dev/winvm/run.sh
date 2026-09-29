@@ -9,7 +9,7 @@ source "$script_dir/common.sh"
 source "$script_dir/wintun-input.sh"
 mode=${1:-baseline}
 shell_path=''
-case $mode in baseline | e2e | flow) ;; --shell)
+case $mode in baseline | e2e | flow | resource) ;; --shell)
     mode=shell
     shell_path=${2:?usage: run.sh --shell RUN}
     ;;
@@ -44,7 +44,7 @@ for command in qemu-system-x86_64 qemu-img ssh scp jq python3 timeout flock git 
 ensure_cache_dir
 mkdir -p "$artifact_root" "$winvm_cache_dir/locks"
 chmod 0700 "$artifact_root"
-if [[ $mode == e2e || $mode == flow ]]; then
+if [[ $mode == e2e || $mode == flow || $mode == resource ]]; then
     wintun_lock="$script_dir/wintun-lock.json"
     prepare_wintun_archive "$wintun_lock"
 fi
@@ -194,7 +194,7 @@ if [[ $mode != shell ]]; then
     dirty=false
     [[ -n $(git -C "$repo_root" status --porcelain) ]] && dirty=true
     wintun_lock_hash=''
-    if [[ $mode == e2e || $mode == flow ]]; then wintun_lock_hash=$(sha256_file "$wintun_lock"); fi
+    if [[ $mode == e2e || $mode == flow || $mode == resource ]]; then wintun_lock_hash=$(sha256_file "$wintun_lock"); fi
     jq -n --arg revision "$revision" --argjson dirty "$dirty" --arg key "$key" --arg mode "$mode" --arg started "$(date -u +%FT%TZ)" --arg testHash "$(sha256_file "$script_dir/test.ps1")" --arg e2eHash "$(sha256_file "$script_dir/e2e.ps1")" --arg runnerHash "$(sha256_file "$script_dir/run.sh")" --arg wintunLockHash "$wintun_lock_hash" '{revision:$revision,dirty:$dirty,baseImageKey:$key,mode:$mode,startedAt:$started,status:"running",stage:"setup",scriptHashes:{test:$testHash,e2e:$e2eHash,runner:$runnerHash,wintunLock:$wintunLockHash}}' >"$run_dir/run.json"
     cp "$manifest" "$run_dir/image-manifest.json"
     qemu-img create -q -f qcow2 -F qcow2 -b "$base" "$overlay"
@@ -300,7 +300,7 @@ stage=transfer
 ssh "${ssh_opts[@]}" "$target" "powershell.exe -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '$remote/source','$remote/artifacts'|Out-Null\""
 scp "${scp_opts[@]}" "$payload" "$target:$remote/worktree.tar" >/dev/null
 ssh "${ssh_opts[@]}" "$target" "tar.exe -xf \"$remote/worktree.tar\" -C \"$remote/source\""
-if [[ $mode == e2e || $mode == flow ]]; then
+if [[ $mode == e2e || $mode == flow || $mode == resource ]]; then
     wintun_architecture=$(jq -er '.architecture | ascii_downcase' "$manifest")
     python3 "$script_dir/tools/wintun-input.py" --lock "$wintun_lock" --archive "$wintun_archive" --architecture "$wintun_architecture" --output "$run_dir/wintun.dll"
     [[ -s $run_dir/wintun.dll ]] || die "Wintun $wintun_architecture DLL is absent from the locked archive"
@@ -331,6 +331,7 @@ if [[ $mode == flow ]]; then
 fi
 stage='test'
 test_timeout=$(jq -r .machine.testTimeoutSeconds "$config_file")
+if [[ $mode == resource ]]; then test_timeout=4500; fi
 set +e
 printf 'Running the Windows %s gate with a %d-minute timeout...\n' "$mode" "$((test_timeout / 60))"
 if [[ $mode == baseline ]]; then
@@ -340,11 +341,16 @@ if [[ $mode == baseline ]]; then
     timeout --foreground --kill-after=30 "${test_timeout}s" ssh "${ssh_opts[@]}" "$target" "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command \"$command\"" 2>&1 | tee "$run_dir/windows-console.log"
     test_status=${PIPESTATUS[0]}
 else
-    flow_argument=''
-    [[ $mode == flow ]] && flow_argument=' -Flow'
+    mode_argument=''
+    [[ $mode == flow ]] && mode_argument=' -Flow'
+    [[ $mode == resource ]] && mode_argument=' -Resource'
+    if [[ $mode == resource && -n ${SYSNET_WINDOWS_SOAK_DURATION:-} ]]; then
+        [[ $SYSNET_WINDOWS_SOAK_DURATION =~ ^[1-9][0-9]*(ms|s|m|h)$ ]] || die 'SYSNET_WINDOWS_SOAK_DURATION must be a positive Go duration with one unit'
+        mode_argument+=" -SoakDuration '$SYSNET_WINDOWS_SOAK_DURATION'"
+    fi
     tree_state=clean
     [[ $dirty == false ]] || tree_state=dirty
-    command="& '$remote/source/dev/winvm/e2e.ps1' -SourceDir '$remote/source' -ArtifactDir '$remote/artifacts' -SysnetWindowsRevision '$revision' -SysnetWindowsTreeState '$tree_state' -SourceArchiveSHA256 '$payload_hash'$flow_argument"
+    command="& '$remote/source/dev/winvm/e2e.ps1' -SourceDir '$remote/source' -ArtifactDir '$remote/artifacts' -SysnetWindowsRevision '$revision' -SysnetWindowsTreeState '$tree_state' -SourceArchiveSHA256 '$payload_hash'$mode_argument"
     timeout --foreground --kill-after=30 "${test_timeout}s" "$script_dir/tools/qga.py" --socket "$qga" --timeout "$test_timeout" exec powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$command" 2>&1 | tee "$run_dir/windows-console.log"
     test_status=${PIPESTATUS[0]}
 fi

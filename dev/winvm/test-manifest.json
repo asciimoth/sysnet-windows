@@ -10,6 +10,13 @@
         "github.com/asciimoth/sysnet-windows::TestN25N28SystemLocalNetOwnsResourcesAndRejectsWorkAfterClose",
         "github.com/asciimoth/sysnet-windows::TestD21D28DefaultTunReportsNonexclusiveDNSScope",
         "github.com/asciimoth/sysnet-windows::TestM3DefaultTunResourceAccountingCycles",
+        "github.com/asciimoth/sysnet-windows::TestT28T30RegularTunBuildFailureRollsBack",
+        "github.com/asciimoth/sysnet-windows::TestDefaultTunFailuresBeforeRetirementPreserveOldObject",
+        "github.com/asciimoth/sysnet-windows::TestDefaultTunFinalRouteFailureCleansNewPolicy",
+        "github.com/asciimoth/sysnet-windows::TestDNSProxyBindFailureCleansStagedDefaultTun",
+        "github.com/asciimoth/sysnet-windows::TestD13D16DNSConfigurationFailuresRollbackOwnedState",
+        "github.com/asciimoth/sysnet-windows::TestR37R44DefaultTunPreservesSplitJournalButCleansOrdinaryState",
+        "github.com/asciimoth/sysnet-windows::TestM6SplitBootstrapFailurePointsCleanEveryOwnedResource",
         "github.com/asciimoth/sysnet-windows/cmd/flowecho::TestCallbackControlDecodesTokenAndConnects",
         "github.com/asciimoth/sysnet-windows/cmd/sysnetflow::TestFlowCasesHaveUniqueCaptureMarkersAndRequiredPaths",
         "github.com/asciimoth/sysnet-windows/cmd/sysnetflow::TestPowerShellCommandBindsNumericInterfaceIndex",
@@ -30,6 +37,8 @@
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT07T09ExactManagerRequiresReadback",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT07T09ExactManagerReleasesRestoredProperties",
         "github.com/asciimoth/sysnet-windows/internal/netio::TestT07T09ExactManagerValidatesIdentityAndMTU",
+        "github.com/asciimoth/sysnet-windows/internal/netio::TestExactManagerRequiresRecoveryAfterUncertainPropertyMutation",
+        "github.com/asciimoth/sysnet-windows/internal/netio::TestExactManagerRequiresRecoveryAfterUncertainRowMutation",
         "github.com/asciimoth/sysnet-windows/internal/network::TestSocketBinderAppliesAndReadsBackEachFamily",
         "github.com/asciimoth/sysnet-windows/internal/network::TestSocketBinderRejectsLocalAddressBeforeSocketMutation",
         "github.com/asciimoth/sysnet-windows/internal/network::TestSocketBinderCallerRunsBeforeMandatoryConflictCheck",
@@ -52,6 +61,17 @@
         "github.com/asciimoth/sysnet-windows/internal/network::TestNativeSocketBinderTCPAndUDP",
         "github.com/asciimoth/sysnet-windows/internal/network::TestNativeSocketBinderFamilyFailure",
         "github.com/asciimoth/sysnet-windows/internal/network::TestNativeSocketBinderUnderlayLoss",
+        "github.com/asciimoth/sysnet-windows/internal/reconcile::TestJournalFailurePointsUndoExactResourcesInReverse",
+        "github.com/asciimoth/sysnet-windows/internal/reconcile::TestJournalRollsBackApplyThatMutatesBeforeFailure",
+        "github.com/asciimoth/sysnet-windows/internal/reconcile::TestJournalBoundsEveryBlockingCallbackAndRetainsOwnership",
+        "github.com/asciimoth/sysnet-windows/internal/reconcile::TestWorkerSerializesMutations",
+        "github.com/asciimoth/sysnet-windows/internal/reconcile::TestResourcesCloseHonorsCancellation",
+        "github.com/asciimoth/sysnet-windows/internal/split::TestAcquireRollsBackUnverifiedWFPWithFreshBoundedContext",
+        "github.com/asciimoth/sysnet-windows/internal/split::TestAcquireRetainsJournalWhenWFPVerificationCleanupFails",
+        "github.com/asciimoth/sysnet-windows/internal/split::TestPolicyReconcilesCommittedCancelledAddressMutationWithFreshReadback",
+        "github.com/asciimoth/sysnet-windows/internal/split::TestPolicyReconcilesCommittedTimedOutExclusionReplacement",
+        "github.com/asciimoth/sysnet-windows/internal/split::TestR37R40PolicyCloseJoinsEventReaderBeforeReset",
+        "github.com/asciimoth/sysnet-windows/internal/split::TestR37R40SessionReconcilesCommittedResetError",
         "github.com/asciimoth/sysnet-windows/internal/underlay::TestN17N19N20SelectRanksAndFiltersCandidates",
         "github.com/asciimoth/sysnet-windows/internal/underlay::TestN18SelectPublishesFamiliesIndependently",
         "github.com/asciimoth/sysnet-windows/internal/underlay::TestN21N24MonitorReconcilesNetworkChanges",
@@ -89,6 +109,14 @@
       "plannedCases": [
         "M3 managed DNS packet paths"
       ]
+    },
+    "resource-gate": {
+      "requiredTests": [
+        "github.com/asciimoth/sysnet-windows/integration::TestM6ResourceLifecycleBatches",
+        "github.com/asciimoth/sysnet-windows/integration::TestM6CancellationCycles",
+        "github.com/asciimoth/sysnet-windows/integration::TestM6NativeTransferReconfigurationSoak"
+      ],
+      "plannedCases": []
     }
   }
 }

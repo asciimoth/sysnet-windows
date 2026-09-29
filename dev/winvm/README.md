@@ -41,6 +41,7 @@ creates a new key and builds a matching base image.
 just check
 just test-windows-vm
 just test-windows-e2e
+just test-windows-resource
 just test-windows-flow
 just test-total
 just check-release
@@ -67,8 +68,8 @@ until their planned milestone tests become required and pass. `just test-total`
 runs the local Go and fuzz tests, then builds or reuses the base image and runs
 the completed baseline and live-driver gates. `just check` adds all formatting,
 linting, vetting, builds, and host-harness checks around `test-total`.
-`just check-release` also runs the packet-flow gate. Linux-only VM recipes skip
-on Windows.
+`just check-release` also runs the resource and packet-flow gates. Linux-only VM
+recipes skip on Windows.
 
 The harness serializes VM processes on one host. Image creation has an exclusive
 content-key lock. Test runs hold a shared image lock and use a unique overlay,
@@ -76,6 +77,14 @@ OVMF variable store, run directory, socket directory, and locked SSH port. Guest
 readiness uses an atomic generation token and must stay stable before a test can
 start. These rules prevent an early Guest Agent or SSH response from racing the
 final provisioning reboot.
+
+The resource gate runs 10 warm-up lifecycle cycles, four measured batches of 25
+cycles, 100 cancellation cycles, and a 30-minute UDP transfer and
+reconfiguration soak. It compares stable adapter, address, route, and DNS state
+before and after the workload. It records handle, goroutine, and private-byte
+samples after warm-up and after each measured batch. Any owned adapter leak or
+persistent measured growth fails the gate. Use `SYSNET_WINDOWS_SOAK_DURATION=2m`
+only for a local diagnostic run; such a run is not Step 29 evidence.
 
 The live-driver gate writes `e2e-cover.out` and `e2e-coverage.txt` to its guest
 artifact archive. These files report native project-package coverage. The flow
@@ -106,6 +115,11 @@ dependency lock hashes, required test results, and driver identity. Use
 live-driver, packet-flow, and independent capture results. The matrix names are
 in `qualification-matrix.json`. The qualifier rejects dirty or mismatched
 revisions.
+
+The resource artifacts include `resources-before.json`, `resources-after.json`,
+and `process-resources.json`. Keep all three with `resource-gate-evidence.json`;
+the suite result alone is not sufficient evidence for a resource-growth
+investigation.
 
 The diagnostic shell starts with the retained disk overlay and OVMF variable
 store. It does not replace either file with base-image state.

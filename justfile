@@ -64,7 +64,7 @@ vulncheck:
 
 test-total: test fuzz test-windows-vm test-windows-e2e
 
-test-release: test-total test-windows-flow
+test-release: test-total test-windows-resource test-windows-flow
 
 winvm-doctor:
     dev/winvm/doctor.sh
@@ -83,6 +83,9 @@ test-windows-e2e:
 
 test-windows-flow:
     dev/winvm/run.sh flow
+
+test-windows-resource:
+    dev/winvm/run.sh resource
 
 qualify-windows entry evidence:
     python3 dev/winvm/tools/qualify.py --matrix dev/winvm/qualification-matrix.json --entry "{{entry}}" --native-unit "{{evidence}}/native-unit-evidence.json" --live-driver "{{evidence}}/live-driver-evidence.json" --packet-flow "{{evidence}}/packet-flow-suite-evidence.json" --packet-evidence "{{evidence}}/packet-flow-evidence.json" --output "{{evidence}}/qualification.json"

@@ -942,7 +942,7 @@ defer rollback to a later milestone.
 
 #### M6: qualify and prepare the release
 
-1. **Step 29 - Run failure, concurrency and resource gates.**
+1. **Step 29 - Run failure, concurrency and resource gates. (Completed)**
 
     - Run failure injection before and after every native create, apply and
       cleanup operation listed in Section 6.7.

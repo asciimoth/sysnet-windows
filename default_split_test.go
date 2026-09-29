@@ -90,6 +90,103 @@ func TestDefaultTunRejectsMissingSplitBootstrapBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestM6SplitBootstrapFailurePointsCleanEveryOwnedResource(t *testing.T) {
+	injected := errors.New("injected split bootstrap failure")
+	tests := []struct {
+		name          string
+		configure     func(*defaultSplitController)
+		wantBuild     bool
+		wantResetCall int
+	}{
+		{name: "before initialize", configure: func(controller *defaultSplitController) {
+			controller.initializeErr = injected
+		}, wantResetCall: 0},
+		{name: "after initialize", configure: func(controller *defaultSplitController) {
+			controller.initializeErr = injected
+			controller.initializeAfterMutation = true
+		}, wantResetCall: 1},
+		{name: "before process registration", configure: func(controller *defaultSplitController) {
+			controller.registerErr = injected
+		}, wantResetCall: 1},
+		{name: "after process registration", configure: func(controller *defaultSplitController) {
+			controller.registerErr = injected
+			controller.registerAfterMutation = true
+		}, wantResetCall: 1},
+		{name: "before address mutation", configure: func(controller *defaultSplitController) {
+			controller.addressErr = injected
+		}, wantResetCall: 1},
+		{name: "after address mutation", configure: func(controller *defaultSplitController) {
+			controller.addressErr = injected
+			controller.addressAfterMutation = true
+		}, wantBuild: true, wantResetCall: 1},
+		{name: "before exclusion mutation", configure: func(controller *defaultSplitController) {
+			controller.exclusionErr = injected
+		}, wantResetCall: 1},
+		{name: "after exclusion mutation", configure: func(controller *defaultSplitController) {
+			controller.exclusionErr = injected
+			controller.exclusionAfterMutation = true
+		}, wantBuild: true, wantResetCall: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			controller := &defaultSplitController{state: split.StateStarted}
+			test.configure(controller)
+			native := &defaultSplitNative{controller: controller}
+			factory := &regularTunFactory{}
+			manager := newRegularTunManager()
+			system := newDefaultTunTestSystem(t, factory, manager)
+			system.dependencies.splitDependencies = split.Dependencies{
+				Verifier: defaultSplitVerifier{}, Opener: native,
+				WFP: defaultSplitWFPFactory{manager: native},
+				Snapshot: defaultSplitSnapshotter{snapshot: split.ProcessSnapshot{
+					Processes: []split.Process{{PID: 4}},
+				}},
+				Resolver: defaultSplitResolver{}, CleanupTimeout: time.Second,
+			}
+			system.probeFacts.split = sysnet.Capability{
+				State: sysnet.CapabilityUnknown, Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeNotRun},
+			}
+			system.rebuildCapabilitiesLocked()
+
+			device, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{
+				TunAddrs: []string{"10.98.0.1/24"},
+				Exclude:  []sysnet.Rule{{Type: ruleExecutableTree, Rule: `C:\excluded.exe`}},
+			})
+			if test.wantBuild {
+				if err != nil || device == nil {
+					t.Fatalf("BuildDefaultTun() = %v, %v; committed mutation must reconcile as success", device, err)
+				}
+				if err := device.Close(); err != nil {
+					t.Fatalf("DefaultTun.Close() error = %v", err)
+				}
+			} else if device != nil || !errors.Is(err, injected) {
+				t.Fatalf("BuildDefaultTun() = %v, %v; want nil and injected failure", device, err)
+			}
+			if native.deleteCalls != 1 {
+				t.Fatalf("WFP delete calls = %d, want 1", native.deleteCalls)
+			}
+			if controller.resetCalls != test.wantResetCall {
+				t.Fatalf("driver reset calls = %d, want %d", controller.resetCalls, test.wantResetCall)
+			}
+			if system.journal.Len() != 0 {
+				t.Fatalf("journal entries = %d after verified cleanup, want 0", system.journal.Len())
+			}
+			if len(factory.created) != 1 || !factory.created[0].closed {
+				t.Fatalf("adapter cleanup = %+v, want one closed adapter", factory.created)
+			}
+			if got := manager.config(factory.created[0].interfaceID()); !netIOConfigEmpty(got) {
+				t.Fatalf("retained NetIO state = %+v", got)
+			}
+			system.mu.RLock()
+			state := system.state
+			system.mu.RUnlock()
+			if state != lifecycleReady {
+				t.Fatalf("System state = %s, want ready after verified cleanup", state)
+			}
+		})
+	}
+}
+
 func TestR37R44DefaultTunPreservesSplitJournalButCleansOrdinaryState(t *testing.T) {
 	resetErr := errors.New("split reset failed")
 	controller := &defaultSplitController{state: split.StateStarted}
@@ -274,15 +371,23 @@ func (defaultSplitResolver) Resolve(_ context.Context, path string) (string, err
 }
 
 type defaultSplitController struct {
-	mu         sync.Mutex
-	state      split.State
-	resetState split.State
-	resetErr   error
-	processes  []split.Process
-	addresses  split.Addresses
-	paths      []string
-	events     chan split.Event
-	resetCalls int
+	mu                      sync.Mutex
+	state                   split.State
+	resetState              split.State
+	resetErr                error
+	initializeErr           error
+	initializeAfterMutation bool
+	registerErr             error
+	registerAfterMutation   bool
+	addressErr              error
+	addressAfterMutation    bool
+	exclusionErr            error
+	exclusionAfterMutation  bool
+	processes               []split.Process
+	addresses               split.Addresses
+	paths                   []string
+	events                  chan split.Event
+	resetCalls              int
 }
 
 func (c *defaultSplitController) State(context.Context) (split.State, error) {
@@ -292,22 +397,31 @@ func (c *defaultSplitController) State(context.Context) (split.State, error) {
 }
 func (c *defaultSplitController) Initialize(context.Context, split.Sublayers) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.initializeErr != nil && !c.initializeAfterMutation {
+		return c.initializeErr
+	}
 	c.state = split.StateInitialized
-	c.mu.Unlock()
-	return nil
+	return c.initializeErr
 }
 func (c *defaultSplitController) RegisterProcesses(_ context.Context, processes []split.Process) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.registerErr != nil && !c.registerAfterMutation {
+		return c.registerErr
+	}
 	c.processes = append([]split.Process(nil), processes...)
 	c.state = split.StateReady
-	c.mu.Unlock()
-	return nil
+	return c.registerErr
 }
 func (c *defaultSplitController) SetAddresses(_ context.Context, addresses split.Addresses) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.addressErr != nil && !c.addressAfterMutation {
+		return c.addressErr
+	}
 	c.addresses = addresses
-	c.mu.Unlock()
-	return nil
+	return c.addressErr
 }
 func (c *defaultSplitController) Addresses(context.Context) (split.Addresses, error) {
 	c.mu.Lock()
@@ -316,10 +430,13 @@ func (c *defaultSplitController) Addresses(context.Context) (split.Addresses, er
 }
 func (c *defaultSplitController) SetExcludedDevicePaths(_ context.Context, paths []string) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.exclusionErr != nil && !c.exclusionAfterMutation {
+		return c.exclusionErr
+	}
 	c.paths = append([]string(nil), paths...)
 	c.state = split.StateEngaged
-	c.mu.Unlock()
-	return nil
+	return c.exclusionErr
 }
 func (c *defaultSplitController) ExcludedDevicePaths(context.Context) ([]string, error) {
 	c.mu.Lock()

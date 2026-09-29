@@ -7,13 +7,16 @@ param(
     [string]$SysnetWindowsRevision = $env:GITHUB_SHA,
     [ValidateSet('clean', 'dirty', 'unknown')][string]$SysnetWindowsTreeState = 'unknown',
     [string]$SourceArchiveSHA256 = $env:SYSNET_WINDOWS_SOURCE_ARCHIVE_SHA256,
-    [switch]$Flow
+    [switch]$Flow,
+    [switch]$Resource,
+    [string]$SoakDuration
 )
 $ErrorActionPreference = 'Stop'; Set-StrictMode -Version Latest
+if ($Flow -and $Resource) { throw 'Flow and Resource modes are mutually exclusive' }
 $env:CGO_ENABLED = '0'; $env:GOTOOLCHAIN = 'local'
 New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
 $ArtifactDir = (Resolve-Path $ArtifactDir).Path
-$evidenceName = if ($Flow) { 'packet-flow-suite-evidence.json' } else { 'live-driver-evidence.json' }
+$evidenceName = if ($Flow) { 'packet-flow-suite-evidence.json' } elseif ($Resource) { 'resource-gate-evidence.json' } else { 'live-driver-evidence.json' }
 $evidencePath = Join-Path $ArtifactDir $evidenceName
 Remove-Item -LiteralPath $evidencePath -Force -ErrorAction SilentlyContinue
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -22,6 +25,7 @@ if (-not [Environment]::Is64BitProcess) { throw 'The live-driver gate needs a 64
 $startedAt = (Get-Date).ToUniversalTime().ToString('o')
 . (Join-Path $SourceDir 'dev\winvm\driver.ps1')
 . (Join-Path $SourceDir 'dev\winvm\test-output.ps1')
+if ($Resource) { . (Join-Path $SourceDir 'dev\winvm\resource-state.ps1') }
 $SourceArchiveSHA256 = Resolve-SourceArchiveSHA256 $SourceDir $SourceArchiveSHA256
 $manifest = Get-Content $ImageManifest -Raw | ConvertFrom-Json
 if ($manifest.driverVersion -ne '1.3.0.0' -or $manifest.upstreamCommit -ne '0a0eb97f67d1dbcb3d08bda66d3b24f465d95475') { throw 'Driver identity does not match the split-driver ABI' }
@@ -40,6 +44,11 @@ if ($SysnetWindowsTreeState -eq 'unknown' -and (Test-Path (Join-Path $SourceDir 
     $SysnetWindowsTreeState = if (& git -C $SourceDir status --porcelain) { 'dirty' } else { 'clean' }
 }
 $before = Get-DriverEvidence $ImageManifest; $before | ConvertTo-Json | Set-Content (Join-Path $ArtifactDir 'driver-before.json')
+$resourceBefore = $null
+if ($Resource) {
+    $resourceBefore = Get-NativeResourceSnapshot
+    $resourceBefore | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $ArtifactDir 'resources-before.json')
+}
 $service = $manifest.driverService; $started = $false
 try {
     if ((Get-Service $service).Status -ne 'Stopped') { throw 'Driver service was not stopped at gate start' }
@@ -129,6 +138,13 @@ try {
             tests=@('TestPacketFlowPolicyTable', 'TestPacketFlowCharacterization')
         } | ConvertTo-Json | Set-Content (Join-Path $ArtifactDir 'dependency-conformance-passed.json')
     }
+    if ($Resource) {
+        $tags = 'winintegration,winresource'
+        $timeout = '60m'
+        $runPattern = '^TestM6'
+        $env:SYSNET_RESOURCE_ARTIFACT = Join-Path $ArtifactDir 'process-resources.json'
+        if ($SoakDuration) { $env:SYSNET_WINDOWS_SOAK_DURATION = $SoakDuration }
+    }
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $coverProfile = Join-Path $ArtifactDir 'e2e-cover.out'
@@ -173,7 +189,7 @@ try {
     $events = @(Get-Content (Join-Path $ArtifactDir 'e2e-events.jsonl') | Where-Object { $_ -match '^\s*\{' } | ConvertFrom-Json)
     $testManifest = Get-Content (Join-Path $PSScriptRoot 'test-manifest.json') -Raw | ConvertFrom-Json
     if ($testManifest.schemaVersion -ne 1) { throw 'Unsupported test manifest schema' }
-    $suiteName = if ($Flow) { 'packet-flow' } else { 'live-driver' }
+    $suiteName = if ($Flow) { 'packet-flow' } elseif ($Resource) { 'resource-gate' } else { 'live-driver' }
     $required = @($testManifest.suites.$suiteName.requiredTests)
     $testResults = Get-RequiredTestResults $events $required
     if (-not $Flow) {
@@ -188,10 +204,15 @@ try {
     $after = Get-DriverEvidence $ImageManifest
     $after | ConvertTo-Json | Set-Content (Join-Path $ArtifactDir 'driver-after.json')
     if ($after.state -ne 'Stopped') { throw "Driver service final state is $($after.state)" }
+    if ($Resource) {
+        $resourceAfter = Get-NativeResourceSnapshot
+        $resourceAfter | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $ArtifactDir 'resources-after.json')
+        Compare-NativeResourceSnapshot $resourceBefore $resourceAfter
+    }
 }
 $windows = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 $productType = if ($windows.InstallationType -like 'Server*') { 3 } else { 1 }
-$suite = if ($Flow) { 'packet-flow' } else { 'live-driver' }
+$suite = if ($Flow) { 'packet-flow' } elseif ($Resource) { 'resource-gate' } else { 'live-driver' }
 [ordered]@{
     schemaVersion=1; suite=$suite; outcome='passed'; startedAt=$startedAt
     finishedAt=(Get-Date).ToUniversalTime().ToString('o')

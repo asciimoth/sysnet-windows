@@ -8,7 +8,7 @@ tmp=$(mktemp -d)
 trap 'find "$tmp" -depth -delete' EXIT
 export PYTHONPYCACHEPREFIX="$tmp/pycache"
 "$script_dir/doctor.sh" --validate >/dev/null
-jq -e '.schemaVersion==1 and (.suites | keys==["live-driver","native-unit","packet-flow"]) and ([.suites[].requiredTests[]]|all(type=="string" and length>0)) and ([.suites[].plannedCases[]]|all(type=="string" and length>0))' "$script_dir/test-manifest.json" >/dev/null
+jq -e '.schemaVersion==1 and (.suites | keys==["live-driver","native-unit","packet-flow","resource-gate"]) and ([.suites[].requiredTests[]]|all(type=="string" and length>0)) and ([.suites[].plannedCases[]]|all(type=="string" and length>0))' "$script_dir/test-manifest.json" >/dev/null
 while IFS= read -r test_name; do
     [[ $test_name =~ ^([^[:space:]:]+)::(Test[[:alnum:]_]+)$ ]] || {
         printf 'required test identity is invalid: %s\n' "$test_name" >&2
@@ -41,12 +41,17 @@ if grep -Eq '^test-total:.*test-windows-flow' "$root/justfile"; then
     exit 1
 fi
 grep -Eq '^test-release:.*test-windows-flow' "$root/justfile"
+grep -Eq '^test-release:.*test-windows-resource' "$root/justfile"
+grep -Fq 'dev/winvm/run.sh resource' "$root/justfile"
 [[ $(jq '.suites["packet-flow"].requiredTests | length' "$script_dir/test-manifest.json") -gt 0 ]]
 [[ -d $root/cmd/sysnetflow ]]
 
 # Test commands retain JSON events while formatting their console output.
 grep -Fq 'Tee-Object -FilePath' "$script_dir/test.ps1"
 grep -Fq 'Tee-Object -FilePath' "$script_dir/e2e.ps1"
+grep -Fq 'Compare-NativeResourceSnapshot' "$script_dir/e2e.ps1"
+grep -Fq "'winintegration,winresource'" "$script_dir/e2e.ps1"
+grep -Fq 'Get-NetAdapter -IncludeHidden' "$script_dir/resource-state.ps1"
 grep -Fq '        Format-GoTestOutput' "$script_dir/test.ps1"
 grep -Fq '        Format-GoTestOutput' "$script_dir/e2e.ps1"
 grep -Fq "'-coverpkg=github.com/asciimoth/sysnet-windows'" "$script_dir/e2e.ps1"
