@@ -26,13 +26,13 @@ tidy-check:
 
 fmt:
     golangci-lint fmt ./...
-    mdformat --wrap 80 README.md THIRD_PARTY_NOTICES.md dev/winvm/README.md docs/dependencies.md docs/gonnect-contract.md
+    mdformat --wrap 80 README.md THIRD_PARTY_NOTICES.md dev/winvm/README.md
     nixfmt flake.nix
     shfmt -w -i 4 -ci $(find dev -type f -name '*.sh' | sort)
 
 fmt-check:
     test -z "$(gofmt -l .)"
-    mdformat --check --wrap 80 README.md THIRD_PARTY_NOTICES.md dev/winvm/README.md docs/dependencies.md docs/gonnect-contract.md
+    mdformat --check --wrap 80 README.md THIRD_PARTY_NOTICES.md dev/winvm/README.md
     nixfmt --check flake.nix
     shfmt -d -i 4 -ci $(find dev -type f -name '*.sh' | sort)
 

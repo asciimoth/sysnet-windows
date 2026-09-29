@@ -1,7 +1,7 @@
 # sysnet-windows: implementation and testing plan
 
 Status: proposed work, not a completed implementation or qualification report.
-Prepared 2026-09-26. Companion: `gonnect-sysnet-capability-api-proposal.md`.
+Prepared 2026-09-26.
 
 ## 1. Goal, baseline, and initial release boundary
 
