@@ -40,6 +40,9 @@ type System struct {
 	regularTunsMu   sync.Mutex
 	regularTuns     map[*regularTun]struct{}
 	nextRegularTun  uint64
+	defaultTunMu    sync.Mutex
+	defaultTun      *defaultTun
+	nextDefaultTun  uint64
 	closeMu         sync.Mutex
 	closeErr        error
 	probeGeneration uint64
@@ -368,7 +371,7 @@ func (s *System) BuildDefaultTun(opts sysnet.DefaultTunOpts) (sysnet.DefaultTun,
 	if capability.State != sysnet.CapabilityAvailable {
 		return nil, capabilityError("DefaultTun.Profile", capability)
 	}
-	return nil, sysnet.ErrNotSupported
+	return s.buildDefaultTun(opts, desired)
 }
 
 func (*System) DefaultTunWarnings(sysnet.DefaultTun) []sysnet.Warning { return nil }

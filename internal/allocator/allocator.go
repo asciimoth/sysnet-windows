@@ -131,6 +131,72 @@ func (a *Allocator) AllocIP6() (net.IP, *net.IPNet) {
 	return ip, network
 }
 
+// AllocateOwnedIPs selects and reserves one address for each requested family.
+// The host-state checks, candidate selection, and ownership transfer are atomic
+// with other allocations.
+func (a *Allocator) AllocateOwnedIPs(owner string, ipv4, ipv6 bool) ([]netip.Prefix, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		return nil, ErrClosed
+	}
+	if owner == "" {
+		return nil, errors.New("allocator reservation owner is empty")
+	}
+	if _, exists := a.ownedIPs[owner]; exists {
+		return nil, errors.New("allocator reservation owner already exists")
+	}
+	if !ipv4 && !ipv6 {
+		return nil, errors.New("allocator address family is empty")
+	}
+	prefixes := make([]netip.Prefix, 0, 2)
+	allocated := make([]net.IP, 0, 2)
+	rollback := func() {
+		for _, ip := range allocated {
+			a.delegate.FreeIP(ip)
+		}
+	}
+	for _, useIPv6 := range []bool{false, true} {
+		if useIPv6 && !ipv6 || !useIPv6 && !ipv4 {
+			continue
+		}
+		if !a.startAttempt() {
+			rollback()
+			return nil, a.lastErr
+		}
+		var ip net.IP
+		var network *net.IPNet
+		if useIPv6 {
+			ip, network = a.delegate.AllocIP6()
+		} else {
+			ip, network = a.delegate.AllocIP4()
+		}
+		succeeded := ip != nil && network != nil
+		a.finishAttempt(succeeded)
+		if !succeeded {
+			if ip != nil {
+				a.delegate.FreeIP(ip)
+			}
+			rollback()
+			return nil, errors.New("no conflict-free TUN address is available")
+		}
+		address, ok := canonicalIP(ip)
+		ones, bits := network.Mask.Size()
+		if !ok || ones < 0 || bits != address.BitLen() {
+			a.delegate.FreeIP(ip)
+			rollback()
+			return nil, errors.New("allocator returned an invalid address prefix")
+		}
+		allocated = append(allocated, ip)
+		prefixes = append(prefixes, netip.PrefixFrom(address, ones))
+	}
+	for _, prefix := range prefixes {
+		a.ownedIPRefs[prefix.Addr()]++
+	}
+	a.ownedIPs[owner] = prefixes
+	return append([]netip.Prefix(nil), prefixes...), nil
+}
+
 // FreeIP implements subnet.IPAllocator.
 func (a *Allocator) FreeIP(ip net.IP) {
 	a.mu.Lock()
@@ -166,6 +232,18 @@ func (a *Allocator) FreeAllIP() {
 // caller's existing allocator reservation for the same address. owner must be
 // unique until ReleaseOwnedIPs is called.
 func (a *Allocator) ReserveOwnedIPs(owner string, prefixes []netip.Prefix) error {
+	return a.reserveOwnedIPs(owner, prefixes, "")
+}
+
+// ReserveOwnedIPsForReplacement reserves addresses before an old owner is
+// retired. Only host addresses and prefixes held by replacedOwner can overlap.
+// Those rows are removed at the explicit replacement boundary before the new
+// addresses are applied.
+func (a *Allocator) ReserveOwnedIPsForReplacement(owner string, prefixes []netip.Prefix, replacedOwner string) error {
+	return a.reserveOwnedIPs(owner, prefixes, replacedOwner)
+}
+
+func (a *Allocator) reserveOwnedIPs(owner string, prefixes []netip.Prefix, replacedOwner string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed {
@@ -189,9 +267,10 @@ func (a *Allocator) ReserveOwnedIPs(owner string, prefixes []netip.Prefix) error
 	if err != nil {
 		return err
 	}
+	replaced := a.ownedIPs[replacedOwner]
 	for _, prefix := range unique {
 		address := prefix.Addr()
-		if a.conflictsReservationLocked(prefix, "") || conflictsOwnedPrefix(state, prefix) {
+		if a.conflictsReservationLocked(prefix, replacedOwner) || conflictsPrefixExceptOwner(state, prefix, replaced) {
 			return fmt.Errorf("%w: %s", ErrReservationConflict, address)
 		}
 	}
@@ -681,36 +760,56 @@ func conflictsPrefixExceptOwner(state netio.HostState, candidate netip.Prefix, o
 	if !candidate.IsValid() || !usableCandidate(candidate.Addr()) {
 		return true
 	}
+	ownedAddresses := make(map[netip.Addr]int, len(owner))
+	ownedPrefixes := make(map[netip.Prefix]int, len(owner))
+	ownedRoutes := make(map[netip.Prefix]int, len(owner)*3)
+	for _, prefix := range owner {
+		address := prefix.Addr().Unmap()
+		prefix = netip.PrefixFrom(address, prefix.Bits()).Masked()
+		ownedAddresses[address]++
+		ownedPrefixes[prefix]++
+		ownedRoutes[prefix]++
+		host := netip.PrefixFrom(address, address.BitLen())
+		ownedRoutes[host]++
+		if prefix.Addr().Is4() && prefix.Bits() <= 30 {
+			broadcast := netip.PrefixFrom(ipv4DirectedBroadcast(prefix), 32)
+			ownedRoutes[broadcast]++
+		}
+	}
 	for _, address := range state.Addresses {
-		if usableHostAddress(address) && candidate.Contains(address) && !containsOwnedAddress(owner, address) {
+		if usableHostAddress(address) && candidate.Contains(address) {
+			if ownedAddresses[address] > 0 {
+				ownedAddresses[address]--
+				continue
+			}
 			return true
 		}
 	}
 	for _, prefix := range state.InterfacePrefixes {
-		if usableHostPrefix(prefix) && prefixesOverlap(candidate, prefix.Masked()) && !containsOwnedPrefix(owner, prefix) {
+		prefix = prefix.Masked()
+		if usableHostPrefix(prefix) && prefixesOverlap(candidate, prefix) {
+			if ownedPrefixes[prefix] > 0 {
+				ownedPrefixes[prefix]--
+				continue
+			}
 			return true
 		}
 	}
 	for _, route := range state.Routes {
-		if usableRoute(route) && prefixesOverlap(candidate, route.Masked()) && !containsOwnedRoute(owner, route) {
+		route = route.Masked()
+		if usableRoute(route) && prefixesOverlap(candidate, route) {
+			if ownedRoutes[route] > 0 {
+				ownedRoutes[route]--
+				continue
+			}
 			return true
 		}
 	}
 	return false
 }
 
-func containsOwnedPrefix(prefixes []netip.Prefix, want netip.Prefix) bool {
-	want = want.Masked()
-	return slices.ContainsFunc(prefixes, func(prefix netip.Prefix) bool {
-		return prefix.Masked() == want
-	})
-}
-
-// containsOwnedRoute identifies routes that Windows derives from an address
-// assigned by this owner. In addition to the on-link prefix, Windows can add a
-// host route for the assigned address and an IPv4 host route for the directed
-// broadcast address. These rows must not make a later address transaction
-// conflict with the TUN's own native state.
+// containsOwnedRoute reports whether an address assignment derives a route.
+// Windows creates the on-link, host, and IPv4 directed-broadcast rows.
 func containsOwnedRoute(prefixes []netip.Prefix, want netip.Prefix) bool {
 	want = want.Masked()
 	for _, prefix := range prefixes {

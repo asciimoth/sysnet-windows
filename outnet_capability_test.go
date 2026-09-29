@@ -54,6 +54,32 @@ func TestOutNetCapabilityRequiresSelectedFamily(t *testing.T) {
 	}
 }
 
+func TestDefaultTunCapabilityRequiresSelectedFamily(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	system, err := newSystem(SystemConfig{}, systemDependencies{
+		underlay:       staticUnderlaySource{candidates: []underlay.Candidate{outNetCandidate(false)}},
+		capabilityCode: implementationSupport{defaultTun: true, defaultTunDual: true},
+		capabilityProbe: staticCapabilityProbe{facts: capabilityProbeFacts{
+			netIO: available, underlay: available,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("newSystem() error = %v", err)
+	}
+	t.Cleanup(func() { _ = system.Close() })
+	report := system.Capabilities()
+	if got := report.Operation(sysnet.OperationKey{Target: sysnet.TargetDefaultTun, Operation: sysnet.OpCreate, Family: sysnet.FamilyIPv4}); got.State != sysnet.CapabilityAvailable {
+		t.Fatalf("IPv4 default TUN capability = %+v, want available", got)
+	}
+	if got := report.Operation(sysnet.OperationKey{Target: sysnet.TargetDefaultTun, Operation: sysnet.OpCreate, Family: sysnet.FamilyIPv6}); got.State != sysnet.CapabilityUnavailable || len(got.Reasons) != 1 || got.Reasons[0] != sysnet.ReasonNoUnderlay {
+		t.Fatalf("IPv6 default TUN capability = %+v, want unavailable/no_underlay", got)
+	}
+	if got := report.DefaultTunProfile(sysnet.RoutingProfileKey{Family: sysnet.FamilyDual, Mode: sysnet.RoutingFull}); got.State != sysnet.CapabilityUnavailable {
+		t.Fatalf("dual default TUN profile = %+v, want unavailable", got)
+	}
+}
+
 func TestOutNetCapabilitiesMatchEverySelectedFamily(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

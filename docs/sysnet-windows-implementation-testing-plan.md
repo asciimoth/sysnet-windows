@@ -762,7 +762,7 @@ defer rollback to a later milestone.
 
 #### M3: implement default routing and DNS
 
-1. **Step 16 - Build the default-TUN transaction.**
+1. **Step 16 - Build the default-TUN transaction. (Completed)**
 
     - Validate and reserve all inputs before changing the old default TUN.
     - Create the new adapter, addresses and underlay dependencies before adding

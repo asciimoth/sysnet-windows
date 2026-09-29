@@ -75,6 +75,9 @@ func currentImplementationSupport() implementationSupport {
 		regularTun:              true,
 		regularTunDual:          true,
 		regularTunNamed:         true,
+		defaultTun:              true,
+		defaultTunDual:          true,
+		defaultTunNamed:         true,
 		exclusionRuleValidation: true,
 		matcherRuleValidation:   true,
 		outNet:                  true,
@@ -193,9 +196,9 @@ func buildCapabilityReport(
 		if family == sysnet.FamilyDual {
 			implemented = support.defaultTunDual
 		}
-		base := lifecycleCapability(
-			dependentCapability(familyCapability(implementedCapability(implemented), config, family), facts.netIO), state,
-		)
+		base := familyCapability(implementedCapability(implemented), config, family)
+		base = dependentCapability(base, facts.netIO)
+		base = lifecycleCapability(base, state)
 		report.Operations = append(report.Operations,
 			operationCapability(sysnet.TargetDefaultTun, sysnet.OpCreate, family, base),
 			operationCapability(sysnet.TargetDefaultTun, sysnet.OpCreateNamed, family,
@@ -289,34 +292,55 @@ func networkOperationCatalog(config normalizedSystemConfig, support implementati
 	return operations
 }
 
-func constrainOutNetUnderlay(report *sysnet.CapabilityReport, snapshot underlay.Snapshot) {
+func constrainNetworkUnderlay(report *sysnet.CapabilityReport, snapshot underlay.Snapshot) {
 	for index := range report.Operations {
 		operation := &report.Operations[index]
-		if operation.Key.Target != sysnet.TargetOutNet || operation.State != sysnet.CapabilityAvailable {
+		usesUnderlay := operation.Key.Target == sysnet.TargetOutNet ||
+			operation.Key.Target == sysnet.TargetDefaultTun &&
+				(operation.Key.Operation == sysnet.OpCreate || operation.Key.Operation == sysnet.OpCreateNamed)
+		if !usesUnderlay || operation.State != sysnet.CapabilityAvailable {
 			continue
 		}
-		var available bool
-		detail := ""
-		switch operation.Key.Family {
-		case sysnet.FamilyNone:
-			available = snapshot.IPv4 != nil || snapshot.IPv6 != nil
-			detail = "no selected underlay"
-		case sysnet.FamilyIPv4:
-			available = snapshot.IPv4 != nil
-			detail = "no selected IPv4 underlay"
-		case sysnet.FamilyIPv6:
-			available = snapshot.IPv6 != nil
-			detail = "no selected IPv6 underlay"
-		case sysnet.FamilyDual:
-			continue
-		default:
+		if unavailable := unavailableUnderlay(operation.Key.Family, snapshot); unavailable != nil {
+			operation.Capability = *unavailable
+		}
+	}
+	for index := range report.DefaultTunProfiles {
+		profile := &report.DefaultTunProfiles[index]
+		if profile.State != sysnet.CapabilityAvailable {
 			continue
 		}
-		if !available {
-			operation.Capability = sysnet.Capability{
-				State: sysnet.CapabilityUnavailable, Reasons: []sysnet.CapabilityReason{sysnet.ReasonNoUnderlay}, Detail: detail,
-			}
+		if unavailable := unavailableUnderlay(profile.Key.Family, snapshot); unavailable != nil {
+			profile.Capability = *unavailable
 		}
+	}
+}
+
+func unavailableUnderlay(family sysnet.AddressFamily, snapshot underlay.Snapshot) *sysnet.Capability {
+	available := false
+	detail := "no selected underlay"
+	switch family {
+	case sysnet.FamilyNone:
+		available = snapshot.IPv4 != nil || snapshot.IPv6 != nil
+	case sysnet.FamilyIPv4:
+		available = snapshot.IPv4 != nil
+		detail = "no selected IPv4 underlay"
+	case sysnet.FamilyIPv6:
+		available = snapshot.IPv6 != nil
+		detail = "no selected IPv6 underlay"
+	case sysnet.FamilyDual:
+		available = snapshot.IPv4 != nil && snapshot.IPv6 != nil
+		detail = "no selected dual-stack underlay"
+	default:
+		return nil
+	}
+	if available {
+		return nil
+	}
+	return &sysnet.Capability{
+		State:   sysnet.CapabilityUnavailable,
+		Reasons: []sysnet.CapabilityReason{sysnet.ReasonNoUnderlay},
+		Detail:  detail,
 	}
 }
 
