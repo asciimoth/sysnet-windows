@@ -957,7 +957,7 @@ defer rollback to a later milestone.
     - Complete this step when owned native objects return to the exact expected
       state and process-resource measurements have no unexplained growth.
 
-2. **Step 30 - Qualify each support-matrix entry independently.**
+2. **Step 30 - Qualify each support-matrix entry independently. (Completed)**
 
     - Run the portable, native baseline, live integration and packet-flow gates
       against the same clean source identity and dependency locks.
@@ -969,21 +969,6 @@ defer rollback to a later milestone.
       from a different source archive.
     - Complete this step when `just qualify-windows ENTRY EVIDENCE` produces an
       accepted record for each platform that the release will advertise.
-
-3. **Step 31 - Publish the verified support boundary.**
-
-    - Update README, integration, limitations, VM and validation documents from
-      the accepted evidence. Link each advertised capability to its required
-      case.
-    - List untested, unsupported and blocked profiles separately. Keep Include,
-      Strict, SourceRoutes, multicast bypass and rename disabled unless their
-      later gates passed.
-    - Record module versions, locks, source archive hash, known warnings and the
-      exact qualified Windows builds.
-    - Run `just check` and the evidence qualifier from a
-      clean tree. Archive results before creating the release tag.
-    - Complete this step only when documentation, machine-readable capabilities
-      and qualification evidence describe the same support boundary.
 
 ## 6. Test layers and acceptance principles
 

@@ -58,7 +58,7 @@ try {
         $actual = (& go env GOVERSION | Out-String).Trim()
         if ($actual -ne "go$ExpectedGoVersion") { throw "Go version is $actual, not go$ExpectedGoVersion" }
     }
-    $nativeArchitecture = switch ($env:PROCESSOR_ARCHITECTURE) { 'AMD64' { 'amd64' } 'ARM64' { 'arm64' } default { throw "Unsupported native architecture: $env:PROCESSOR_ARCHITECTURE" } }
+    $nativeArchitecture = Get-NativeArchitecture
     $goArchitecture = (& go env GOARCH | Out-String).Trim()
     if ($goArchitecture -ne $nativeArchitecture) { throw "Go architecture is $goArchitecture, not native $nativeArchitecture" }
     Invoke-Logged 'go-version' 'go' @('version')
@@ -82,18 +82,13 @@ try {
     $testResults = Get-RequiredTestResults $parsed $required
     $parsed | Where-Object Action -eq output | ForEach-Object Output | Set-Content (Join-Path $ArtifactDir 'tests.log')
     Invoke-Logged 'go-build' 'go' @('build', './...')
-    $windows = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-    $productType = if ($windows.InstallationType -like 'Server*') { 3 } else { 1 }
     [ordered]@{
         schemaVersion=1; suite='native-unit'; outcome='passed'; startedAt=$startedAt
         finishedAt=(Get-Date).ToUniversalTime().ToString('o')
         sysnetWindowsRevision=$SysnetWindowsRevision; sysnetWindowsTreeState=$SysnetWindowsTreeState
         sourceArchiveSha256=$SourceArchiveSHA256.ToLowerInvariant()
         architecture=$nativeArchitecture
-        os=[ordered]@{
-            caption=$windows.ProductName; version=[Environment]::OSVersion.Version.ToString()
-            build=$windows.CurrentBuildNumber; productType=$productType
-        }
+        os=(Get-WindowsPlatformEvidence)
         goVersion=(& go version | Out-String).Trim()
         dependencyLocks=(Get-DependencyLockEvidence $sourceRoot)
         requiredTests=$required; testResults=$testResults

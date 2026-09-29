@@ -5,6 +5,9 @@ default:
 
 # This gate does not change host networking or start a Windows guest.
 check-fast: verify tidy-check fmt-check typos lint vet test fuzz build-windows winvm-check
+    mkdir -p .artifacts/portable
+    dev/winvm/package-worktree.sh .artifacts/portable/worktree.tar
+    python3 dev/winvm/tools/portable-evidence.py --root . --source-archive .artifacts/portable/worktree.tar --output .artifacts/portable/portable-evidence.json
 
 # This gate needs the licensed media and KVM setup described in dev/winvm/README.md.
 check: check-fast test-total
@@ -88,7 +91,7 @@ test-windows-resource:
     dev/winvm/run.sh resource
 
 qualify-windows entry evidence:
-    python3 dev/winvm/tools/qualify.py --matrix dev/winvm/qualification-matrix.json --entry "{{entry}}" --native-unit "{{evidence}}/native-unit-evidence.json" --live-driver "{{evidence}}/live-driver-evidence.json" --packet-flow "{{evidence}}/packet-flow-suite-evidence.json" --packet-evidence "{{evidence}}/packet-flow-evidence.json" --output "{{evidence}}/qualification.json"
+    python3 dev/winvm/tools/qualify.py --matrix dev/winvm/qualification-matrix.json --entry "{{entry}}" --portable "{{evidence}}/portable-evidence.json" --native-unit "{{evidence}}/native-unit-evidence.json" --live-driver "{{evidence}}/live-driver-evidence.json" --resource-gate "{{evidence}}/resource-gate-evidence.json" --packet-flow "{{evidence}}/packet-flow-suite-evidence.json" --packet-evidence "{{evidence}}/packet-flow-evidence.json" --source-archive "{{evidence}}/worktree.tar" --output "{{evidence}}/qualification.json"
 
 winvm-shell run:
     dev/winvm/run.sh --shell "{{run}}"

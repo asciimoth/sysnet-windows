@@ -1,6 +1,21 @@
 {
   "schemaVersion": 1,
   "suites": {
+    "portable": {
+      "requiredStages": [
+        "module-verify",
+        "tidy-check",
+        "format-check",
+        "spelling-check",
+        "lint",
+        "vet",
+        "race-tests",
+        "fuzz-smoke",
+        "windows-cross-build",
+        "host-harness-tests"
+      ],
+      "plannedCases": []
+    },
     "native-unit": {
       "requiredTests": [
         "github.com/asciimoth/sysnet-windows::TestNativeNoResourceSmoke",
@@ -61,6 +76,9 @@
         "github.com/asciimoth/sysnet-windows/internal/network::TestNativeSocketBinderTCPAndUDP",
         "github.com/asciimoth/sysnet-windows/internal/network::TestNativeSocketBinderFamilyFailure",
         "github.com/asciimoth/sysnet-windows/internal/network::TestNativeSocketBinderUnderlayLoss",
+        "github.com/asciimoth/sysnet-windows/internal/owner::TestNativeResolverTCPAndProcessMetadata",
+        "github.com/asciimoth/sysnet-windows/internal/owner::TestNativeResolverUDPExactAndWildcard",
+        "github.com/asciimoth/sysnet-windows/internal/owner::TestNativeResolverLocalPeerIsChild",
         "github.com/asciimoth/sysnet-windows/internal/reconcile::TestJournalFailurePointsUndoExactResourcesInReverse",
         "github.com/asciimoth/sysnet-windows/internal/reconcile::TestJournalRollsBackApplyThatMutatesBeforeFailure",
         "github.com/asciimoth/sysnet-windows/internal/reconcile::TestJournalBoundsEveryBlockingCallbackAndRetainsOwnership",
@@ -80,9 +98,7 @@
         "github.com/asciimoth/sysnet-windows/internal/tun::TestT10AdapterReturnsNativeCapacityError",
         "github.com/asciimoth/sysnet-windows/internal/tun::TestT13T15CloseUnblocksIOAndNormalizesErrors"
       ],
-      "plannedCases": [
-        "M4 native owner lookup cases"
-      ]
+      "plannedCases": []
     },
     "live-driver": {
       "requiredTests": [
@@ -98,7 +114,7 @@
         "github.com/asciimoth/sysnet-windows/integration::TestNativeRegularTunEnabledFamilyFloorCoversIPv6Mutations",
         "github.com/asciimoth/sysnet-windows/integration::TestNativeRegularTunMutatesAddressesWithinOwnedSubnet"
       ],
-      "plannedCases": ["M5 split-driver lifecycle and reset recovery"]
+      "plannedCases": []
     },
     "packet-flow": {
       "requiredTests": [
@@ -106,9 +122,7 @@
         "github.com/asciimoth/sysnet-windows/integration::TestPacketFlowOutNetUnderlay",
         "github.com/asciimoth/sysnet-windows/integration::TestPacketFlowPublicAPIExclusions"
       ],
-      "plannedCases": [
-        "M3 managed DNS packet paths"
-      ]
+      "plannedCases": []
     },
     "resource-gate": {
       "requiredTests": [

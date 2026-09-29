@@ -97,4 +97,18 @@ Assert-Throws {
     Get-RequiredTestResults @($pass) @($identity, $identity) | Out-Null
 } 'Required test identity is duplicated'
 
+if ((Convert-WindowsProductType 'WinNT') -ne 1 -or
+    (Convert-WindowsProductType 'LanmanNT') -ne 2 -or
+    (Convert-WindowsProductType 'ServerNT') -ne 3) {
+    throw 'Windows product types were not mapped to the documented values'
+}
+Assert-Throws { Convert-WindowsProductType 'Unknown' } 'Unsupported Windows product type'
+if ((Get-WindowsCaption 'Microsoft Windows 10 Pro' 1 26100) -ne 'Microsoft Windows 11 Pro') {
+    throw 'A Windows 11 client retained the stale Windows 10 registry caption'
+}
+if ((Get-WindowsCaption 'Microsoft Windows Server 2022' 3 20348) -ne 'Microsoft Windows Server 2022') {
+    throw 'A Windows Server caption was changed'
+}
+Assert-Throws { Get-WindowsCaption '' 1 26100 } 'Windows product name is absent'
+
 Write-Output 'PowerShell test-evidence tests passed.'

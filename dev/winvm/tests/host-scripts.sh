@@ -8,7 +8,7 @@ tmp=$(mktemp -d)
 trap 'find "$tmp" -depth -delete' EXIT
 export PYTHONPYCACHEPREFIX="$tmp/pycache"
 "$script_dir/doctor.sh" --validate >/dev/null
-jq -e '.schemaVersion==1 and (.suites | keys==["live-driver","native-unit","packet-flow","resource-gate"]) and ([.suites[].requiredTests[]]|all(type=="string" and length>0)) and ([.suites[].plannedCases[]]|all(type=="string" and length>0))' "$script_dir/test-manifest.json" >/dev/null
+jq -e '.schemaVersion==1 and (.suites | keys==["live-driver","native-unit","packet-flow","portable","resource-gate"]) and ([.suites[].requiredTests[]?]|all(type=="string" and length>0)) and ([.suites[].plannedCases[]]|all(type=="string" and length>0)) and (.suites.portable.requiredStages | length>0 and all(type=="string" and length>0))' "$script_dir/test-manifest.json" >/dev/null
 while IFS= read -r test_name; do
     [[ $test_name =~ ^([^[:space:]:]+)::(Test[[:alnum:]_]+)$ ]] || {
         printf 'required test identity is invalid: %s\n' "$test_name" >&2
@@ -23,11 +23,18 @@ while IFS= read -r test_name; do
         printf 'required test does not exist in %s: %s\n' "$package_path" "$function_name" >&2
         exit 1
     }
-done < <(jq -r '.suites[].requiredTests[]' "$script_dir/test-manifest.json")
+done < <(jq -r '.suites[].requiredTests[]?' "$script_dir/test-manifest.json")
 python3 -m py_compile "$script_dir/tools/qga.py"
 python3 -m py_compile "$script_dir/tools/flow-pcap.py"
 python3 -m py_compile "$script_dir/tools/wintun-input.py"
 python3 -m py_compile "$script_dir/tools/qualify.py"
+python3 -m py_compile "$script_dir/tools/portable-evidence.py"
+"$script_dir/package-worktree.sh" "$tmp/portable-source.tar"
+python3 "$script_dir/tools/portable-evidence.py" --root "$root" \
+    --source-archive "$tmp/portable-source.tar" \
+    --output "$tmp/portable-evidence.json"
+jq -e '.schemaVersion==1 and .suite=="portable" and .outcome=="passed" and (.stageResults|all(.=="pass")) and (.dependencyLocks|keys|length)==8' "$tmp/portable-evidence.json" >/dev/null
+[[ $(jq -r .sourceArchiveSha256 "$tmp/portable-evidence.json") == "$(sha256_file "$tmp/portable-source.tar")" ]]
 python3 "$script_dir/tests/test_flow_pcap.py"
 python3 "$script_dir/tests/test_wintun_input.py"
 python3 "$script_dir/tests/test_qualify.py"
@@ -133,6 +140,9 @@ printf 'dev/winvm/env\n.artifacts/\n' >"$fixture/.gitignore"
 printf old >"$fixture/tracked"
 git -C "$fixture" add .
 git -C "$fixture" commit -qm initial
+git -C "$fixture" archive --format=tar --output="$tmp/git-archive.tar" HEAD
+(cd "$fixture" && dev/winvm/package-worktree.sh "$tmp/clean-tree.tar")
+cmp "$tmp/git-archive.tar" "$tmp/clean-tree.tar"
 printf new >"$fixture/tracked"
 printf source >"$fixture/untracked"
 printf secret >"$fixture/dev/winvm/env"

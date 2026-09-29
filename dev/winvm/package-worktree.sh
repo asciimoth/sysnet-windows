@@ -5,6 +5,10 @@ root=$(cd -- "$script_dir/../.." && pwd -P)
 output=${1:?usage: package-worktree.sh OUTPUT.tar}
 [[ $output = /* ]] || output="$PWD/$output"
 mkdir -p -- "$(dirname -- "$output")"
+if [[ -z $(git -C "$root" status --porcelain) ]]; then
+    git -C "$root" archive --format=tar --output="$output" HEAD
+    exit
+fi
 list=$(mktemp)
 trap 'rm -f -- "$list"' EXIT
 cd -- "$root"

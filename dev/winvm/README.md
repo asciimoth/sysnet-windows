@@ -60,16 +60,14 @@ operation, disables the selected underlay, and checks that new TCP and UDP
 operations do not fall back. It restores the link, closes the System, verifies
 tracked sockets are closed, and verifies owned route cleanup. Both disposable
 guests disable their Windows Firewall profiles so the endpoint can connect to
-ephemeral TCP listeners on the isolated links. The manifest lists only existing
-package tests as required tests. Future live and flow coverage is listed as
-planned cases, not as optional passes. A required test fails the gate if it is
-absent or skipped. The live and flow gates cannot pass release qualification
-until their planned milestone tests become required and pass. `just test-total`
-runs the local Go and fuzz tests, then builds or reuses the base image and runs
-the completed baseline and live-driver gates. `just check` adds all formatting,
-linting, vetting, builds, and host-harness checks around `test-total`.
-`just check-release` also runs the resource and packet-flow gates. Linux-only VM
-recipes skip on Windows.
+ephemeral TCP listeners on the isolated links. The manifest lists existing
+package tests as required tests. A required test fails the gate if it is absent
+or skipped. Any remaining planned case also prevents qualification.
+`just test-total` runs the local Go and fuzz tests, then builds or reuses the
+base image and runs the completed baseline and live-driver gates. `just check`
+adds all formatting, linting, vetting, builds, and host-harness checks around
+`test-total`. `just check-release` also runs the resource and packet-flow gates.
+Linux-only VM recipes skip on Windows.
 
 The harness serializes VM processes on one host. Image creation has an exclusive
 content-key lock. Test runs hold a shared image lock and use a unique overlay,
@@ -108,13 +106,25 @@ artifacts include the coverage profile and per-function report. `run.json`
 records the SHA-256 of `worktree.tar`, so the retained source can be matched to
 the test evidence.
 
-Native runs also write suite evidence with the exact Windows build,
-architecture, sysnet-windows revision, source archive SHA-256, Go version,
-dependency lock hashes, required test results, and driver identity. Use
-`just qualify-windows MATRIX EVIDENCE_DIR` to combine the native-unit,
-live-driver, packet-flow, and independent capture results. The matrix names are
-in `qualification-matrix.json`. The qualifier rejects dirty or mismatched
-revisions.
+Native runs also write suite evidence with the exact Windows build, native
+architecture, kernel code-integrity mode, sysnet-windows revision, source
+archive SHA-256, Go version, dependency lock hashes, required test results, and
+actual driver and Wintun binary identities. `just check-fast` writes the
+matching portable record and source archive under `.artifacts/portable/`.
+
+Copy the five suite records and packet-flow evidence into one evidence
+directory. Keep the portable `worktree.tar` with them. Then run:
+
+```console
+just qualify-windows windows-server-2022-amd64 EVIDENCE_DIR
+```
+
+The matrix entry names are in `qualification-matrix.json`. The qualifier rejects
+dirty or mismatched source archives, changed dependency locks, unfinished
+planned cases, skipped or absent required tests, stale suite runs,
+test-signing/debug code-integrity modes, unexpected signers, binary hash
+mismatches, and incomplete packet cases. It deletes an older qualification
+record before validation, so a failed rerun cannot leave a stale success.
 
 The resource artifacts include `resources-before.json`, `resources-after.json`,
 and `process-resources.json`. Keep all three with `resource-gate-evidence.json`;

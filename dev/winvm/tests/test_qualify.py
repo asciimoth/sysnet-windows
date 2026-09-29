@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for Windows qualification evidence validation."""
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -11,8 +12,8 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).parents[1] / "tools" / "qualify.py"
 REVISION = "a" * 40
-SOURCE_HASH = "b" * 64
-LOCKS = {"goMod": "c" * 64, "goSum": "d" * 64}
+SOURCE_BYTES = b"fixture source archive"
+SOURCE_HASH = hashlib.sha256(SOURCE_BYTES).hexdigest()
 NATIVE_TEST = "example.test/native::TestNative"
 LIVE_TESTS = [
     "example.test/integration::TestDriverLifecycle",
@@ -24,6 +25,7 @@ FLOW_TESTS = [
     "example.test/integration::TestPacketFlowPublicAPI",
     "example.test/integration::TestPacketFlowUnderlayBypass",
 ]
+RESOURCE_TEST = "example.test/integration::TestResourceGate"
 
 
 class QualificationTest(unittest.TestCase):
@@ -33,6 +35,7 @@ class QualificationTest(unittest.TestCase):
         driver_lock_mutate=None,
         manifest_mutate=None,
         preexisting_output=None,
+        source_bytes=SOURCE_BYTES,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -40,6 +43,21 @@ class QualificationTest(unittest.TestCase):
                 "schemaVersion": 1,
                 "driverLock": "driver-lock.json",
                 "testManifest": "test-manifest.json",
+                "dependencyLocks": {
+                    "goMod": "go.mod.lock", "goSum": "go.sum.lock",
+                    "flakeLock": "flake.lock", "imageLock": "image-lock.json",
+                    "nativeDriverLock": "driver-lock.json",
+                    "qualificationMatrix": "matrix.json",
+                    "wintunLock": "wintun-lock.json",
+                    "testManifest": "test-manifest.json",
+                },
+                "maximumSuiteSpanHours": 168,
+                "codeIntegrity": {"requiredOptions": 1, "forbiddenOptions": 130},
+                "resourceGate": {
+                    "warmupCycles": 10, "batchCount": 4,
+                    "cyclesPerBatch": 25, "cancellationCycles": 100,
+                    "soakDuration": "30m",
+                },
                 "driver": {"version": "1.3.0.0", "upstreamCommit": "upstream"},
                 "requiredPacketCases": ["tcp4", "udp6"],
                 "entries": [{
@@ -53,11 +71,31 @@ class QualificationTest(unittest.TestCase):
                 "sysnetWindowsRevision": REVISION, "sysnetWindowsTreeState": "clean",
                 "sourceArchiveSha256": SOURCE_HASH,
                 "architecture": "arm64",
+                "startedAt": "2026-09-29T10:00:00Z",
+                "finishedAt": "2026-09-29T10:01:00Z",
                 "goVersion": "go version go1.25.5 windows/arm64",
-                "dependencyLocks": LOCKS,
-                "os": {"caption": "Fixture Windows", "version": "1.2.42", "build": "42", "productType": 1},
+                "os": {
+                    "caption": "Fixture Windows", "version": "1.2.42",
+                    "build": "42", "productType": 1,
+                    "nativeArchitecture": "arm64",
+                    "codeIntegrity": {
+                        "options": 1, "enabled": True,
+                        "testSigning": False, "debugMode": False,
+                    },
+                },
             }
             values = {
+                "portable": {
+                    "schemaVersion": 1, "suite": "portable", "outcome": "passed",
+                    "sysnetWindowsRevision": REVISION,
+                    "sysnetWindowsTreeState": "clean",
+                    "sourceArchiveSha256": SOURCE_HASH,
+                    "startedAt": "2026-09-29T09:00:00Z",
+                    "finishedAt": "2026-09-29T09:01:00Z",
+                    "goVersion": "go version go1.25.5 linux/amd64",
+                    "requiredStages": ["check-fast"],
+                    "stageResults": {"check-fast": "pass"},
+                },
                 "native": {
                     **common, "suite": "native-unit", "requiredTests": [NATIVE_TEST],
                     "testResults": {NATIVE_TEST: "pass"},
@@ -68,6 +106,17 @@ class QualificationTest(unittest.TestCase):
                     "requiredTests": LIVE_TESTS,
                     "testResults": dict.fromkeys(LIVE_TESTS, "pass"),
                 },
+                "resource": {
+                    **common,
+                    "suite": "resource-gate",
+                    "requiredTests": [RESOURCE_TEST],
+                    "testResults": {RESOURCE_TEST: "pass"},
+                    "resourceGate": {
+                        "warmupCycles": 10, "batchCount": 4,
+                        "cyclesPerBatch": 25, "cancellationCycles": 100,
+                        "soakDuration": "30m", "diagnosticOverride": False,
+                    },
+                },
                 "flow": {
                     **common,
                     "suite": "packet-flow",
@@ -75,13 +124,22 @@ class QualificationTest(unittest.TestCase):
                     "testResults": dict.fromkeys(FLOW_TESTS, "pass"),
                 },
             }
-            for name in ("live", "flow"):
+            for name in ("live", "resource", "flow"):
                 values[name]["driver"] = {
                     "version": "1.3.0.0", "upstreamCommit": "upstream",
-                    "finalState": "Stopped", "files": {"driver.sys": "hash"},
+                    "finalState": "Stopped",
+                    "files": {"mullvad-split-tunnel.sys": "hash"},
                     "packageSigner": "CN=Mullvad VPN AB",
+                    "stagedDriverSigner": "CN=Mullvad VPN AB",
+                    "packageCatalogSigner": (
+                        "CN=Microsoft Windows Hardware Compatibility Publisher"
+                    ),
                     "installedSigner": "CN=Mullvad VPN AB",
                     "installedSignature": "Valid",
+                    "installedFileSha256": "hash",
+                }
+                values[name]["wintun"] = {
+                    "version": "0.14.1", "dllSha256": "f" * 64,
                 }
             packets = [
                 {"case": "tcp4", "packetPathValid": True},
@@ -93,7 +151,9 @@ class QualificationTest(unittest.TestCase):
             driver_lock = {
                 "schemaVersion": 1,
                 "version": "1.3.0.0", "upstreamCommit": "upstream",
-                "architectures": {"arm64": {"files": {"driver.sys": "hash"}}},
+                "architectures": {"arm64": {"files": {
+                    "mullvad-split-tunnel.sys": "hash"
+                }}},
             }
             if driver_lock_mutate:
                 driver_lock_mutate(driver_lock)
@@ -103,9 +163,11 @@ class QualificationTest(unittest.TestCase):
             test_manifest = {
                 "schemaVersion": 1,
                 "suites": {
-                    "native-unit": {"requiredTests": [NATIVE_TEST]},
-                    "live-driver": {"requiredTests": LIVE_TESTS},
-                    "packet-flow": {"requiredTests": FLOW_TESTS},
+                    "portable": {"requiredStages": ["check-fast"], "plannedCases": []},
+                    "native-unit": {"requiredTests": [NATIVE_TEST], "plannedCases": []},
+                    "live-driver": {"requiredTests": LIVE_TESTS, "plannedCases": []},
+                    "resource-gate": {"requiredTests": [RESOURCE_TEST], "plannedCases": []},
+                    "packet-flow": {"requiredTests": FLOW_TESTS, "plannedCases": []},
                 },
             }
             if manifest_mutate:
@@ -113,18 +175,47 @@ class QualificationTest(unittest.TestCase):
             (root / "test-manifest.json").write_text(
                 json.dumps(test_manifest), encoding="utf-8"
             )
+            (root / "wintun-lock.json").write_text(json.dumps({
+                "schemaVersion": 1,
+                "wintun": {"version": "0.14.1", "sha256": "0" * 64},
+            }), encoding="utf-8")
+            for name in ("go.mod.lock", "go.sum.lock", "flake.lock", "image-lock.json"):
+                (root / name).write_text(name, encoding="utf-8")
+            locks = {
+                name: hashlib.sha256((root / relative).read_bytes()).hexdigest()
+                for name, relative in matrix["dependencyLocks"].items()
+            }
+            for value in values.values():
+                value.setdefault("dependencyLocks", locks)
             for name, value in values.items():
                 (root / f"{name}.json").write_text(json.dumps(value), encoding="utf-8")
             (root / "packets.json").write_text(json.dumps(packets), encoding="utf-8")
+            (root / "worktree.tar").write_bytes(source_bytes)
+            resource_snapshot = {"adapters": [], "routes": []}
+            for name in ("resources-before.json", "resources-after.json"):
+                (root / name).write_text(json.dumps(resource_snapshot), encoding="utf-8")
+            (root / "process-resources.json").write_text(json.dumps({
+                "schemaVersion": 1, "warmupCycles": 10, "batchCount": 4,
+                "cyclesPerBatch": 25,
+                "samples": [
+                    {"cycles": cycles, "handles": 1, "goroutines": 1,
+                     "privateBytes": 1}
+                    for cycles in (10, 35, 60, 85, 110)
+                ],
+            }), encoding="utf-8")
             if preexisting_output is not None:
                 (root / "result.json").write_text(
                     json.dumps(preexisting_output), encoding="utf-8"
                 )
             result = subprocess.run([
                 sys.executable, str(SCRIPT), "--matrix", str(root / "matrix.json"),
-                "--entry", "fixture", "--native-unit", str(root / "native.json"),
-                "--live-driver", str(root / "live.json"), "--packet-flow", str(root / "flow.json"),
+                "--entry", "fixture", "--portable", str(root / "portable.json"),
+                "--native-unit", str(root / "native.json"),
+                "--live-driver", str(root / "live.json"),
+                "--resource-gate", str(root / "resource.json"),
+                "--packet-flow", str(root / "flow.json"),
                 "--packet-evidence", str(root / "packets.json"), "--output", str(root / "result.json"),
+                "--source-archive", str(root / "worktree.tar"),
             ], check=False, capture_output=True, text=True)
             output = json.loads((root / "result.json").read_text()) if (root / "result.json").exists() else None
             return result, output
@@ -165,7 +256,7 @@ class QualificationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(output["outcome"], "qualified")
         self.assertEqual(output["packetObservations"], 2)
-        self.assertEqual(len(output["evidenceSha256"]), 7)
+        self.assertEqual(len(output["evidenceSha256"]), 13)
         self.assertEqual(output["sourceArchiveSha256"], SOURCE_HASH)
 
     def test_rejects_missing_required_case(self):
@@ -210,6 +301,11 @@ class QualificationTest(unittest.TestCase):
         result, output = self.run_validator(mutate)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("source archive identities do not match", result.stderr)
+        self.assertIsNone(output)
+
+        result, output = self.run_validator(source_bytes=b"different archive")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("retained source archive does not match", result.stderr)
         self.assertIsNone(output)
 
     def test_accepts_expected_installed_driver_signers(self):
@@ -264,6 +360,16 @@ class QualificationTest(unittest.TestCase):
                 ),
                 "staged package signer does not match",
             ),
+            (
+                "unexpected staged driver signer",
+                lambda driver: driver.update(stagedDriverSigner="CN=Unexpected"),
+                "staged driver signer does not match",
+            ),
+            (
+                "missing catalog signer",
+                lambda driver: driver.pop("packageCatalogSigner"),
+                "staged catalog signer does not match",
+            ),
         ]
         for suite in ("live", "flow"):
             for name, change, message in cases:
@@ -300,6 +406,118 @@ class QualificationTest(unittest.TestCase):
                 result, output = self.run_validator(mutate)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIsNone(output)
+
+    def test_rejects_unfinished_or_failed_portable_gate(self):
+        def planned(manifest):
+            manifest["suites"]["portable"]["plannedCases"] = ["future check"]
+
+        result, output = self.run_validator(manifest_mutate=planned)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("planned cases prevent qualification", result.stderr)
+        self.assertIsNone(output)
+
+        def failed(_matrix, values, _packets):
+            values["portable"]["stageResults"]["check-fast"] = "skip"
+
+        result, output = self.run_validator(failed)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("required stage did not pass", result.stderr)
+        self.assertIsNone(output)
+
+    def test_rejects_stale_or_invalid_suite_times(self):
+        cases = [
+            (
+                lambda _m, values, _p: values["flow"].update(
+                    finishedAt="2026-10-20T10:00:00Z"
+                ),
+                "stale across suite runs",
+            ),
+            (
+                lambda _m, values, _p: values["native"].update(
+                    startedAt="2026-09-29T11:00:00Z"
+                ),
+                "finished before it started",
+            ),
+            (
+                lambda _m, values, _p: values["native"].update(
+                    startedAt="2026-09-29T10:00:00"
+                ),
+                "has no time zone",
+            ),
+        ]
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                result, output = self.run_validator(mutate)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertIsNone(output)
+
+    def test_rejects_invalid_platform_and_code_integrity_evidence(self):
+        def wrong_architecture(_matrix, values, _packets):
+            values["flow"]["os"] = dict(values["flow"]["os"])
+            values["flow"]["os"]["nativeArchitecture"] = "amd64"
+
+        def test_signing(_matrix, values, _packets):
+            values["flow"]["os"] = dict(values["flow"]["os"])
+            values["flow"]["os"]["codeIntegrity"] = {
+                "options": 3, "enabled": True,
+                "testSigning": True, "debugMode": False,
+            }
+
+        def inconsistent_flags(_matrix, values, _packets):
+            values["flow"]["os"] = dict(values["flow"]["os"])
+            values["flow"]["os"]["codeIntegrity"] = {
+                "options": 1, "enabled": False,
+                "testSigning": False, "debugMode": False,
+            }
+
+        for mutate, message in (
+            (wrong_architecture, "native architecture does not match"),
+            (test_signing, "forbidden code integrity options"),
+            (inconsistent_flags, "flags do not match"),
+        ):
+            with self.subTest(message=message):
+                result, output = self.run_validator(mutate)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertIsNone(output)
+
+    def test_rejects_binary_identity_failures_and_duplicate_packets(self):
+        cases = [
+            (
+                lambda _m, values, _p: values["live"]["driver"].update(
+                    installedFileSha256="wrong"
+                ),
+                "installed driver hash does not match",
+            ),
+            (
+                lambda _m, values, _p: values["flow"]["wintun"].update(
+                    dllSha256="e" * 64
+                ),
+                "Wintun binary identities do not match",
+            ),
+            (
+                lambda _m, _values, packets: packets.append(dict(packets[0])),
+                "duplicates a case",
+            ),
+        ]
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                result, output = self.run_validator(mutate)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertIsNone(output)
+
+    def test_rejects_diagnostic_resource_gate(self):
+        def mutate(_matrix, values, _packets):
+            values["resource"]["resourceGate"].update(
+                soakDuration="2m", diagnosticOverride=True
+            )
+
+        result, output = self.run_validator(mutate)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("diagnostic soak override is not qualifying", result.stderr)
+        self.assertIsNone(output)
 
 
 if __name__ == "__main__":

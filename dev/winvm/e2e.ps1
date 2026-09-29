@@ -29,7 +29,7 @@ if ($Resource) { . (Join-Path $SourceDir 'dev\winvm\resource-state.ps1') }
 $SourceArchiveSHA256 = Resolve-SourceArchiveSHA256 $SourceDir $SourceArchiveSHA256
 $manifest = Get-Content $ImageManifest -Raw | ConvertFrom-Json
 if ($manifest.driverVersion -ne '1.3.0.0' -or $manifest.upstreamCommit -ne '0a0eb97f67d1dbcb3d08bda66d3b24f465d95475') { throw 'Driver identity does not match the split-driver ABI' }
-$nativeArchitecture = switch ($env:PROCESSOR_ARCHITECTURE) { 'AMD64' { 'amd64' } 'ARM64' { 'arm64' } default { throw "Unsupported native architecture: $env:PROCESSOR_ARCHITECTURE" } }
+$nativeArchitecture = Get-NativeArchitecture
 if ($manifest.architecture.ToString().ToLowerInvariant() -ne $nativeArchitecture) { throw 'Driver package and native architecture do not match' }
 $goVersion = (& $GoExecutable version | Out-String).Trim()
 if ($goVersion -notmatch " windows/$nativeArchitecture$") { throw "Go process does not target native $nativeArchitecture" }
@@ -143,7 +143,11 @@ try {
         $timeout = '60m'
         $runPattern = '^TestM6'
         $env:SYSNET_RESOURCE_ARTIFACT = Join-Path $ArtifactDir 'process-resources.json'
-        if ($SoakDuration) { $env:SYSNET_WINDOWS_SOAK_DURATION = $SoakDuration }
+        if ($SoakDuration) {
+            $env:SYSNET_WINDOWS_SOAK_DURATION = $SoakDuration
+        } else {
+            Remove-Item Env:SYSNET_WINDOWS_SOAK_DURATION -ErrorAction SilentlyContinue
+        }
     }
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -210,26 +214,39 @@ try {
         Compare-NativeResourceSnapshot $resourceBefore $resourceAfter
     }
 }
-$windows = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-$productType = if ($windows.InstallationType -like 'Server*') { 3 } else { 1 }
 $suite = if ($Flow) { 'packet-flow' } elseif ($Resource) { 'resource-gate' } else { 'live-driver' }
+$resourceGate = $null
+if ($Resource) {
+    $effectiveSoakDuration = if ($SoakDuration) { $SoakDuration } else { '30m' }
+    $resourceGate = [ordered]@{
+        warmupCycles=10; batchCount=4; cyclesPerBatch=25
+        cancellationCycles=100
+        soakDuration=$effectiveSoakDuration
+        diagnosticOverride=[bool]$SoakDuration
+    }
+}
 [ordered]@{
     schemaVersion=1; suite=$suite; outcome='passed'; startedAt=$startedAt
     finishedAt=(Get-Date).ToUniversalTime().ToString('o')
     sysnetWindowsRevision=$SysnetWindowsRevision; sysnetWindowsTreeState=$SysnetWindowsTreeState
     sourceArchiveSha256=$SourceArchiveSHA256.ToLowerInvariant()
     architecture=$nativeArchitecture
-    os=[ordered]@{
-        caption=$windows.ProductName; version=[Environment]::OSVersion.Version.ToString()
-        build=$windows.CurrentBuildNumber; productType=$productType
-    }
+    os=(Get-WindowsPlatformEvidence)
     goVersion=$goVersion
     dependencyLocks=(Get-DependencyLockEvidence $SourceDir)
     driver=[ordered]@{
         version=$manifest.driverVersion; upstreamCommit=$manifest.upstreamCommit
-        files=$manifest.driverFiles; packageSigner=$manifest.driverSigner
+        files=$after.packageFiles; packageSigner=$after.packageSigner
+        stagedDriverSigner=$after.stagedDriverSigner
+        packageCatalogSigner=$after.packageCatalogSigner
         installedSigner=$after.signer; installedSignature=$after.signature
+        installedFileSha256=$after.installedFileSha256
         finalState=$after.state
     }
+    wintun=[ordered]@{
+        version=(Get-Content (Join-Path $SourceDir 'dev\winvm\wintun-lock.json') -Raw | ConvertFrom-Json).wintun.version
+        dllSha256=(Get-FileSHA256 $wintunDLL)
+    }
+    resourceGate=$resourceGate
     requiredTests=$required; testResults=$testResults
 } | ConvertTo-Json -Depth 6 | Set-Content $evidencePath
