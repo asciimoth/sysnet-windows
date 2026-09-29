@@ -2,10 +2,31 @@
 
 Windows network integration for `github.com/asciimoth/gonnect`.
 
-The root package contains the frozen gonnect contract scaffold. Native Windows
-behavior is not present yet. The repository also contains the locked development
-environment and Windows test harness for the work in
+The root package implements host-aware allocation, regular Wintun ownership,
+underlay selection, and the outbound network bypass. Later milestones will add
+the default TUN, managed DNS, LocalNet, matchers, and application exclusions.
+The repository also contains the locked development environment and Windows test
+harness for the work in
 [`docs/sysnet-windows-implementation-testing-plan.md`](docs/sysnet-windows-implementation-testing-plan.md).
+
+## Outbound network
+
+`System.OutNet` binds each TCP or UDP socket to the selected IPv4 or IPv6
+underlay before bind or connect. It supports the generic and typed dial,
+listener, and packet methods in `gonnect.Network`. Returned sockets, listeners,
+and accepted TCP connections belong to the System and close during
+`System.Close`. New operations fail after close starts. `IsNative` is false so a
+caller cannot bypass binding, DNS routing, or resource tracking.
+
+Use an explicit `tcp4`, `tcp6`, `udp4`, or `udp6` network for a wildcard local
+address. OutNet rejects ambiguous generic wildcards, IPv4-mapped IPv6 addresses,
+raw sockets, and multicast. An explicit local address must equal the selected
+underlay source. Loss of the selected underlay makes new operations fail; there
+is no unbound retry.
+
+OutNet resolves names through `System.OutDNS`. At this milestone, OutDNS uses
+the host DNS server list that exists before managed DNS takeover. The managed
+DNS milestone will replace this discovery path with saved underlay DNS state.
 
 ## Development
 

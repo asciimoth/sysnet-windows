@@ -60,6 +60,7 @@ type implementationSupport struct {
 	matchers                bool
 	exclusionRuleValidation bool
 	matcherRuleValidation   bool
+	outNet                  bool
 }
 
 func currentImplementationSupport() implementationSupport {
@@ -74,6 +75,7 @@ func currentImplementationSupport() implementationSupport {
 		regularTunNamed:         true,
 		exclusionRuleValidation: true,
 		matcherRuleValidation:   true,
+		outNet:                  true,
 	}
 }
 
@@ -82,6 +84,7 @@ type capabilityProbeFacts struct {
 	tunFactory sysnet.Capability
 	netIO      sysnet.Capability
 	split      sysnet.Capability
+	underlay   sysnet.Capability
 }
 
 func initialProbeFacts() capabilityProbeFacts {
@@ -92,6 +95,7 @@ func initialProbeFacts() capabilityProbeFacts {
 	return capabilityProbeFacts{
 		allocation: unknown.Clone(), tunFactory: unknown.Clone(),
 		netIO: unknown.Clone(), split: unknown.Clone(),
+		underlay: unknown.Clone(),
 	}
 }
 
@@ -108,6 +112,7 @@ func failedProbeFacts(err error) capabilityProbeFacts {
 	return capabilityProbeFacts{
 		allocation: unknown.Clone(), tunFactory: unknown.Clone(),
 		netIO: unknown.Clone(), split: unknown.Clone(),
+		underlay: unknown.Clone(),
 	}
 }
 
@@ -222,17 +227,19 @@ func buildCapabilityReport(
 
 	report.Rules = ruleCapabilities(config, support, state, families)
 	report.Ownership = ownerCapabilities(config, support, state)
-	report.Operations = append(report.Operations, unsupportedOperationCatalog(families)...)
+	report.Operations = append(report.Operations, networkOperationCatalog(config, support, facts, state, families)...)
 	return report
 }
 
-func unsupportedOperationCatalog(families []sysnet.AddressFamily) []sysnet.OperationCapability {
+func networkOperationCatalog(config normalizedSystemConfig, support implementationSupport, facts capabilityProbeFacts, state lifecycleState, families []sysnet.AddressFamily) []sysnet.OperationCapability {
 	notImplemented := unsupported(sysnet.ReasonNotImplemented, "implementation gate has not passed")
 	operations := []sysnet.OperationCapability{
 		operationCapability(sysnet.TargetDefaultTun, sysnet.OpSetMTU, sysnet.FamilyNone, notImplemented),
 		operationCapability(sysnet.TargetDefaultTun, sysnet.OpRename, sysnet.FamilyNone, notImplemented),
-		operationCapability(sysnet.TargetOutNet, sysnet.OpResolve, sysnet.FamilyNone, notImplemented),
-		operationCapability(sysnet.TargetOutNet, sysnet.OpInterfaces, sysnet.FamilyNone, notImplemented),
+		operationCapability(sysnet.TargetOutNet, sysnet.OpResolve, sysnet.FamilyNone,
+			lifecycleCapability(dependentCapability(implementedCapability(support.outNet), facts.underlay), state)),
+		operationCapability(sysnet.TargetOutNet, sysnet.OpInterfaces, sysnet.FamilyNone,
+			lifecycleCapability(dependentCapability(implementedCapability(support.outNet), facts.underlay), state)),
 		operationCapability(sysnet.TargetLocalNet, sysnet.OpResolve, sysnet.FamilyNone, notImplemented),
 		operationCapability(sysnet.TargetLocalNet, sysnet.OpInterfaces, sysnet.FamilyNone, notImplemented),
 	}
@@ -253,7 +260,14 @@ func unsupportedOperationCatalog(families []sysnet.AddressFamily) []sysnet.Opera
 			sysnet.OpMulticastUDP,
 		} {
 			for _, family := range families {
-				operations = append(operations, operationCapability(target, operation, family, notImplemented))
+				capability := notImplemented
+				if target == sysnet.TargetOutNet && operation != sysnet.OpMulticastUDP &&
+					family != sysnet.FamilyDual {
+					capability = lifecycleCapability(
+						dependentCapability(familyCapability(implementedCapability(support.outNet), config, family), facts.underlay), state,
+					)
+				}
+				operations = append(operations, operationCapability(target, operation, family, capability))
 			}
 		}
 	}

@@ -41,6 +41,11 @@ func (d systemDependencies) constrainCapabilityFacts(facts capabilityProbeFacts)
 	} else if !capabilityFactSet(facts.tunFactory) {
 		facts.tunFactory = sysnet.Capability{State: sysnet.CapabilityAvailable}
 	}
+	if d.underlay == nil {
+		facts.underlay = missingDependencyCapability("underlay source is not configured")
+	} else if !capabilityFactSet(facts.underlay) {
+		facts.underlay = sysnet.Capability{State: sysnet.CapabilityAvailable}
+	}
 	return facts
 }
 

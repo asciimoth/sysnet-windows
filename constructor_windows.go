@@ -67,6 +67,7 @@ func (p nativeCapabilityProbe) Probe(ctx context.Context) capabilityProbeFacts {
 		allocation: netIOCapability.Clone(),
 		tunFactory: tunFactoryCapability,
 		netIO:      netIOCapability,
+		underlay:   netIOCapability.Clone(),
 		split: sysnet.Capability{
 			State:   sysnet.CapabilityUnknown,
 			Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeNotRun},

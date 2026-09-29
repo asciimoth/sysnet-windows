@@ -2,9 +2,14 @@ package windows
 
 import (
 	"context"
+	"errors"
+	"net"
 	"strings"
+	"time"
 
+	"github.com/asciimoth/gonnect/dns"
 	internalallocator "github.com/asciimoth/sysnet-windows/internal/allocator"
+	internalnetwork "github.com/asciimoth/sysnet-windows/internal/network"
 	"github.com/asciimoth/sysnet-windows/internal/reconcile"
 	"github.com/asciimoth/sysnet-windows/internal/underlay"
 )
@@ -53,9 +58,55 @@ func newSystem(config SystemConfig, dependencies systemDependencies) (*System, e
 			return nil, monitorErr
 		}
 		system.underlayMonitor = monitor
+		if err := system.buildOutboundNetwork(); err != nil {
+			_ = monitor.Close()
+			return nil, err
+		}
 	}
 	system.rebuildCapabilitiesLocked()
 	return system, nil
+}
+
+// buildOutboundNetwork connects the selected-underlay monitor to the mandatory
+// socket binder. The temporary resolver provider uses the host's current DNS
+// server list, but its UDP and TCP transports use the bound network. Step 19
+// replaces server discovery with ownership-aware original-DNS snapshots before
+// managed DNS takeover is enabled.
+func (s *System) buildOutboundNetwork() error {
+	binder, err := internalnetwork.NewBinder(s.underlayMonitor)
+	if err != nil {
+		return err
+	}
+	bound, err := internalnetwork.NewBoundNetwork(binder, s.underlayMonitor, internalnetwork.Families{
+		IPv4: s.config.ipv4,
+		IPv6: s.config.ipv6,
+	})
+	if err != nil {
+		return err
+	}
+	resolver := &net.Resolver{
+		PreferGo:     true,
+		StrictErrors: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return bound.Dial(ctx, network, address)
+		},
+	}
+	provider := dns.NewResolverProvider(resolver, time.Minute, nil)
+	releaseProvider, err := s.trackResource(provider)
+	if err != nil {
+		return errors.Join(err, provider.Close())
+	}
+	outbound, err := internalnetwork.NewOutbound(bound, provider, s.acceptingWork, s.trackResource)
+	if err != nil {
+		closeErr := provider.Close()
+		if closeErr == nil {
+			releaseProvider()
+		}
+		return errors.Join(err, closeErr)
+	}
+	s.outDNS = provider
+	s.outNet = outbound
+	return nil
 }
 
 func (s *System) ownsUnderlayInterface(iface underlay.Interface) bool {

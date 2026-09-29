@@ -720,7 +720,7 @@ defer rollback to a later milestone.
     - Complete this step when focused native TCP and UDP tests prove the source
       interface and all permission, family and stale-index failures are visible.
 
-3. **Step 13 - Cover every OutNet socket entry point.**
+3. **Step 13 - Cover every OutNet socket entry point. (Completed)**
 
     - Implement generic and typed TCP/UDP dial, packet dial, listen and packet
       listen methods, including configured UDP/listener variants.

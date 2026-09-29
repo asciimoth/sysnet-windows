@@ -32,6 +32,8 @@ type System struct {
 	allocator       *internalallocator.Allocator
 	publicAllocator *systemAllocator
 	underlayMonitor *underlay.Monitor
+	outDNS          dns.Interface
+	outNet          gonnect.Network
 	underlayOwnedMu sync.RWMutex
 	underlayOwned   map[*regularTun]underlay.Interface
 	regularTunsMu   sync.Mutex
@@ -279,9 +281,24 @@ func (s *System) AllocSubnet() subnet.SubnetAllocator {
 	return s.publicAllocator
 }
 
-func (*System) OutDNS() dns.Interface { return nil }
+// OutDNS returns the DNS transport used by OutNet name lookups. The provider
+// uses bound sockets and is owned by this System.
+func (s *System) OutDNS() dns.Interface {
+	if s == nil {
+		return nil
+	}
+	return s.outDNS
+}
 
-func (*System) OutNet() gonnect.Network { return &gonnect.RejectNetwork{} }
+// OutNet returns a stable policy wrapper. It reports IsNative=false because a
+// native shortcut could omit underlay binding, DNS routing, or resource
+// tracking.
+func (s *System) OutNet() gonnect.Network {
+	if s == nil || s.outNet == nil {
+		return &gonnect.RejectNetwork{}
+	}
+	return s.outNet
+}
 
 func (*System) LocalNet() gonnect.Network { return &gonnect.RejectNetwork{} }
 

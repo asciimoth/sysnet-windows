@@ -7,6 +7,7 @@
         "github.com/asciimoth/sysnet-windows::TestNativeWintunCapabilityReflectsDLLAvailability",
         "github.com/asciimoth/sysnet-windows::TestNativeHostAwareAllocation",
         "github.com/asciimoth/sysnet-windows::TestNativeUnderlayMonitor",
+        "github.com/asciimoth/sysnet-windows/cmd/sysnetflow::TestFlowCasesHaveUniqueCaptureMarkersAndRequiredPaths",
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT25HostAwareAllocation",
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT26ConcurrentAllocation",
         "github.com/asciimoth/sysnet-windows/internal/allocator::TestT27EnumerationFailureAfterSelection",
@@ -26,6 +27,14 @@
         "github.com/asciimoth/sysnet-windows/internal/network::TestSocketBinderUsesReplacementSnapshotAfterCallerControl",
         "github.com/asciimoth/sysnet-windows/internal/network::TestSocketBinderExposesAllFailuresWithContext",
         "github.com/asciimoth/sysnet-windows/internal/network::TestNewSocketBinderValidation",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestN01N08OutboundCoversAndTracksEverySocketEntryPoint",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestN05N08OutboundTracksAcceptedConnections",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestN05N08NativeUnconnectedUDPRetainsUnderlayPolicy",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestN09N12BoundNetworkRejectsAmbiguousMappedAndRawRequests",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestBoundNetworkRejectsDisabledFamilyBeforeSocketCreation",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestN13N16EveryResolverMethodUsesOutDNS",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestOutResolverBuildsCanonicalReverseNames",
+        "github.com/asciimoth/sysnet-windows/internal/network::TestN29N32OutboundRejectsBypassAfterCloseAndUnsupportedOperations",
         "github.com/asciimoth/sysnet-windows/internal/network::TestNativeSocketBinderTCPAndUDP",
         "github.com/asciimoth/sysnet-windows/internal/network::TestNativeSocketBinderFamilyFailure",
         "github.com/asciimoth/sysnet-windows/internal/network::TestNativeSocketBinderUnderlayLoss",
@@ -59,9 +68,10 @@
       ]
     },
     "packet-flow": {
-      "requiredTests": [],
+      "requiredTests": [
+        "github.com/asciimoth/sysnet-windows/integration::TestPacketFlowOutNetUnderlay"
+      ],
       "plannedCases": [
-        "M2 public API underlay bypass",
         "M3 managed DNS packet paths",
         "M5 executable exclusion packet paths"
       ]

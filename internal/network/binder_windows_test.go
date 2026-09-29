@@ -98,6 +98,73 @@ func TestNativeSocketBinderUnderlayLoss(t *testing.T) {
 	}
 }
 
+// TestN05N08NativeUnconnectedUDPRetainsUnderlayPolicy verifies the operation
+// which cannot fall back to an unbound socket: one unconnected UDP socket sends
+// to multiple remote endpoints while retaining the selected interface source.
+func TestN05N08NativeUnconnectedUDPRetainsUnderlayPolicy(t *testing.T) {
+	snapshot := nativeUnderlaySnapshot(t)
+	tests := []struct {
+		name    string
+		network string
+		path    *underlay.Path
+	}{
+		{name: "IPv4", network: "udp4", path: snapshot.IPv4},
+		{name: "IPv6", network: "udp6", path: snapshot.IPv6},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.path == nil {
+				t.Skip("host has no selected underlay for this family")
+			}
+			paths := staticPaths{snapshot: snapshot}
+			binder, err := NewBinder(paths)
+			if err != nil {
+				t.Fatal(err)
+			}
+			network, err := NewBoundNetwork(binder, paths, Families{IPv4: true, IPv6: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			local := net.JoinHostPort(test.path.Source.String(), "0")
+			first := listenNativeUDP(t, test.network, test.path.Source)
+			defer first.Close()
+			second := listenNativeUDP(t, test.network, test.path.Source)
+			defer second.Close()
+			client, err := network.ListenUDP(context.Background(), test.network, local)
+			if err != nil {
+				t.Fatalf("create unconnected UDP socket: %v", err)
+			}
+			defer client.Close()
+			for index, destination := range []*net.UDPConn{first, second} {
+				address := destination.LocalAddr().(*net.UDPAddr).AddrPort()
+				if _, err := client.WriteToUDPAddrPort([]byte{byte(index)}, address); err != nil {
+					t.Fatalf("write to endpoint %d: %v", index, err)
+				}
+				if err := destination.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				buffer := make([]byte, 1)
+				_, source, err := destination.ReadFromUDPAddrPort(buffer)
+				if err != nil {
+					t.Fatalf("read endpoint %d: %v", index, err)
+				}
+				if source.Addr().WithZone("").Unmap() != test.path.Source.WithZone("").Unmap() {
+					t.Fatalf("endpoint %d source = %s, want %s", index, source.Addr(), test.path.Source)
+				}
+			}
+		})
+	}
+}
+
+func listenNativeUDP(t *testing.T, network string, source netip.Addr) *net.UDPConn {
+	t.Helper()
+	listener, err := net.ListenUDP(network, &net.UDPAddr{IP: source.AsSlice()})
+	if err != nil {
+		t.Fatalf("listen on selected source: %v", err)
+	}
+	return listener
+}
+
 type staticPaths struct{ snapshot underlay.Snapshot }
 
 func (s staticPaths) Snapshot() underlay.Snapshot { return s.snapshot }

@@ -178,6 +178,36 @@ func TestCurrentImplementationAdvertisesOnlyCompletedGates(t *testing.T) {
 	}
 }
 
+func TestCurrentImplementationAdvertisesOutNetByFamily(t *testing.T) {
+	t.Parallel()
+	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
+	report := buildCapabilityReport(
+		defaultNormalizedSystemConfig(),
+		currentImplementationSupport(),
+		capabilityProbeFacts{underlay: available},
+		lifecycleReady,
+	)
+	for _, family := range []sysnet.AddressFamily{sysnet.FamilyIPv4, sysnet.FamilyIPv6} {
+		for _, operation := range []sysnet.Operation{
+			sysnet.OpDialTCP, sysnet.OpDialUDP, sysnet.OpPacketDialUDP,
+			sysnet.OpListenTCP, sysnet.OpListenUDP, sysnet.OpListenPacketUDP,
+		} {
+			capability := report.Operation(operationKey(sysnet.TargetOutNet, operation, family))
+			if capability.State != sysnet.CapabilityAvailable {
+				t.Fatalf("OutNet %s IPv%s = %+v, want available", operation, family, capability)
+			}
+		}
+	}
+	for _, key := range []sysnet.OperationKey{
+		operationKey(sysnet.TargetOutNet, sysnet.OpMulticastUDP, sysnet.FamilyIPv4),
+		operationKey(sysnet.TargetOutNet, sysnet.OpDialTCP, sysnet.FamilyDual),
+	} {
+		if capability := report.Operation(key); capability.State != sysnet.CapabilityUnsupported {
+			t.Fatalf("OutNet unsupported operation %+v = %+v", key, capability)
+		}
+	}
+}
+
 func TestCurrentImplementationAdvertisesWorkingAllocators(t *testing.T) {
 	t.Parallel()
 	available := sysnet.Capability{State: sysnet.CapabilityAvailable}
