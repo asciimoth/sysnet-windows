@@ -52,17 +52,23 @@ does not load Wintun or the split driver. The live gate stages the locked Wintun
 DLL, starts the verified split driver, runs only the `windows && winintegration`
 package serially as `SYSTEM`, checks cleanup, and stops the service. The flow
 gate adds a second disposable endpoint guest and two isolated links. It
-validates packet markers in a capture from each link. The manifest lists only
-existing package tests as required tests. Future live and flow coverage is
-listed as planned cases, not as optional passes. A required test fails the gate
-if it is absent or skipped. The live and flow gates cannot pass release
-qualification until their planned milestone tests become required and pass.
-`just test-total` runs the local Go and fuzz tests, then builds or reuses the
-base image and runs the completed baseline and live-driver gates. `just check`
-adds all formatting, linting, vetting, builds, and host-harness checks around
-`test-total`. `just check-release` also runs the planned packet-flow gate. That
-gate fails during host preflight until it has required tests and its helper is
-present. Linux-only VM recipes skip on Windows.
+validates packet markers in a capture from each link. The M2 flow helper creates
+a System-owned Wintun with exact disposable IPv4 and IPv6 defaults and pumps its
+packets over the tunnel link. It exercises every supported OutNet socket
+operation, disables the selected underlay, and checks that new TCP and UDP
+operations do not fall back. It restores the link, closes the System, verifies
+tracked sockets are closed, and verifies owned route cleanup. Both disposable
+guests disable their Windows Firewall profiles so the endpoint can connect to
+ephemeral TCP listeners on the isolated links. The manifest lists only existing
+package tests as required tests. Future live and flow coverage is listed as
+planned cases, not as optional passes. A required test fails the gate if it is
+absent or skipped. The live and flow gates cannot pass release qualification
+until their planned milestone tests become required and pass. `just test-total`
+runs the local Go and fuzz tests, then builds or reuses the base image and runs
+the completed baseline and live-driver gates. `just check` adds all formatting,
+linting, vetting, builds, and host-harness checks around `test-total`.
+`just check-release` also runs the packet-flow gate. Linux-only VM recipes skip
+on Windows.
 
 The harness serializes VM processes on one host. Image creation has an exclusive
 content-key lock. Test runs hold a shared image lock and use a unique overlay,

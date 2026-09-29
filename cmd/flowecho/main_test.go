@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net"
 	"strings"
@@ -70,6 +72,49 @@ func TestTCPAndUDPEcho(t *testing.T) {
 			t.Fatalf("reply = %q; want %q", reply, payload)
 		}
 	})
+}
+
+func TestCallbackControlDecodesTokenAndConnects(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	server, client := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		handleCallbackControl(server)
+		close(done)
+	}()
+	token := []byte("callback-token")
+	request := callbackRequest{
+		Network: "tcp4", Address: listener.Addr().String(),
+		Token: base64.StdEncoding.EncodeToString(token),
+	}
+	if err := json.NewEncoder(client).Encode(request); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	connection, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = connection.Close() }()
+	if err := connection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(token))
+	if _, err := io.ReadFull(connection, got); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, token) {
+		t.Fatalf("callback = %q, want %q", got, token)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("callback control did not finish")
+	}
 }
 
 func TestEchoRejectsInvalidListenAddress(t *testing.T) {

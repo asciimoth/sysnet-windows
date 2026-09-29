@@ -72,8 +72,10 @@ just winvm-image
 just test-windows-vm
 ```
 
-The live-driver gate is part of `just check`. The packet-flow entry point is
-wired into the future release gate and intentionally fails until its required
-`winflow` tests and the `cmd/sysnetflow` helper are implemented. A missing
-required test is not reported as a successful qualification. Update
-`dev/winvm/test-manifest.json` as milestone tests become required.
+The live-driver gate is part of `just check`. `just test-windows-flow` runs the
+M2 packet-flow gate. It creates a System-owned Wintun with disposable IPv4 and
+IPv6 default routes, pumps its packets over the isolated tunnel link, and proves
+that each OutNet socket operation uses the underlay link. It also removes the
+selected underlay during live traffic and rejects a run if new traffic falls
+back to the tunnel. A missing required test is not reported as a successful
+qualification.

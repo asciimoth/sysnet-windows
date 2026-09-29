@@ -746,7 +746,7 @@ defer rollback to a later milestone.
     - Complete this step when N25-N28 pass from a second local process and an
       external probe confirms that the listeners are not exposed.
 
-5. **Step 15 - Prove bypass before full routing is accepted.**
+5. **Step 15 - Prove bypass before full routing is accepted. (Completed)**
 
     - Install a disposable default route through the test TUN while the
       controlled peer remains reachable on the underlay.

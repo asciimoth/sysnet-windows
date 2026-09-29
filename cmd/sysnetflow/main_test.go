@@ -3,8 +3,10 @@
 package main
 
 import (
+	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFlowCasesHaveUniqueCaptureMarkersAndRequiredPaths(t *testing.T) {
@@ -41,4 +43,55 @@ func TestFlowCasesHaveUniqueCaptureMarkersAndRequiredPaths(t *testing.T) {
 			t.Fatalf("required packet case %s is absent", name)
 		}
 	}
+	for _, family := range []string{"4", "6"} {
+		for _, operation := range []string{
+			"Dial tcp", "DialTCP tcp", "Dial udp", "DialUDP udp", "PacketDial udp",
+			"Listen tcp", "ListenTCP tcp", "ListenPacket udp", "ListenUDP udp",
+			"ListenPacketConfig udp", "ListenUDPConfig udp",
+		} {
+			want := operation + family
+			found := false
+			for _, current := range flowCases() {
+				found = found || current.observation.Operation == want
+			}
+			if !found {
+				t.Errorf("supported operation %q is absent", want)
+			}
+		}
+	}
 }
+
+func TestUnderlayLossCasesRequireNoTunnelFallback(t *testing.T) {
+	for _, current := range activeAfterLossCases(map[string]net.Conn{
+		"tcp4": &testConnection{}, "tcp6": &testConnection{},
+		"udp4": &testConnection{}, "udp6": &testConnection{},
+	}) {
+		if current.observation.ExpectedPath != "underlay-or-none-stopped" {
+			t.Fatalf("active-loss path = %q", current.observation.ExpectedPath)
+		}
+	}
+	for _, current := range unavailableCases() {
+		if current.observation.ExpectedPath != "none" || current.observation.Phase != "underlay-lost" {
+			t.Fatalf("unavailable case = %+v", current.observation)
+		}
+	}
+}
+
+func TestPowerShellCommandBindsNumericInterfaceIndex(t *testing.T) {
+	command, err := powerShellCommand("param([int]$Index) $Index", "41")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(command, "& {\nparam([int]$Index)") || !strings.HasSuffix(command, "} 41") {
+		t.Fatalf("PowerShell command = %q", command)
+	}
+	if _, err := powerShellCommand("param($Index)", "not-an-index"); err == nil {
+		t.Fatal("nonnumeric interface index succeeded")
+	}
+}
+
+type testConnection struct{ net.Conn }
+
+func (*testConnection) SetWriteDeadline(time.Time) error { return nil }
+
+func (*testConnection) Write(payload []byte) (int, error) { return len(payload), nil }
