@@ -830,7 +830,7 @@ defer rollback to a later milestone.
 
 #### M4: implement best-effort ownership and matchers
 
-1. **Step 21 - Separate packet parsing from owner lookup.**
+1. **Step 21 - Separate packet parsing from owner lookup. (Completed)**
 
     - Parse outgoing IPv4 and IPv6 TCP/UDP tuples without native calls. Bound all
       header and extension-header reads and return typed unsupported results for
@@ -842,7 +842,7 @@ defer rollback to a later milestone.
     - Complete this step when R17-R20 and R25-R28 parser cases pass on Linux and
       Windows.
 
-2. **Step 22 - Implement Windows owner and executable enrichment.**
+2. **Step 22 - Implement Windows owner and executable enrichment. (Completed)**
 
     - Wrap `sockowner.GetSockOwner`. Retry owner-table size races with a small
       fixed limit.

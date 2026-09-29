@@ -9,6 +9,7 @@ import (
 	"github.com/asciimoth/gonnect/sysnet"
 	internaldns "github.com/asciimoth/sysnet-windows/internal/dns"
 	"github.com/asciimoth/sysnet-windows/internal/netio"
+	"github.com/asciimoth/sysnet-windows/internal/owner"
 	internaltun "github.com/asciimoth/sysnet-windows/internal/tun"
 	"github.com/asciimoth/sysnet-windows/internal/underlay"
 	"golang.org/x/sys/windows"
@@ -30,6 +31,10 @@ func nativeDependencies() systemDependencies {
 		panic(err)
 	}
 	reader := netio.NativeReader{}
+	ownerLookup, err := owner.NewNative(owner.Config{})
+	if err != nil {
+		panic(err)
+	}
 	return systemDependencies{
 		tunFactory:       internaltun.NativeFactory{},
 		netIO:            netIO,
@@ -37,6 +42,7 @@ func nativeDependencies() systemDependencies {
 		underlay:         underlay.NativeSource{},
 		dnsConfigurator:  internaldns.NativeConfigurator{},
 		dnsProxyFactory:  internaldns.NativeProxyFactory{},
+		ownerLookup:      ownerLookup,
 		capabilityProbe:  nativeCapabilityProbe{reader: reader},
 	}
 }
