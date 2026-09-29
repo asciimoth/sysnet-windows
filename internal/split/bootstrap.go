@@ -470,10 +470,18 @@ func (p *Policy) StopEvents() {
 	if p == nil {
 		return
 	}
-	p.closeOnce.Do(func() {
-		p.cancel()
-		<-p.done
-	})
+	p.closeOnce.Do(p.cancel)
+	<-p.done
+}
+
+func (p *Policy) stopEvents(ctx context.Context) error {
+	p.closeOnce.Do(p.cancel)
+	select {
+	case <-p.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Close stops event intake, resets the driver with a fresh bounded context,
@@ -483,30 +491,30 @@ func (p *Policy) Close() error {
 	if p == nil {
 		return nil
 	}
-	p.StopEvents()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.closed {
+	if p.closed && p.session.Cleaned() {
 		return p.closeErr
 	}
 	p.closed = true
-	timeout := p.session.cleanupTimeout
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), timeout)
-	resetErr := p.session.controller.Reset(cleanupCtx)
-	var verifyErr error
-	if resetErr == nil {
-		var state State
-		state, verifyErr = p.session.controller.State(cleanupCtx)
-		if verifyErr == nil && state != StateStarted {
-			verifyErr = fmt.Errorf("state after reset is %s, want started", state)
-		}
-		if verifyErr == nil {
-			p.session.MarkResetConfirmed()
-		}
-	}
+	stopCtx, cancel := context.WithTimeout(context.Background(), p.readbackTimeout())
+	stopErr := p.stopEvents(stopCtx)
 	cancel()
-	p.closeErr = errors.Join(resetErr, verifyErr, p.session.Close())
+	if stopErr != nil {
+		p.closeErr = errors.Join(ErrRecoveryRequired, fmt.Errorf("stop split event reader: %w", stopErr))
+		return p.closeErr
+	}
+	// Session.Close creates its own context. It must not inherit cancellation
+	// from a policy update or from the event-reader stop attempt.
+	p.closeErr = p.session.Close()
 	return p.closeErr
+}
+
+// Cleaned is used by the owning resource journal for independent
+// verification after an inverse operation. It intentionally does not infer
+// cleanup from the error returned by Reset or Close.
+func (p *Policy) Cleaned() bool {
+	return p == nil || p.session == nil || p.session.Cleaned()
 }
 
 func cloneProcesses(input []Process) []Process { return append([]Process(nil), input...) }

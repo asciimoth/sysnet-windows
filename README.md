@@ -4,9 +4,9 @@ Windows network integration for `github.com/asciimoth/gonnect`.
 
 The root package implements host-aware allocation, regular and default Wintun
 ownership, underlay selection, the outbound network bypass, confined local
-networking, Windows DNS ownership, and the local managed-DNS proxy. Later
-milestones will add application exclusions. The repository also contains the
-locked development environment and Windows test harness for the work in
+networking, Windows DNS ownership, the local managed-DNS proxy, and executable
+tree exclusions. The repository also contains the locked development environment
+and Windows test harness for the work in
 [`docs/sysnet-windows-implementation-testing-plan.md`](docs/sysnet-windows-implementation-testing-plan.md).
 
 ## Ownership matchers
@@ -63,9 +63,9 @@ active default TUN. The System changes only the name-server field on its own
 adapter. It does not change DNS settings on other interfaces, the suffix search
 list, NRPT, encrypted-DNS policy, or application-owned DoH/DoT. Windows can use
 those paths, and a more-specific route can take priority over a default route.
-Executable exclusions are not implemented yet, so no excluded-application DNS
-behavior is claimed. A process which sends DNS itself can bypass the managed
-proxy.
+No per-application behavior is claimed for requests sent through the shared
+Windows DNS Client service. A process which sends DNS itself can use a separate
+path.
 
 The proxy must own UDP and TCP port 53 on its TUN address. A port conflict makes
 the build fail before default routes are published. OutDNS returns an observable
@@ -75,6 +75,25 @@ recovery are tested. The disposable Windows gate also exits a child process
 without Go cleanup, then opens Wintun again and requires its recovery scan to
 remove the abandoned adapter identity before the name can be reused with a new
 GUID. The route and DNS state is interface-scoped to that abandoned identity.
+
+## Executable exclusions and recovery
+
+A default TUN can apply non-strict `win-exe-tree` exclusions through the pinned
+split driver. The driver is global and exclusive. The System verifies the
+installed package and clean driver state before it creates caller-owned WFP
+objects. It does not reset state that belongs to an unknown owner.
+
+Close first stops the split event reader. It then resets the driver with a new,
+bounded context and reads the driver state before it removes the exact WFP
+objects in its journal. A failed reset, Zombie state, changed driver package, or
+unverified WFP deletion keeps that journal and changes the System state to
+recovery-required. Routes, DNS, sockets, and TUN state still use their own
+cleanup rules and are not kept only because split cleanup failed.
+
+Call `System.Close` again to request in-process recovery. Before a retry changes
+native state, it verifies the recorded WFP objects, driver package and service
+identity, and current driver state. Recovery is bounded and does not loop on a
+Zombie driver. Each call returns all observed cleanup errors.
 
 ## Local network
 

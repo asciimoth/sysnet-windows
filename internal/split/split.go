@@ -140,13 +140,19 @@ type Session struct {
 	mu             sync.Mutex
 	controller     Controller
 	wfp            wfp.Manager
+	verifier       Verifier
 	deployment     Deployment
 	resources      wfp.Resources
 	references     bool
-	closed         bool
+	cleaned        bool
 	closeErr       error
-	closeDone      chan struct{}
+	cleanup        *cleanupAttempt
 	cleanupTimeout time.Duration
+}
+
+type cleanupAttempt struct {
+	done chan struct{}
+	err  error
 }
 
 // Acquire verifies deployment provenance, opens the device, rejects all state
@@ -214,10 +220,11 @@ func Acquire(ctx context.Context, dependencies Dependencies) (*Session, error) {
 	if err := manager.VerifySplitResources(ctx, resources); err != nil {
 		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		cleanupErr := manager.DeleteSplitResources(cleanupCtx, resources)
+		absentErr := manager.VerifySplitResourcesAbsent(cleanupCtx, resources)
 		cancelCleanup()
 		var recoveryErr error
-		if cleanupErr != nil {
-			recoveryErr = &RecoveryError{Resources: cloneResources(resources), Err: cleanupErr}
+		if cleanupErr != nil || absentErr != nil {
+			recoveryErr = &RecoveryError{Resources: cloneResources(resources), Err: errors.Join(cleanupErr, absentErr)}
 		}
 		return nil, errors.Join(
 			&AcquisitionError{Phase: "verify committed WFP resources", Kind: ErrIncompatible, Err: err},
@@ -225,8 +232,8 @@ func Acquire(ctx context.Context, dependencies Dependencies) (*Session, error) {
 		)
 	}
 	return &Session{
-		controller: controller, wfp: manager, deployment: deployment,
-		resources: cloneResources(resources), closeDone: make(chan struct{}), cleanupTimeout: cleanupTimeout,
+		controller: controller, wfp: manager, verifier: dependencies.Verifier, deployment: deployment,
+		resources: cloneResources(resources), cleanupTimeout: cleanupTimeout,
 	}, nil
 }
 
@@ -283,46 +290,122 @@ func (s *Session) MarkResetConfirmed() {
 	s.mu.Unlock()
 }
 
-// Close releases a clean pre-initialization session. If initialization could
-// have reached the driver, it closes the handle but preserves the WFP journal
-// and reports recovery-required. Close is idempotent.
+// Cleaned reports whether readback proved that the driver released the WFP
+// references and that every journaled WFP object is absent.
+func (s *Session) Cleaned() bool {
+	if s == nil {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cleaned
+}
+
+// Close performs one bounded cleanup or recovery attempt. Concurrent callers
+// wait for the same attempt. If native readback cannot prove cleanup, a later
+// call retries from the retained controller, WFP session, and exact journal.
+// This retry behavior is necessary because Reset can fail after it commits.
 func (s *Session) Close() error {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
-	if s.closed {
-		done := s.closeDone
+	if s.cleaned {
+		err := s.closeErr
 		s.mu.Unlock()
-		if done != nil {
-			<-done
-		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		return s.closeErr
+		return err
 	}
-	s.closed = true
-	controller, manager := s.controller, s.wfp
-	resources, references := cloneResources(s.resources), s.references
+	if current := s.cleanup; current != nil {
+		done := current.done
+		s.mu.Unlock()
+		<-done
+		return current.err
+	}
+	attempt := &cleanupAttempt{done: make(chan struct{})}
+	s.cleanup = attempt
 	s.mu.Unlock()
 
-	controllerErr := controller.Close()
-	var result error
-	if references {
-		result = errors.Join(ErrRecoveryRequired, controllerErr, manager.Close())
-	} else {
-		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), s.cleanupTimeout)
-		deleteErr := manager.DeleteSplitResources(cleanupCtx, resources)
-		cancelCleanup()
-		result = errors.Join(controllerErr, deleteErr, manager.Close())
-	}
+	result, cleaned := s.cleanupOwnedState()
 	s.mu.Lock()
-	s.closeErr = result
-	if s.closeDone != nil {
-		close(s.closeDone)
+	attempt.err = result
+	s.cleanup = nil
+	if cleaned {
+		s.cleaned = true
+		s.closeErr = result
 	}
+	close(attempt.done)
 	s.mu.Unlock()
 	return result
+}
+
+func (s *Session) cleanupOwnedState() (error, bool) {
+	s.mu.Lock()
+	controller, manager, verifier := s.controller, s.wfp, s.verifier
+	resources, references := cloneResources(s.resources), s.references
+	deployment, timeout := s.deployment, s.cleanupTimeout
+	s.mu.Unlock()
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var result error
+	if references {
+		if verifier == nil {
+			return errors.Join(ErrRecoveryRequired, errors.New("split recovery verifier is not configured")), false
+		}
+		observedDeployment, err := verifier.Verify(ctx)
+		if err != nil {
+			return errors.Join(ErrRecoveryRequired, fmt.Errorf("verify split deployment for recovery: %w", err)), false
+		}
+		if observedDeployment != deployment {
+			return errors.Join(ErrRecoveryRequired, errors.New("split deployment identity changed after acquisition")), false
+		}
+		if err := manager.VerifySplitResources(ctx, resources); err != nil {
+			return errors.Join(ErrRecoveryRequired, fmt.Errorf("verify split WFP journal before reset: %w", err)), false
+		}
+		state, err := controller.State(ctx)
+		if err != nil {
+			return errors.Join(ErrRecoveryRequired, fmt.Errorf("read split driver state before reset: %w", err)), false
+		}
+		switch state {
+		case StateStarted:
+			// A prior Reset can commit before it reports cancellation. Started is
+			// the independent confirmation that WFP references are released.
+		case StateInitialized, StateReady, StateEngaged:
+			resetErr := controller.Reset(ctx)
+			state, err = controller.State(ctx)
+			result = errors.Join(result, resetErr)
+			if err != nil {
+				return errors.Join(result, ErrRecoveryRequired, fmt.Errorf("read split driver state after reset: %w", err)), false
+			}
+			if state != StateStarted {
+				return errors.Join(result, ErrRecoveryRequired, fmt.Errorf("state after reset is %s, want started", state)), false
+			}
+		case StateZombie:
+			return errors.Join(ErrRecoveryRequired, errors.New("split driver is zombie; reset was not attempted")), false
+		case StateNone:
+			return errors.Join(ErrRecoveryRequired, errors.New("split driver is not started")), false
+		default:
+			return errors.Join(ErrRecoveryRequired, fmt.Errorf("split driver state %s is not an owned recoverable state", state)), false
+		}
+		s.mu.Lock()
+		s.references = false
+		s.mu.Unlock()
+	}
+
+	deleteErr := manager.DeleteSplitResources(ctx, resources)
+	absentErr := manager.VerifySplitResourcesAbsent(ctx, resources)
+	result = errors.Join(result, deleteErr)
+	if absentErr != nil {
+		return errors.Join(result, ErrRecoveryRequired, fmt.Errorf("verify split WFP cleanup: %w", absentErr)), false
+	}
+	// The driver is confirmed reset and the exact WFP journal is absent. Handle
+	// close failures are still returned, but they do not make native policy
+	// ownership uncertain and cannot safely be retried on the same handles.
+	result = errors.Join(result, controller.Close(), manager.Close())
+	return result, true
 }
 
 func cloneResources(resources wfp.Resources) wfp.Resources {

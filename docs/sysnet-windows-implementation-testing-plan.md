@@ -913,7 +913,7 @@ defer rollback to a later milestone.
     - Complete this step when R29-R36 and the cancellation/readback cases pass
       with independent packet captures.
 
-4. **Step 27 - Implement reset, close and explicit recovery.**
+4. **Step 27 - Implement reset, close and explicit recovery. (Completed)**
 
     - Stop intake and join the event reader before reset. Use a fresh cleanup
       context that is not the cancelled operation context.

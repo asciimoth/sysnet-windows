@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -56,7 +57,7 @@ func TestBootstrapOrdersCompilationInitializeSnapshotAndPolicy(t *testing.T) {
 		"resolve:C:\\One.exe", "resolve:c:\\one.exe", "initialize", "snapshot", "register",
 		"get-addresses", "get-exclusions", "addresses", "get-addresses",
 		"exclusions", "get-exclusions", "get-addresses", "get-exclusions",
-		"read-event", "read-event",
+		"read-event", "read-event", "read-event-stop",
 	}
 	if got := log.snapshot(); !reflect.DeepEqual(got, wantOrder) {
 		t.Fatalf("operation order = %v, want %v", got, wantOrder)
@@ -330,9 +331,47 @@ func TestSplittingErrorEventsRequireReadbackWithoutDirectionInference(t *testing
 	policy.StopEvents()
 }
 
+func TestR37R40PolicyCloseJoinsEventReaderBeforeReset(t *testing.T) {
+	t.Parallel()
+	log := &eventLog{}
+	controller := newBootstrapController(log)
+	manager := &fakeWFP{resources: testResources, events: log}
+	session, err := Acquire(context.Background(), Dependencies{
+		Verifier: fakeVerifier{deployment: testDeployment, events: log},
+		Opener:   fakeOpener{controller: controller, events: log}, WFP: manager,
+		CleanupTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	policy, err := Bootstrap(context.Background(), session, Dependencies{
+		Resolver: fakeResolver{},
+		Snapshot: fakeSnapshotter{snapshot: ProcessSnapshot{Processes: []Process{{PID: 4}}}},
+	}, BootstrapConfig{
+		Generation: 1,
+		Addresses: Addresses{
+			TunnelIPv4: netip.MustParseAddr("10.0.0.1"), InternetIPv4: netip.MustParseAddr("192.0.2.1"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	if err := policy.Close(); err != nil {
+		t.Fatalf("Policy.Close() error = %v", err)
+	}
+	events := log.snapshot()
+	stopIndex := slices.Index(events, "read-event-stop")
+	resetIndex := slices.Index(events, "reset")
+	deleteIndex := slices.Index(events, "delete-wfp")
+	if stopIndex < 0 || resetIndex <= stopIndex || deleteIndex <= resetIndex {
+		t.Fatalf("cleanup order = %v, want event-reader stop before reset before WFP delete", events)
+	}
+}
+
 type bootstrapController struct {
 	log             *eventLog
 	events          chan Event
+	state           State
 	initializeCalls int
 	birthsBuffered  bool
 	processes       []Process
@@ -344,15 +383,22 @@ func newBootstrapController(log *eventLog) *bootstrapController {
 	return &bootstrapController{log: log, events: make(chan Event)}
 }
 
-func (c *bootstrapController) State(context.Context) (State, error) { return StateStarted, nil }
+func (c *bootstrapController) State(context.Context) (State, error) {
+	if c.state == StateNone {
+		return StateStarted, nil
+	}
+	return c.state, nil
+}
 func (c *bootstrapController) Initialize(context.Context, Sublayers) error {
 	c.log.add("initialize")
 	c.initializeCalls++
+	c.state = StateInitialized
 	return nil
 }
 func (c *bootstrapController) RegisterProcesses(_ context.Context, processes []Process) error {
 	c.log.add("register")
 	c.processes = cloneProcesses(processes)
+	c.state = StateReady
 	return nil
 }
 func (c *bootstrapController) SetAddresses(_ context.Context, addresses Addresses) error {
@@ -367,6 +413,7 @@ func (c *bootstrapController) Addresses(context.Context) (Addresses, error) {
 func (c *bootstrapController) SetExcludedDevicePaths(_ context.Context, paths []string) error {
 	c.log.add("exclusions")
 	c.paths = append([]string(nil), paths...)
+	c.state = StateEngaged
 	return nil
 }
 func (c *bootstrapController) ExcludedDevicePaths(context.Context) ([]string, error) {
@@ -379,11 +426,16 @@ func (c *bootstrapController) ReadEvent(ctx context.Context) (Event, error) {
 	case event := <-c.events:
 		return event, nil
 	case <-ctx.Done():
+		c.log.add("read-event-stop")
 		return Event{}, ctx.Err()
 	}
 }
-func (c *bootstrapController) Reset(context.Context) error { return nil }
-func (c *bootstrapController) Close() error                { return nil }
+func (c *bootstrapController) Reset(context.Context) error {
+	c.log.add("reset")
+	c.state = StateStarted
+	return nil
+}
+func (c *bootstrapController) Close() error { return nil }
 
 func bootstrapSession(controller Controller) *Session {
 	return &Session{controller: controller, resources: wfp.Resources{

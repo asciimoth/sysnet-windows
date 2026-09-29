@@ -170,6 +170,61 @@ func (m *nativeManager) VerifySplitResources(ctx context.Context, resources Reso
 	return nil
 }
 
+func (m *nativeManager) VerifySplitResourcesAbsent(ctx context.Context, resources Resources) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := resources.Validate(); err != nil {
+		return err
+	}
+	if err := m.usable(ctx); err != nil {
+		return err
+	}
+	providerID, baselineID, dnsID, err := nativeIDs(resources)
+	if err != nil {
+		return err
+	}
+	providers, err := m.session.Providers()
+	if err != nil {
+		return fmt.Errorf("enumerate WFP providers: %w", err)
+	}
+	if slices.ContainsFunc(providers, func(provider *wf.Provider) bool { return provider.ID == providerID }) {
+		return fmt.Errorf("WFP provider %s still exists", resources.Provider.Key)
+	}
+	// Sublayers and filters can remain after a partial or externally raced
+	// deletion even when the provider lookup no longer returns our provider.
+	sublayers, err := m.session.Sublayers()
+	if err != nil {
+		return fmt.Errorf("enumerate WFP sublayers: %w", err)
+	}
+	if slices.ContainsFunc(sublayers, func(layer *wf.Sublayer) bool {
+		return layer.ID == baselineID || layer.ID == dnsID
+	}) {
+		return errors.New("one or more journaled WFP sublayers still exist")
+	}
+	if len(resources.Filters) == 0 {
+		return nil
+	}
+	rules, err := m.session.Rules()
+	if err != nil {
+		return fmt.Errorf("enumerate WFP filters: %w", err)
+	}
+	keys := make(map[wf.RuleID]struct{}, len(resources.Filters))
+	for _, object := range resources.Filters {
+		guid, parseErr := windows.GUIDFromString(object.Key)
+		if parseErr != nil {
+			return fmt.Errorf("parse WFP filter key %q: %w", object.Key, parseErr)
+		}
+		keys[wf.RuleID(guid)] = struct{}{}
+	}
+	if slices.ContainsFunc(rules, func(rule *wf.Rule) bool {
+		_, exists := keys[rule.ID]
+		return exists
+	}) {
+		return errors.New("one or more journaled WFP filters still exist")
+	}
+	return nil
+}
+
 func (m *nativeManager) DeleteSplitResources(ctx context.Context, resources Resources) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -68,6 +68,10 @@ type Manager interface {
 	CreateSplitResources(context.Context) (Resources, error)
 	DeleteSplitResources(context.Context, Resources) error
 	VerifySplitResources(context.Context, Resources) error
+	// VerifySplitResourcesAbsent proves that none of the exact journaled
+	// objects remains. A partial deletion is an error because a remaining
+	// provider, sublayer, or filter is still owned state.
+	VerifySplitResourcesAbsent(context.Context, Resources) error
 	Close() error
 }
 

@@ -48,7 +48,7 @@ func TestAcquireOrdersVerificationOpenStateAndCommittedWFP(t *testing.T) {
 	}
 	if got, want := events.snapshot(), []string{
 		"verify-deployment", "open", "state", "open-wfp", "create-wfp", "verify-wfp",
-		"close-controller", "delete-wfp", "close-wfp",
+		"delete-wfp", "verify-wfp-absent", "close-controller", "close-wfp",
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("close events = %v, want %v", got, want)
 	}
@@ -203,9 +203,10 @@ func TestSessionPreservesReferencedObjectsUntilResetIsConfirmed(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			manager := &fakeWFP{resources: testResources}
+			controller := &fakeController{state: StateStarted}
 			session, err := Acquire(context.Background(), Dependencies{
 				Verifier: fakeVerifier{deployment: testDeployment},
-				Opener:   fakeOpener{controller: &fakeController{state: StateStarted}}, WFP: manager,
+				Opener:   fakeOpener{controller: controller}, WFP: manager,
 			})
 			if err != nil {
 				t.Fatalf("Acquire() error = %v", err)
@@ -213,6 +214,8 @@ func TestSessionPreservesReferencedObjectsUntilResetIsConfirmed(t *testing.T) {
 			session.MarkDriverReferences()
 			if test.confirmed {
 				session.MarkResetConfirmed()
+			} else {
+				controller.state = StateEngaged
 			}
 			err = session.Close()
 			if errors.Is(err, ErrRecoveryRequired) != test.wantRecovery {
@@ -221,8 +224,132 @@ func TestSessionPreservesReferencedObjectsUntilResetIsConfirmed(t *testing.T) {
 			if (manager.deleteCalls != 0) != test.wantDelete {
 				t.Fatalf("delete calls = %d, want delete=%v", manager.deleteCalls, test.wantDelete)
 			}
-			if secondErr := session.Close(); !errors.Is(secondErr, err) {
-				t.Fatalf("second Close() error = %v, want cached %v", secondErr, err)
+			if secondErr := session.Close(); errors.Is(secondErr, ErrRecoveryRequired) != test.wantRecovery {
+				t.Fatalf("second Close() error = %v, want recovery=%v", secondErr, test.wantRecovery)
+			}
+		})
+	}
+}
+
+func TestSessionRetriesUnverifiedWFPDeletion(t *testing.T) {
+	t.Parallel()
+	deleteErr := errors.New("WFP delete failed")
+	manager := &fakeWFP{resources: testResources, deleteErr: deleteErr}
+	session, err := Acquire(context.Background(), Dependencies{
+		Verifier: fakeVerifier{deployment: testDeployment},
+		Opener:   fakeOpener{controller: &fakeController{state: StateStarted}}, WFP: manager,
+	})
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	if err := session.Close(); !errors.Is(err, deleteErr) || !errors.Is(err, ErrRecoveryRequired) {
+		t.Fatalf("first Close() error = %v, want delete and recovery errors", err)
+	}
+	if session.Cleaned() {
+		t.Fatal("failed WFP absence readback marked the session clean")
+	}
+	manager.deleteErr = nil
+	if err := session.Close(); err != nil {
+		t.Fatalf("recovery Close() error = %v", err)
+	}
+	if manager.deleteCalls != 2 || !session.Cleaned() {
+		t.Fatalf("delete calls=%d cleaned=%t, want 2 and true", manager.deleteCalls, session.Cleaned())
+	}
+}
+
+func TestR37R40SessionReconcilesCommittedResetError(t *testing.T) {
+	t.Parallel()
+	events := &eventLog{}
+	resetErr := errors.New("reset completion was uncertain")
+	started := StateStarted
+	controller := &fakeController{state: StateStarted, events: events}
+	manager := &fakeWFP{resources: testResources, events: events}
+	session, err := Acquire(context.Background(), Dependencies{
+		Verifier: fakeVerifier{deployment: testDeployment, events: events},
+		Opener:   fakeOpener{controller: controller, events: events}, WFP: manager,
+		CleanupTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	session.MarkDriverReferences()
+	controller.state = StateEngaged
+	controller.resetErr = resetErr
+	controller.resetState = &started
+
+	err = session.Close()
+	if !errors.Is(err, resetErr) || errors.Is(err, ErrRecoveryRequired) {
+		t.Fatalf("Close() error = %v, want verified reset error without recovery", err)
+	}
+	if !controller.resetContextActive || !controller.resetHasDeadline {
+		t.Fatalf("reset context active=%t deadline=%t", controller.resetContextActive, controller.resetHasDeadline)
+	}
+	if !session.Cleaned() || manager.deleteCalls != 1 {
+		t.Fatalf("cleaned=%t delete calls=%d, want true and 1", session.Cleaned(), manager.deleteCalls)
+	}
+}
+
+func TestR37R40SessionRetainsJournalAndRetriesExplicitRecovery(t *testing.T) {
+	t.Parallel()
+	controller := &fakeController{state: StateStarted}
+	manager := &fakeWFP{resources: testResources}
+	verifier := &fakeVerifier{deployment: testDeployment}
+	session, err := Acquire(context.Background(), Dependencies{
+		Verifier: verifier, Opener: fakeOpener{controller: controller}, WFP: manager,
+		CleanupTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	session.MarkDriverReferences()
+	controller.state = StateEngaged
+	if err := session.Close(); !errors.Is(err, ErrRecoveryRequired) {
+		t.Fatalf("first Close() error = %v, want recovery required", err)
+	}
+	if session.Cleaned() || manager.deleteCalls != 0 {
+		t.Fatalf("failed recovery cleaned=%t delete calls=%d", session.Cleaned(), manager.deleteCalls)
+	}
+
+	started := StateStarted
+	controller.resetState = &started
+	if err := session.Close(); err != nil {
+		t.Fatalf("recovery Close() error = %v", err)
+	}
+	if !session.Cleaned() || manager.deleteCalls != 1 || controller.resetCalls != 2 {
+		t.Fatalf("recovery cleaned=%t delete calls=%d reset calls=%d", session.Cleaned(), manager.deleteCalls, controller.resetCalls)
+	}
+}
+
+func TestR37R40SessionRejectsZombieAndChangedDeployment(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		mutate func(*fakeVerifier, *fakeController, *fakeWFP)
+	}{
+		{name: "zombie", mutate: func(_ *fakeVerifier, controller *fakeController, _ *fakeWFP) { controller.state = StateZombie }},
+		{name: "changed deployment", mutate: func(verifier *fakeVerifier, _ *fakeController, _ *fakeWFP) { verifier.deployment.SHA256 = "different" }},
+		{name: "changed WFP journal", mutate: func(_ *fakeVerifier, _ *fakeController, manager *fakeWFP) {
+			manager.verifyErr = errors.New("journal differs")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			controller := &fakeController{state: StateStarted}
+			manager := &fakeWFP{resources: testResources}
+			verifier := &fakeVerifier{deployment: testDeployment}
+			session, err := Acquire(context.Background(), Dependencies{
+				Verifier: verifier, Opener: fakeOpener{controller: controller}, WFP: manager,
+			})
+			if err != nil {
+				t.Fatalf("Acquire() error = %v", err)
+			}
+			session.MarkDriverReferences()
+			test.mutate(verifier, controller, manager)
+			if err := session.Close(); !errors.Is(err, ErrRecoveryRequired) {
+				t.Fatalf("Close() error = %v, want recovery required", err)
+			}
+			if controller.resetCalls != 0 || manager.deleteCalls != 0 || session.Cleaned() {
+				t.Fatalf("unsafe cleanup: reset=%d delete=%d cleaned=%t", controller.resetCalls, manager.deleteCalls, session.Cleaned())
 			}
 		})
 	}
@@ -270,9 +397,12 @@ type fakeOpener struct {
 func (f fakeOpener) Open() (Controller, error) { f.events.add("open"); return f.controller, f.err }
 
 type fakeController struct {
-	state              State
-	stateErr, closeErr error
-	events             *eventLog
+	state                                State
+	stateErr, resetErr, closeErr         error
+	resetState                           *State
+	resetCalls                           int
+	resetContextActive, resetHasDeadline bool
+	events                               *eventLog
 }
 
 func (f *fakeController) State(context.Context) (State, error) {
@@ -289,8 +419,17 @@ func (f *fakeController) ReadEvent(ctx context.Context) (Event, error) {
 	<-ctx.Done()
 	return Event{}, ctx.Err()
 }
-func (f *fakeController) Reset(context.Context) error { return nil }
-func (f *fakeController) Close() error                { f.events.add("close-controller"); return f.closeErr }
+func (f *fakeController) Reset(ctx context.Context) error {
+	f.events.add("reset")
+	f.resetCalls++
+	f.resetContextActive = ctx.Err() == nil
+	_, f.resetHasDeadline = ctx.Deadline()
+	if f.resetState != nil {
+		f.state = *f.resetState
+	}
+	return f.resetErr
+}
+func (f *fakeController) Close() error { f.events.add("close-controller"); return f.closeErr }
 
 type fakeWFP struct {
 	resources                                 wfp.Resources
@@ -317,6 +456,10 @@ func (f *fakeWFP) VerifySplitResources(context.Context, wfp.Resources) error {
 		f.onVerify()
 	}
 	return f.verifyErr
+}
+func (f *fakeWFP) VerifySplitResourcesAbsent(context.Context, wfp.Resources) error {
+	f.events.add("verify-wfp-absent")
+	return f.deleteErr
 }
 func (f *fakeWFP) DeleteSplitResources(ctx context.Context, _ wfp.Resources) error {
 	f.events.add("delete-wfp")

@@ -2,6 +2,7 @@ package windows
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"reflect"
 	"sync"
@@ -86,6 +87,68 @@ func TestDefaultTunRejectsMissingSplitBootstrapBeforeMutation(t *testing.T) {
 	}
 	if len(factory.created) != 0 {
 		t.Fatalf("created adapters = %d, want zero", len(factory.created))
+	}
+}
+
+func TestR37R44DefaultTunPreservesSplitJournalButCleansOrdinaryState(t *testing.T) {
+	resetErr := errors.New("split reset failed")
+	controller := &defaultSplitController{state: split.StateStarted}
+	native := &defaultSplitNative{controller: controller}
+	system := newDefaultTunTestSystem(t, &regularTunFactory{}, newRegularTunManager())
+	system.dependencies.splitDependencies = split.Dependencies{
+		Verifier: defaultSplitVerifier{}, Opener: native,
+		WFP:      defaultSplitWFPFactory{manager: native},
+		Snapshot: defaultSplitSnapshotter{snapshot: split.ProcessSnapshot{Processes: []split.Process{{PID: 4}}}},
+		Resolver: defaultSplitResolver{}, CleanupTimeout: time.Second,
+	}
+	system.probeFacts.split = sysnet.Capability{State: sysnet.CapabilityUnknown, Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeNotRun}}
+	system.rebuildCapabilitiesLocked()
+
+	device, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{
+		TunAddrs: []string{"10.99.0.1/24"},
+		Exclude:  []sysnet.Rule{{Type: ruleExecutableTree, Rule: `C:\excluded.exe`}},
+	})
+	if err != nil {
+		t.Fatalf("BuildDefaultTun() error = %v", err)
+	}
+	owned := device.(*defaultTun)
+	controller.mu.Lock()
+	controller.resetErr = resetErr
+	controller.resetState = split.StateEngaged
+	controller.mu.Unlock()
+
+	err = device.Close()
+	if !errors.Is(err, resetErr) || !errors.Is(err, split.ErrRecoveryRequired) {
+		t.Fatalf("DefaultTun.Close() error = %v, want reset and recovery errors", err)
+	}
+	if got := system.journal.Len(); got != 1 {
+		t.Fatalf("journal entries after failed split cleanup = %d, want 1", got)
+	}
+	if owned.dnsProxy == nil || !owned.dnsProxy.Closed() || !owned.closed.Load() {
+		t.Fatalf("ordinary cleanup: DNS closed=%t adapter closed=%t", owned.dnsProxy != nil && owned.dnsProxy.Closed(), owned.closed.Load())
+	}
+	if system.defaultTun != nil || system.activeSplitTun.Load() != nil {
+		t.Fatal("closed default TUN remained published during split recovery")
+	}
+	if native.deleteCalls != 0 {
+		t.Fatalf("WFP delete calls = %d before reset confirmation, want 0", native.deleteCalls)
+	}
+	system.mu.RLock()
+	state := system.state
+	system.mu.RUnlock()
+	if state != lifecycleRecoveryRequired {
+		t.Fatalf("System state = %s, want recovery-required", state)
+	}
+
+	controller.mu.Lock()
+	controller.resetErr = nil
+	controller.resetState = split.StateStarted
+	controller.mu.Unlock()
+	if err := system.Close(); err != nil {
+		t.Fatalf("System.Close() recovery error = %v", err)
+	}
+	if got := system.journal.Len(); got != 0 || native.deleteCalls != 1 {
+		t.Fatalf("recovery journal=%d WFP deletes=%d, want 0 and 1", got, native.deleteCalls)
 	}
 }
 
@@ -187,7 +250,10 @@ func (n *defaultSplitNative) DeleteSplitResources(context.Context, wfp.Resources
 	return nil
 }
 func (*defaultSplitNative) VerifySplitResources(context.Context, wfp.Resources) error { return nil }
-func (*defaultSplitNative) Close() error                                              { return nil }
+func (*defaultSplitNative) VerifySplitResourcesAbsent(context.Context, wfp.Resources) error {
+	return nil
+}
+func (*defaultSplitNative) Close() error { return nil }
 
 // Open satisfies both split.Opener and wfp.Factory through different Go method
 // signatures, which cannot coexist. The adapter below supplies the WFP side.
@@ -210,6 +276,8 @@ func (defaultSplitResolver) Resolve(_ context.Context, path string) (string, err
 type defaultSplitController struct {
 	mu         sync.Mutex
 	state      split.State
+	resetState split.State
+	resetErr   error
 	processes  []split.Process
 	addresses  split.Addresses
 	paths      []string
@@ -272,9 +340,13 @@ func (c *defaultSplitController) ReadEvent(ctx context.Context) (split.Event, er
 }
 func (c *defaultSplitController) Reset(context.Context) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.resetCalls++
-	c.state = split.StateStarted
-	c.mu.Unlock()
-	return nil
+	if c.resetState != split.StateNone {
+		c.state = c.resetState
+	} else if c.resetErr == nil {
+		c.state = split.StateStarted
+	}
+	return c.resetErr
 }
 func (*defaultSplitController) Close() error { return nil }

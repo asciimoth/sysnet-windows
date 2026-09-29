@@ -399,8 +399,12 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 						if result == nil || result.splitPolicy == nil || result.splitPolicy.AppliedGeneration() != id {
 							return errors.New("split policy generation was not applied")
 						}
+						return nil
 					}
-					return nil
+					if result == nil || result.splitPolicy == nil || result.splitPolicy.Cleaned() {
+						return nil
+					}
+					return split.ErrRecoveryRequired
 				},
 			}
 			if err := s.journal.Apply(ctx, []reconcile.Entry{splitEntry}); err != nil {
@@ -509,7 +513,11 @@ func (s *System) closeDefaultTun(device *defaultTun) error {
 		return sysnet.ErrUnknownTun
 	}
 	err := s.applyOperation(func(ctx context.Context) error { return s.undoDefaultTun(ctx, device) })
-	if err == nil {
+	// Cleanup can return a native error even when independent readback proves
+	// that every default-TUN resource except a retained split recovery journal
+	// is gone. Do not keep a closed adapter published as the active default.
+	if err == nil || device.closed.Load() {
+		device.retired.Store(true)
 		s.defaultTun = nil
 		s.activeSplitTun.CompareAndSwap(device, nil)
 	}
