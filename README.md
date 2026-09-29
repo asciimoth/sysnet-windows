@@ -3,10 +3,10 @@
 Windows network integration for `github.com/asciimoth/gonnect`.
 
 The root package implements host-aware allocation, regular Wintun ownership,
-underlay selection, and the outbound network bypass. Later milestones will add
-the default TUN, managed DNS, LocalNet, matchers, and application exclusions.
-The repository also contains the locked development environment and Windows test
-harness for the work in
+underlay selection, the outbound network bypass, and confined local networking.
+Later milestones will add the default TUN, managed DNS, matchers, and
+application exclusions. The repository also contains the locked development
+environment and Windows test harness for the work in
 [`docs/sysnet-windows-implementation-testing-plan.md`](docs/sysnet-windows-implementation-testing-plan.md).
 
 ## Outbound network
@@ -27,6 +27,19 @@ is no unbound retry.
 OutNet resolves names through `System.OutDNS`. At this milestone, OutDNS uses
 the host DNS server list that exists before managed DNS takeover. The managed
 DNS milestone will replace this discovery path with saved underlay DNS state.
+
+## Local network
+
+`System.LocalNet` supports native TCP and UDP sockets only on IPv4 and IPv6
+loopback. It resolves names before socket creation and rejects the complete
+result if any address is outside loopback. Listener wildcard addresses become an
+explicit `127.0.0.1` or `::1` bind, so they do not expose a service on a
+physical or TUN interface.
+
+LocalNet tracks listeners, accepted TCP connections, and UDP sockets as System
+resources. `System.Close` closes them, and new operations fail after close
+starts. LocalNet is separate from the private listener that a later managed DNS
+implementation can bind to a TUN-owned DNS address.
 
 ## Development
 

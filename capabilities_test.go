@@ -167,13 +167,49 @@ func TestCurrentImplementationAdvertisesOnlyCompletedGates(t *testing.T) {
 		t.Fatalf("Capabilities().Validate() error = %v", err)
 	}
 	for _, operation := range report.Operations {
-		if operation.State == sysnet.CapabilityAvailable {
+		localCompleted := operation.Key.Target == sysnet.TargetLocalNet
+		if operation.State == sysnet.CapabilityAvailable && !localCompleted {
 			t.Fatalf("operation enabled before implementation gate: %+v", operation.Key)
 		}
 	}
 	for _, ruleType := range []string{ruleExecutableTree, ruleExecutablePath, rulePID} {
 		if got := report.Rule(ruleType).Validation.State; got != sysnet.CapabilityAvailable {
 			t.Fatalf("%s validation state = %v, want available", ruleType, got)
+		}
+	}
+}
+
+func TestCurrentImplementationAdvertisesLocalNetByFamily(t *testing.T) {
+	t.Parallel()
+	report := buildCapabilityReport(
+		defaultNormalizedSystemConfig(),
+		currentImplementationSupport(),
+		capabilityProbeFacts{},
+		lifecycleReady,
+	)
+	for _, operation := range []sysnet.Operation{sysnet.OpResolve, sysnet.OpInterfaces} {
+		capability := report.Operation(operationKey(sysnet.TargetLocalNet, operation, sysnet.FamilyNone))
+		if capability.State != sysnet.CapabilityAvailable {
+			t.Fatalf("LocalNet %s = %+v, want available", operation, capability)
+		}
+	}
+	for _, family := range []sysnet.AddressFamily{sysnet.FamilyIPv4, sysnet.FamilyIPv6} {
+		for _, operation := range []sysnet.Operation{
+			sysnet.OpDialTCP, sysnet.OpDialUDP, sysnet.OpPacketDialUDP,
+			sysnet.OpListenTCP, sysnet.OpListenUDP, sysnet.OpListenPacketUDP,
+		} {
+			capability := report.Operation(operationKey(sysnet.TargetLocalNet, operation, family))
+			if capability.State != sysnet.CapabilityAvailable {
+				t.Fatalf("LocalNet %s IPv%s = %+v, want available", operation, family, capability)
+			}
+		}
+	}
+	for _, key := range []sysnet.OperationKey{
+		operationKey(sysnet.TargetLocalNet, sysnet.OpMulticastUDP, sysnet.FamilyIPv4),
+		operationKey(sysnet.TargetLocalNet, sysnet.OpDialTCP, sysnet.FamilyDual),
+	} {
+		if capability := report.Operation(key); capability.State != sysnet.CapabilityUnsupported {
+			t.Fatalf("LocalNet unsupported operation %+v = %+v", key, capability)
 		}
 	}
 }

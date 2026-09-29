@@ -61,6 +61,7 @@ type implementationSupport struct {
 	exclusionRuleValidation bool
 	matcherRuleValidation   bool
 	outNet                  bool
+	localNet                bool
 }
 
 func currentImplementationSupport() implementationSupport {
@@ -76,6 +77,7 @@ func currentImplementationSupport() implementationSupport {
 		exclusionRuleValidation: true,
 		matcherRuleValidation:   true,
 		outNet:                  true,
+		localNet:                true,
 	}
 }
 
@@ -240,8 +242,10 @@ func networkOperationCatalog(config normalizedSystemConfig, support implementati
 			lifecycleCapability(dependentCapability(implementedCapability(support.outNet), facts.underlay), state)),
 		operationCapability(sysnet.TargetOutNet, sysnet.OpInterfaces, sysnet.FamilyNone,
 			lifecycleCapability(dependentCapability(implementedCapability(support.outNet), facts.underlay), state)),
-		operationCapability(sysnet.TargetLocalNet, sysnet.OpResolve, sysnet.FamilyNone, notImplemented),
-		operationCapability(sysnet.TargetLocalNet, sysnet.OpInterfaces, sysnet.FamilyNone, notImplemented),
+		operationCapability(sysnet.TargetLocalNet, sysnet.OpResolve, sysnet.FamilyNone,
+			lifecycleCapability(implementedCapability(support.localNet), state)),
+		operationCapability(sysnet.TargetLocalNet, sysnet.OpInterfaces, sysnet.FamilyNone,
+			lifecycleCapability(implementedCapability(support.localNet), state)),
 	}
 	for _, operation := range []sysnet.Operation{
 		sysnet.OpSetAddresses, sysnet.OpAddAddress, sysnet.OpGetAddresses,
@@ -265,6 +269,11 @@ func networkOperationCatalog(config normalizedSystemConfig, support implementati
 					family != sysnet.FamilyDual {
 					capability = lifecycleCapability(
 						dependentCapability(familyCapability(implementedCapability(support.outNet), config, family), facts.underlay), state,
+					)
+				} else if target == sysnet.TargetLocalNet && operation != sysnet.OpMulticastUDP &&
+					family != sysnet.FamilyDual {
+					capability = lifecycleCapability(
+						familyCapability(implementedCapability(support.localNet), config, family), state,
 					)
 				}
 				operations = append(operations, operationCapability(target, operation, family, capability))

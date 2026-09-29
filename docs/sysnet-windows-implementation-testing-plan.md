@@ -733,7 +733,7 @@ defer rollback to a later milestone.
     - Complete this step when N01-N16 and N29-N32 pass and captures show no
       recursive transport through the owned TUN.
 
-4. **Step 14 - Implement and confine LocalNet.**
+4. **Step 14 - Implement and confine LocalNet. (Completed)**
 
     - Resolve localhost names and validate the result before connection. Accept
       only the supported IPv4 or IPv6 loopback scope.

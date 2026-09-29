@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/asciimoth/gonnect"
 	"github.com/asciimoth/gonnect/dns"
 	internalallocator "github.com/asciimoth/sysnet-windows/internal/allocator"
 	internalnetwork "github.com/asciimoth/sysnet-windows/internal/network"
@@ -47,6 +48,9 @@ func newSystem(config SystemConfig, dependencies systemDependencies) (*System, e
 	if err := system.transitionLocked(lifecycleReady); err != nil {
 		return nil, err
 	}
+	if err := system.buildLocalNetwork(); err != nil {
+		return nil, err
+	}
 	if dependencies.underlay != nil {
 		monitor, monitorErr := underlay.NewMonitor(
 			dependencies.underlay,
@@ -65,6 +69,22 @@ func newSystem(config SystemConfig, dependencies systemDependencies) (*System, e
 	}
 	system.rebuildCapabilitiesLocked()
 	return system, nil
+}
+
+// buildLocalNetwork is intentionally independent from the underlay and DNS
+// proxy paths. In particular, a later DNS listener on a non-loopback TUN
+// address must not gain LocalNet's public socket semantics.
+func (s *System) buildLocalNetwork() error {
+	native := gonnect.NativeConfig{}.Build()
+	local, err := internalnetwork.NewLocal(native, native, internalnetwork.Families{
+		IPv4: s.config.ipv4,
+		IPv6: s.config.ipv6,
+	}, s.acceptingWork, s.trackResource)
+	if err != nil {
+		return err
+	}
+	s.localNet = local
+	return nil
 }
 
 // buildOutboundNetwork connects the selected-underlay monitor to the mandatory

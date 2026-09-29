@@ -34,6 +34,7 @@ type System struct {
 	underlayMonitor *underlay.Monitor
 	outDNS          dns.Interface
 	outNet          gonnect.Network
+	localNet        gonnect.Network
 	underlayOwnedMu sync.RWMutex
 	underlayOwned   map[*regularTun]underlay.Interface
 	regularTunsMu   sync.Mutex
@@ -300,7 +301,15 @@ func (s *System) OutNet() gonnect.Network {
 	return s.outNet
 }
 
-func (*System) LocalNet() gonnect.Network { return &gonnect.RejectNetwork{} }
+// LocalNet returns a stable, loopback-only policy wrapper. It reports
+// IsNative=false because a native shortcut could omit endpoint validation or
+// resource tracking.
+func (s *System) LocalNet() gonnect.Network {
+	if s == nil || s.localNet == nil {
+		return &gonnect.RejectNetwork{}
+	}
+	return s.localNet
+}
 
 func (s *System) BuildMatcher(rule sysnet.Rule) (sysnet.Matcher, error) {
 	normalized, validation := validateMatcherRule(s.policyConfig(), rule)
