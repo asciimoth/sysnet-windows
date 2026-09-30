@@ -336,35 +336,35 @@ func (c *trackedCloser) Close() error {
 
 type ownedConn struct {
 	net.Conn
-	trackedCloser
+	*trackedCloser
 }
 
 func (c *ownedConn) Close() error { return c.trackedCloser.Close() }
 
 type ownedPacketConn struct {
 	gonnect.PacketConn
-	trackedCloser
+	*trackedCloser
 }
 
 func (c *ownedPacketConn) Close() error { return c.trackedCloser.Close() }
 
 type ownedTCPConn struct {
 	gonnect.TCPConn
-	trackedCloser
+	*trackedCloser
 }
 
 func (c *ownedTCPConn) Close() error { return c.trackedCloser.Close() }
 
 type ownedUDPConn struct {
 	gonnect.UDPConn
-	trackedCloser
+	*trackedCloser
 }
 
 func (c *ownedUDPConn) Close() error { return c.trackedCloser.Close() }
 
 type ownedListener struct {
 	net.Listener
-	trackedCloser
+	*trackedCloser
 	check WorkCheck
 	track Tracker
 }
@@ -384,7 +384,7 @@ func (l *ownedListener) Accept() (net.Conn, error) {
 
 type ownedTCPListener struct {
 	gonnect.TCPListener
-	trackedCloser
+	*trackedCloser
 	check WorkCheck
 	track Tracker
 }
@@ -414,49 +414,61 @@ func (l *ownedTCPListener) AcceptTCP() (gonnect.TCPConn, error) {
 }
 
 func trackConn(track Tracker, connection net.Conn) (net.Conn, error) {
-	release, err := track(connection)
+	closer := &trackedCloser{close: connection.Close}
+	release, err := track(closer)
 	if err != nil {
 		return nil, errors.Join(err, connection.Close())
 	}
-	return &ownedConn{Conn: connection, trackedCloser: trackedCloser{close: connection.Close, release: release}}, nil
+	closer.release = release
+	return &ownedConn{Conn: connection, trackedCloser: closer}, nil
 }
 
 func trackPacketConn(track Tracker, connection gonnect.PacketConn) (gonnect.PacketConn, error) {
-	release, err := track(connection)
+	closer := &trackedCloser{close: connection.Close}
+	release, err := track(closer)
 	if err != nil {
 		return nil, errors.Join(err, connection.Close())
 	}
-	return &ownedPacketConn{PacketConn: connection, trackedCloser: trackedCloser{close: connection.Close, release: release}}, nil
+	closer.release = release
+	return &ownedPacketConn{PacketConn: connection, trackedCloser: closer}, nil
 }
 
 func trackTCPConn(track Tracker, connection gonnect.TCPConn) (gonnect.TCPConn, error) {
-	release, err := track(connection)
+	closer := &trackedCloser{close: connection.Close}
+	release, err := track(closer)
 	if err != nil {
 		return nil, errors.Join(err, connection.Close())
 	}
-	return &ownedTCPConn{TCPConn: connection, trackedCloser: trackedCloser{close: connection.Close, release: release}}, nil
+	closer.release = release
+	return &ownedTCPConn{TCPConn: connection, trackedCloser: closer}, nil
 }
 
 func trackUDPConn(track Tracker, connection gonnect.UDPConn) (gonnect.UDPConn, error) {
-	release, err := track(connection)
+	closer := &trackedCloser{close: connection.Close}
+	release, err := track(closer)
 	if err != nil {
 		return nil, errors.Join(err, connection.Close())
 	}
-	return &ownedUDPConn{UDPConn: connection, trackedCloser: trackedCloser{close: connection.Close, release: release}}, nil
+	closer.release = release
+	return &ownedUDPConn{UDPConn: connection, trackedCloser: closer}, nil
 }
 
 func trackListener(check WorkCheck, track Tracker, listener net.Listener) (net.Listener, error) {
-	release, err := track(listener)
+	closer := &trackedCloser{close: listener.Close}
+	release, err := track(closer)
 	if err != nil {
 		return nil, errors.Join(err, listener.Close())
 	}
-	return &ownedListener{Listener: listener, trackedCloser: trackedCloser{close: listener.Close, release: release}, check: check, track: track}, nil
+	closer.release = release
+	return &ownedListener{Listener: listener, trackedCloser: closer, check: check, track: track}, nil
 }
 
 func trackTCPListener(check WorkCheck, track Tracker, listener gonnect.TCPListener) (gonnect.TCPListener, error) {
-	release, err := track(listener)
+	closer := &trackedCloser{close: listener.Close}
+	release, err := track(closer)
 	if err != nil {
 		return nil, errors.Join(err, listener.Close())
 	}
-	return &ownedTCPListener{TCPListener: listener, trackedCloser: trackedCloser{close: listener.Close, release: release}, check: check, track: track}, nil
+	closer.release = release
+	return &ownedTCPListener{TCPListener: listener, trackedCloser: closer, check: check, track: track}, nil
 }

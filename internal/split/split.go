@@ -157,7 +157,9 @@ type cleanupAttempt struct {
 
 // Acquire verifies deployment provenance, opens the device, rejects all state
 // except Started, and then creates committed non-dynamic WFP resources. It does
-// not initialize or reset the driver.
+// not initialize or reset the driver. If committed WFP cleanup cannot be
+// verified, Acquire returns both a recovery error and a non-nil Session. The
+// caller must retain that Session and call Close until Cleaned reports true.
 func Acquire(ctx context.Context, dependencies Dependencies) (*Session, error) {
 	if ctx == nil {
 		return nil, &AcquisitionError{Phase: "validate context", Kind: ErrUnavailable, Err: errors.New("nil context")}
@@ -222,13 +224,19 @@ func Acquire(ctx context.Context, dependencies Dependencies) (*Session, error) {
 		cleanupErr := manager.DeleteSplitResources(cleanupCtx, resources)
 		absentErr := manager.VerifySplitResourcesAbsent(cleanupCtx, resources)
 		cancelCleanup()
-		var recoveryErr error
 		if cleanupErr != nil || absentErr != nil {
-			recoveryErr = &RecoveryError{Resources: cloneResources(resources), Err: errors.Join(cleanupErr, absentErr)}
+			session := &Session{
+				controller: controller, wfp: manager, verifier: dependencies.Verifier, deployment: deployment,
+				resources: cloneResources(resources), cleanupTimeout: cleanupTimeout,
+			}
+			return session, errors.Join(
+				&AcquisitionError{Phase: "verify committed WFP resources", Kind: ErrIncompatible, Err: err},
+				&RecoveryError{Resources: cloneResources(resources), Err: errors.Join(cleanupErr, absentErr)},
+			)
 		}
 		return nil, errors.Join(
 			&AcquisitionError{Phase: "verify committed WFP resources", Kind: ErrIncompatible, Err: err},
-			recoveryErr, controller.Close(), manager.Close(),
+			controller.Close(), manager.Close(),
 		)
 	}
 	return &Session{

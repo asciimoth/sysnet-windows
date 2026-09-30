@@ -215,6 +215,71 @@ func TestD07ConcurrentQueriesAndProviderSwaps(t *testing.T) {
 	workers.Wait()
 }
 
+func TestProxyLimitsIdleTCPConnectionsBeforeStartingWorkers(t *testing.T) {
+	proxy, endpoint := newTestProxy(t, 5*time.Second)
+	connections := make([]net.Conn, 0, maxTCPConnections)
+	defer func() {
+		for _, connection := range connections {
+			_ = connection.Close()
+		}
+	}()
+	for index := 0; index < maxTCPConnections; index++ {
+		connection, err := net.DialTimeout("tcp4", endpoint, time.Second)
+		if err != nil {
+			t.Fatalf("idle connection %d: %v", index, err)
+		}
+		connections = append(connections, connection)
+	}
+	waitForTCPConnectionCount(t, proxy, maxTCPConnections)
+	if got := len(proxy.tcpLimit); got != maxTCPConnections {
+		t.Fatalf("TCP limiter use = %d, want %d", got, maxTCPConnections)
+	}
+
+	for index := 0; index < 16; index++ {
+		overflow, err := net.DialTimeout("tcp4", endpoint, time.Second)
+		if err != nil {
+			continue
+		}
+		_ = overflow.SetReadDeadline(time.Now().Add(time.Second))
+		if _, readErr := overflow.Read(make([]byte, 1)); readErr == nil || isTimeout(readErr) {
+			_ = overflow.Close()
+			t.Fatalf("overflow connection %d was not closed promptly: %v", index, readErr)
+		}
+		_ = overflow.Close()
+	}
+	waitForTCPConnectionCount(t, proxy, maxTCPConnections)
+
+	if err := connections[0].Close(); err != nil {
+		t.Fatalf("close admitted connection: %v", err)
+	}
+	connections = connections[1:]
+	waitForTCPConnectionCount(t, proxy, maxTCPConnections-1)
+	replacement, err := net.DialTimeout("tcp4", endpoint, time.Second)
+	if err != nil {
+		t.Fatalf("replacement connection: %v", err)
+	}
+	connections = append(connections, replacement)
+	waitForTCPConnectionCount(t, proxy, maxTCPConnections)
+}
+
+func waitForTCPConnectionCount(t *testing.T, proxy *Proxy, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		proxy.connectionsMu.Lock()
+		got := len(proxy.connections)
+		proxy.connectionsMu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	proxy.connectionsMu.Lock()
+	got := len(proxy.connections)
+	proxy.connectionsMu.Unlock()
+	t.Fatalf("accepted TCP connections = %d, want %d", got, want)
+}
+
 func newTestProxy(t *testing.T, timeout time.Duration) (*Proxy, string) {
 	t.Helper()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")

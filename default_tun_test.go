@@ -111,6 +111,41 @@ func TestCapabilitiesForDefaultTunLifecycleAndOwnership(t *testing.T) {
 	}
 }
 
+func TestLiveDefaultTunPropertyOperationsReportUnsupported(t *testing.T) {
+	system := newDefaultTunTestSystem(t, &regularTunFactory{}, newRegularTunManager())
+	device, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.92.0.1/24"}})
+	if err != nil {
+		t.Fatalf("BuildDefaultTun() error = %v", err)
+	}
+	operations := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "GetTunAddrs", run: func() error { _, err := system.GetTunAddrs(device); return err }},
+		{name: "SetTunAddrs", run: func() error { return system.SetTunAddrs(device, []string{"10.92.1.1/24"}) }},
+		{name: "AddTunAddr", run: func() error { return system.AddTunAddr(device, "10.92.0.2/24") }},
+		{name: "GetTunRoutes", run: func() error { _, err := system.GetTunRoutes(device); return err }},
+		{name: "SetTunRoutes", run: func() error { return system.SetTunRoutes(device, []string{"192.0.2.0/24"}) }},
+		{name: "AddTunRoute", run: func() error { return system.AddTunRoute(device, "198.51.100.0/24") }},
+		{name: "SetTunMTU", run: func() error { return system.SetTunMTU(device, 1400) }},
+		{name: "SetTunName", run: func() error { return system.SetTunName(device, "replacement") }},
+	}
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			err := operation.run()
+			if !errors.Is(err, sysnet.ErrNotSupported) || errors.Is(err, sysnet.ErrUnknownTun) {
+				t.Fatalf("error = %v, want only ErrNotSupported", err)
+			}
+		})
+	}
+	if err := device.Close(); err != nil {
+		t.Fatalf("DefaultTun.Close() error = %v", err)
+	}
+	if _, err := system.GetTunAddrs(device); !errors.Is(err, sysnet.ErrUnknownTun) {
+		t.Fatalf("GetTunAddrs() after close error = %v, want ErrUnknownTun", err)
+	}
+}
+
 func TestDefaultTunEmptyOptionsAllocateOwnedAddress(t *testing.T) {
 	factory := &regularTunFactory{}
 	manager := newRegularTunManager()

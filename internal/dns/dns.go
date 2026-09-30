@@ -287,6 +287,7 @@ const (
 	defaultRequestTimeout = 5 * time.Second
 	maxDNSMessageSize     = 1<<16 - 1
 	maxConcurrentRequests = 256
+	maxTCPConnections     = 256
 )
 
 // ProxyFactory binds the private UDP and TCP listeners for a managed DNS
@@ -333,6 +334,7 @@ type Proxy struct {
 	root     context.Context
 	cancel   context.CancelFunc
 	limit    chan struct{}
+	tcpLimit chan struct{}
 
 	providerMu sync.RWMutex
 	provider   gonnectdns.Interface
@@ -356,7 +358,8 @@ func NewProxy(packet net.PacketConn, listener net.Listener, timeout time.Duratio
 	root, cancel := context.WithCancel(context.Background())
 	p := &Proxy{
 		packet: packet, listener: listener, timeout: timeout, root: root, cancel: cancel,
-		limit: make(chan struct{}, maxConcurrentRequests), generation: make(chan struct{}),
+		limit: make(chan struct{}, maxConcurrentRequests), tcpLimit: make(chan struct{}, maxTCPConnections),
+		generation:  make(chan struct{}),
 		connections: make(map[net.Conn]struct{}), closed: make(chan struct{}),
 	}
 	p.workers.Add(2)
@@ -461,11 +464,21 @@ func (p *Proxy) serveTCP() {
 		if err != nil {
 			return
 		}
+		select {
+		case p.tcpLimit <- struct{}{}:
+		case <-p.root.Done():
+			_ = connection.Close()
+			return
+		default:
+			_ = connection.Close()
+			continue
+		}
 		p.connectionsMu.Lock()
 		select {
 		case <-p.root.Done():
 			p.connectionsMu.Unlock()
 			_ = connection.Close()
+			<-p.tcpLimit
 			return
 		default:
 		}
@@ -478,6 +491,7 @@ func (p *Proxy) serveTCP() {
 
 func (p *Proxy) serveTCPConnection(connection net.Conn) {
 	defer p.workers.Done()
+	defer func() { <-p.tcpLimit }()
 	defer func() {
 		_ = connection.Close()
 		p.connectionsMu.Lock()

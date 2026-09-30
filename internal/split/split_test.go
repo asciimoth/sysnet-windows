@@ -146,7 +146,7 @@ func TestAcquireRetainsJournalWhenWFPVerificationCleanupFails(t *testing.T) {
 		resources: testResources, verifyErr: errors.New("readback failed"),
 		deleteErr: errors.New("delete failed"),
 	}
-	_, err := Acquire(context.Background(), Dependencies{
+	session, err := Acquire(context.Background(), Dependencies{
 		Verifier: fakeVerifier{deployment: testDeployment},
 		Opener:   fakeOpener{controller: &fakeController{state: StateStarted}}, WFP: manager,
 	})
@@ -156,6 +156,16 @@ func TestAcquireRetainsJournalWhenWFPVerificationCleanupFails(t *testing.T) {
 	var recovery *RecoveryError
 	if !errors.As(err, &recovery) || !reflect.DeepEqual(recovery.Resources, testResources) {
 		t.Fatalf("recovery journal = %+v, want %+v", recovery, testResources)
+	}
+	if session == nil || session.Cleaned() {
+		t.Fatal("acquisition failure did not transfer a recoverable session")
+	}
+	manager.deleteErr = nil
+	if err := session.Close(); err != nil {
+		t.Fatalf("recovery Close() error = %v", err)
+	}
+	if manager.deleteCalls != 2 || !session.Cleaned() {
+		t.Fatalf("recovery delete calls=%d cleaned=%t, want 2 and true", manager.deleteCalls, session.Cleaned())
 	}
 }
 

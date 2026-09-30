@@ -275,6 +275,20 @@ func (s *System) buildRegularTun(opts sysnet.TunOpts) (gtun.Tun, error) {
 }
 
 func (s *System) lookupRegularTun(device gtun.Tun) (*regularTun, error) {
+	if candidate, ok := device.(*defaultTun); ok {
+		if candidate == nil || candidate.regularTun == nil || candidate.owner != s ||
+			candidate.closed.Load() || candidate.retired.Load() {
+			return nil, sysnet.ErrUnknownTun
+		}
+		s.defaultTunMu.Lock()
+		active := s.defaultTun == candidate
+		s.defaultTunMu.Unlock()
+		if !active {
+			return nil, sysnet.ErrUnknownTun
+		}
+		return nil, errors.Join(sysnet.ErrNotSupported,
+			errors.New("default TUN properties require a rebuild"))
+	}
 	owned, ok := device.(*regularTun)
 	if !ok || owned == nil || owned.owner != s || owned.closed.Load() {
 		return nil, sysnet.ErrUnknownTun

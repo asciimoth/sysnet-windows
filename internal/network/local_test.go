@@ -288,6 +288,73 @@ func TestN25LocalNetTracksAcceptedPeerOrientedConnection(t *testing.T) {
 	_ = listener.Close()
 }
 
+func TestLocalNetUnconnectedUDPValidatesEveryDestinationWrite(t *testing.T) {
+	t.Parallel()
+	base := &localRecordingNetwork{}
+	local, err := NewLocal(base, &localResolver{}, Families{IPv4: true, IPv6: true}, func() error { return nil }, (&testRegistry{}).track)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := local.ListenPacket(context.Background(), "udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket() error = %v", err)
+	}
+	defer func() { _ = packet.Close() }()
+	if _, err := packet.WriteTo(nil, &net.UDPAddr{IP: net.IP{192, 0, 2, 1}, Port: 53}); !errors.Is(err, ErrNonLoopbackAddress) {
+		t.Fatalf("packet WriteTo() error = %v, want ErrNonLoopbackAddress", err)
+	}
+	if _, err := packet.WriteTo([]byte("ok"), &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 53}); err != nil {
+		t.Fatalf("packet loopback WriteTo() error = %v", err)
+	}
+
+	udp, err := local.ListenUDP(context.Background(), "udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenUDP() error = %v", err)
+	}
+	defer func() { _ = udp.Close() }()
+	nonlocalUDP := &net.UDPAddr{IP: net.IP{192, 0, 2, 1}, Port: 53}
+	nonlocalAddrPort := netip.MustParseAddrPort("192.0.2.1:53")
+	writes := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "WriteTo", run: func() error { _, err := udp.WriteTo(nil, nonlocalUDP); return err }},
+		{name: "WriteToUDP", run: func() error { _, err := udp.WriteToUDP(nil, nonlocalUDP); return err }},
+		{name: "WriteToUDPAddrPort", run: func() error { _, err := udp.WriteToUDPAddrPort(nil, nonlocalAddrPort); return err }},
+		{name: "WriteMsgUDP", run: func() error { _, _, err := udp.WriteMsgUDP(nil, nil, nonlocalUDP); return err }},
+		{name: "WriteMsgUDPAddrPort", run: func() error { _, _, err := udp.WriteMsgUDPAddrPort(nil, nil, nonlocalAddrPort); return err }},
+	}
+	for _, test := range writes {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(); !errors.Is(err, ErrNonLoopbackAddress) {
+				t.Fatalf("error = %v, want ErrNonLoopbackAddress", err)
+			}
+		})
+	}
+
+	invalid := []struct {
+		name        string
+		destination netip.AddrPort
+		want        error
+	}{
+		{name: "mapped", destination: netip.MustParseAddrPort("[::ffff:127.0.0.1]:53")},
+		{name: "scoped", destination: netip.MustParseAddrPort("[::1%1]:53")},
+		{name: "disabled family", destination: netip.MustParseAddrPort("[::1]:53"), want: ErrLocalFamilyDisabled},
+	}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			_, writeErr := udp.WriteToUDPAddrPort(nil, test.destination)
+			if test.want != nil {
+				if !errors.Is(writeErr, test.want) {
+					t.Fatalf("error = %v, want %v", writeErr, test.want)
+				}
+			} else if writeErr == nil {
+				t.Fatal("invalid destination write succeeded")
+			}
+		})
+	}
+}
+
 func TestN26N28LocalNetRejectsNonlocalAndPoisonedResolutionBeforeSocketCreation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

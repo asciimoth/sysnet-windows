@@ -360,6 +360,12 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 					}
 					session, acquireErr := split.Acquire(ctx, s.dependencies.splitDependencies)
 					if acquireErr != nil {
+						if session != nil {
+							// Acquire returns a session with an error only when committed
+							// WFP ownership still needs verified cleanup. Publish that owner
+							// before the journal starts its rollback.
+							result.splitPolicy = split.NewPolicy(session, s.dependencies.splitDependencies)
+						}
 						s.recordSplitCapability(acquireErr)
 						return acquireErr
 					}

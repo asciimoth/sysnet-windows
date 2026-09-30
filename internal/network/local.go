@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"strconv"
@@ -176,7 +177,7 @@ func (n *Local) ListenPacketConfig(ctx context.Context, config *gonnect.ListenCo
 	if err != nil {
 		return nil, err
 	}
-	return trackPacketConn(n.track, connection)
+	return trackPacketConn(n.track, &localPacketConn{PacketConn: connection, family: family})
 }
 
 func (n *Local) ListenUDPConfig(ctx context.Context, config *gonnect.ListenConfig, network, laddr string) (gonnect.UDPConn, error) {
@@ -191,7 +192,95 @@ func (n *Local) ListenUDPConfig(ctx context.Context, config *gonnect.ListenConfi
 	if err != nil {
 		return nil, err
 	}
-	return trackUDPConn(n.track, connection)
+	return trackUDPConn(n.track, &localUDPConn{UDPConn: connection, family: family})
+}
+
+type localPacketConn struct {
+	gonnect.PacketConn
+	family Family
+}
+
+func (c *localPacketConn) WriteTo(packet []byte, destination net.Addr) (int, error) {
+	if err := validateLocalPacketDestination(destination, c.family); err != nil {
+		return 0, err
+	}
+	return c.PacketConn.WriteTo(packet, destination)
+}
+
+type localUDPConn struct {
+	gonnect.UDPConn
+	family Family
+}
+
+func (c *localUDPConn) WriteTo(packet []byte, destination net.Addr) (int, error) {
+	if err := validateLocalPacketDestination(destination, c.family); err != nil {
+		return 0, err
+	}
+	return c.UDPConn.WriteTo(packet, destination)
+}
+
+func (c *localUDPConn) WriteToUDP(packet []byte, destination *net.UDPAddr) (int, error) {
+	if err := validateLocalPacketDestination(destination, c.family); err != nil {
+		return 0, err
+	}
+	return c.UDPConn.WriteToUDP(packet, destination)
+}
+
+func (c *localUDPConn) WriteToUDPAddrPort(packet []byte, destination netip.AddrPort) (int, error) {
+	if err := validateLocalAddrPort(destination, c.family); err != nil {
+		return 0, err
+	}
+	return c.UDPConn.WriteToUDPAddrPort(packet, destination)
+}
+
+func (c *localUDPConn) WriteMsgUDP(packet, outOfBand []byte, destination *net.UDPAddr) (int, int, error) {
+	if err := validateLocalPacketDestination(destination, c.family); err != nil {
+		return 0, 0, err
+	}
+	return c.UDPConn.WriteMsgUDP(packet, outOfBand, destination)
+}
+
+func (c *localUDPConn) WriteMsgUDPAddrPort(packet, outOfBand []byte, destination netip.AddrPort) (int, int, error) {
+	if err := validateLocalAddrPort(destination, c.family); err != nil {
+		return 0, 0, err
+	}
+	return c.UDPConn.WriteMsgUDPAddrPort(packet, outOfBand, destination)
+}
+
+func validateLocalPacketDestination(destination net.Addr, family Family) error {
+	udp, ok := destination.(*net.UDPAddr)
+	if !ok || udp == nil {
+		return &net.AddrError{Err: "numeric UDP destination required", Addr: fmt.Sprint(destination)}
+	}
+	address, ok := netip.AddrFromSlice(udp.IP)
+	if !ok {
+		return &net.AddrError{Err: "valid IP destination required", Addr: udp.String()}
+	}
+	if udp.Port <= 0 || udp.Port > 65535 {
+		return &net.AddrError{Err: "valid UDP destination port required", Addr: udp.String()}
+	}
+	if udp.Zone != "" {
+		address = address.WithZone(udp.Zone)
+	}
+	return validateLocalAddrPort(netip.AddrPortFrom(address, uint16(udp.Port)), family)
+}
+
+func validateLocalAddrPort(destination netip.AddrPort, family Family) error {
+	address := destination.Addr()
+	if !destination.IsValid() || destination.Port() == 0 || address.Zone() != "" || address.Is4In6() {
+		return &net.AddrError{Err: "valid, unscoped, unmapped destination required", Addr: destination.String()}
+	}
+	want := FamilyIPv6
+	if address.Is4() {
+		want = FamilyIPv4
+	}
+	if want != family {
+		return errors.Join(ErrLocalFamilyDisabled, &net.AddrError{Err: "destination family does not match the local socket", Addr: destination.String()})
+	}
+	if !address.IsLoopback() {
+		return errors.Join(ErrNonLoopbackAddress, &net.AddrError{Err: "loopback destination required", Addr: destination.String()})
+	}
+	return nil
 }
 
 func (n *Local) ListenMulticastUDP(context.Context, string, string, gonnect.MulticastOptions) (gonnect.MulticastPacketConn, error) {

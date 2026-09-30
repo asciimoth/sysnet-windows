@@ -61,6 +61,11 @@ func TestN01N08OutboundCoversAndTracksEverySocketEntryPoint(t *testing.T) {
 	if tracked != len(operations) || released != len(operations) {
 		t.Fatalf("registry counts = tracked %d, released %d", tracked, released)
 	}
+	for index, closer := range registry.closersSnapshot() {
+		if _, ok := closer.(*trackedCloser); !ok {
+			t.Fatalf("tracked resource %d has type %T, want shared trackedCloser", index, closer)
+		}
+	}
 }
 
 func TestN05N08OutboundTracksAcceptedConnections(t *testing.T) {
@@ -98,6 +103,39 @@ func TestN05N08OutboundTracksAcceptedConnections(t *testing.T) {
 	}
 	_ = acceptedTCP.Close()
 	_ = tcpListener.Close()
+}
+
+func TestTrackedResourceAndCallerShareOneConcurrentClose(t *testing.T) {
+	t.Parallel()
+	raw := &blockingCloseConn{started: make(chan struct{}), unblock: make(chan struct{})}
+	var registered io.Closer
+	connection, err := trackConn(func(closer io.Closer) (func(), error) {
+		registered = closer
+		return func() {}, nil
+	}, raw)
+	if err != nil {
+		t.Fatalf("trackConn() error = %v", err)
+	}
+	callerResult := make(chan error, 1)
+	ownerResult := make(chan error, 1)
+	go func() { callerResult <- connection.Close() }()
+	<-raw.started
+	go func() { ownerResult <- registered.Close() }()
+	select {
+	case err := <-ownerResult:
+		t.Fatalf("owner Close() returned before the shared close completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(raw.unblock)
+	if err := <-callerResult; err != nil {
+		t.Fatalf("caller Close() error = %v", err)
+	}
+	if err := <-ownerResult; err != nil {
+		t.Fatalf("owner Close() error = %v", err)
+	}
+	if raw.calls != 1 {
+		t.Fatalf("raw Close() calls = %d, want 1", raw.calls)
+	}
 }
 
 func TestN13N16EveryResolverMethodUsesOutDNS(t *testing.T) {
@@ -355,14 +393,22 @@ func underlaySnapshotForTests() underlay.Snapshot {
 type testRegistry struct {
 	mu                sync.Mutex
 	tracked, released int
+	closers           []io.Closer
 }
 
-func (r *testRegistry) track(io.Closer) (func(), error) {
+func (r *testRegistry) track(closer io.Closer) (func(), error) {
 	r.mu.Lock()
 	r.tracked++
+	r.closers = append(r.closers, closer)
 	r.mu.Unlock()
 	var once sync.Once
 	return func() { once.Do(func() { r.mu.Lock(); r.released++; r.mu.Unlock() }) }, nil
+}
+
+func (r *testRegistry) closersSnapshot() []io.Closer {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]io.Closer(nil), r.closers...)
 }
 
 func (r *testRegistry) counts() (int, int) {
@@ -435,6 +481,20 @@ func (*stubConn) RemoteAddr() net.Addr             { return stubAddr("remote") }
 func (*stubConn) SetDeadline(time.Time) error      { return nil }
 func (*stubConn) SetReadDeadline(time.Time) error  { return nil }
 func (*stubConn) SetWriteDeadline(time.Time) error { return nil }
+
+type blockingCloseConn struct {
+	stubConn
+	started chan struct{}
+	unblock chan struct{}
+	calls   int
+}
+
+func (c *blockingCloseConn) Close() error {
+	c.calls++
+	close(c.started)
+	<-c.unblock
+	return nil
+}
 
 type stubPacketConn struct{ stubConn }
 
