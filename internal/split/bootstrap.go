@@ -107,74 +107,101 @@ type BootstrapConfig struct {
 
 // Policy owns the event-reader lifetime for an initialized split session.
 type Policy struct {
-	session  *Session
-	resolver PathResolver
-	timeout  time.Duration
-	cancel   context.CancelFunc
-	done     chan struct{}
+	session      *Session
+	resolver     PathResolver
+	timeout      time.Duration
+	eventContext context.Context
+	cancel       context.CancelFunc
+	done         chan struct{}
 
-	generation atomic.Uint64
-	mu         sync.RWMutex
-	warnings   []ProcessWarning
-	addresses  Addresses
-	paths      []string
-	closeOnce  sync.Once
-	closed     bool
-	closeErr   error
+	generation    atomic.Uint64
+	mu            sync.RWMutex
+	warnings      []ProcessWarning
+	addresses     Addresses
+	paths         []string
+	closeOnce     sync.Once
+	closed        bool
+	closeErr      error
+	eventsStarted bool
+}
+
+// NewPolicy takes cleanup ownership of an acquired session. Adoption is
+// infallible, so callers cannot lose a session between Acquire and journaling
+// it. Bootstrap validates dependencies before it mutates the driver.
+func NewPolicy(session *Session, dependencies Dependencies) *Policy {
+	eventCtx, cancel := context.WithCancel(context.Background())
+	return &Policy{
+		session: session, resolver: dependencies.Resolver, timeout: session.cleanupTimeout,
+		cancel: cancel, done: make(chan struct{}),
+		// Retain the context until Bootstrap starts the only event reader.
+		addresses: Addresses{}, paths: nil,
+		warnings:     nil,
+		eventContext: eventCtx,
+	}
 }
 
 // Bootstrap initializes the driver in its required order, registers the full
 // process snapshot, and applies addresses and exclusions from one generation.
 func Bootstrap(ctx context.Context, session *Session, dependencies Dependencies, config BootstrapConfig) (*Policy, error) {
-	if ctx == nil {
-		return nil, errors.New("bootstrap split policy: nil context")
-	}
 	if session == nil || session.controller == nil {
 		return nil, errors.New("bootstrap split policy: session is not configured")
 	}
+	policy := NewPolicy(session, dependencies)
+	if err := policy.Bootstrap(ctx, dependencies, config); err != nil {
+		policy.cancel()
+		return nil, err
+	}
+	return policy, nil
+}
+
+// Bootstrap applies the initial generation to a policy which already owns its
+// acquired session.
+func (p *Policy) Bootstrap(ctx context.Context, dependencies Dependencies, config BootstrapConfig) error {
+	if ctx == nil {
+		return errors.New("bootstrap split policy: nil context")
+	}
+	if p == nil || p.session == nil || p.session.controller == nil {
+		return errors.New("bootstrap split policy: policy is not configured")
+	}
 	if dependencies.Snapshot == nil || dependencies.Resolver == nil {
-		return nil, errors.New("bootstrap split policy: process snapshotter or path resolver is not configured")
+		return errors.New("bootstrap split policy: process snapshotter or path resolver is not configured")
 	}
 	if config.Generation == 0 {
-		return nil, errors.New("bootstrap split policy: generation must be nonzero")
+		return errors.New("bootstrap split policy: generation must be nonzero")
 	}
 	if err := validateAddresses(config.Addresses); err != nil {
-		return nil, fmt.Errorf("bootstrap split policy: %w", err)
+		return fmt.Errorf("bootstrap split policy: %w", err)
 	}
 	paths, err := resolvePaths(ctx, dependencies.Resolver, config.Paths)
 	if err != nil {
-		return nil, fmt.Errorf("bootstrap split policy: %w", err)
+		return fmt.Errorf("bootstrap split policy: %w", err)
 	}
 
-	resources := session.Resources()
+	resources := p.session.Resources()
 	sublayers := Sublayers{Baseline: resources.Baseline.Key, DNS: resources.DNS.Key}
-	session.MarkDriverReferences()
-	if err := session.controller.Initialize(ctx, sublayers); err != nil {
-		return nil, fmt.Errorf("bootstrap split policy: initialize: %w", err)
+	p.session.MarkDriverReferences()
+	if err := p.session.controller.Initialize(ctx, sublayers); err != nil {
+		return fmt.Errorf("bootstrap split policy: initialize: %w", err)
 	}
 	// Snapshot only after Initialize. The driver buffers births in this window,
 	// so RegisterProcesses merges them without a bootstrap hole.
 	snapshot, err := dependencies.Snapshot.Snapshot(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("bootstrap split policy: snapshot processes: %w", err)
+		return fmt.Errorf("bootstrap split policy: snapshot processes: %w", err)
 	}
 	if len(snapshot.Processes) == 0 {
-		return nil, errors.New("bootstrap split policy: process snapshot is empty")
+		return errors.New("bootstrap split policy: process snapshot is empty")
 	}
-	if err := session.controller.RegisterProcesses(ctx, cloneProcesses(snapshot.Processes)); err != nil {
-		return nil, fmt.Errorf("bootstrap split policy: register processes: %w", err)
+	if err := p.session.controller.RegisterProcesses(ctx, cloneProcesses(snapshot.Processes)); err != nil {
+		return fmt.Errorf("bootstrap split policy: register processes: %w", err)
 	}
-	eventCtx, cancel := context.WithCancel(context.Background())
-	policy := &Policy{
-		session: session, resolver: dependencies.Resolver, timeout: session.cleanupTimeout,
-		cancel: cancel, done: make(chan struct{}), warnings: cloneWarnings(snapshot.Warnings),
+	p.warnings = cloneWarnings(snapshot.Warnings)
+	if err := p.applyGeneration(ctx, config.Generation, config.Addresses, paths); err != nil {
+		return fmt.Errorf("bootstrap split policy: %w", err)
 	}
-	if err := policy.applyGeneration(ctx, config.Generation, config.Addresses, paths); err != nil {
-		cancel()
-		return nil, fmt.Errorf("bootstrap split policy: %w", err)
-	}
-	go policy.readEvents(eventCtx, config.OnEvent, config.OnError)
-	return policy, nil
+	p.eventsStarted = true
+	go p.readEvents(p.eventContext, config.OnEvent, config.OnError)
+	return nil
 }
 
 func resolvePaths(ctx context.Context, resolver PathResolver, input []string) ([]string, error) {
@@ -237,7 +264,7 @@ func validateAddresses(addresses Addresses) error {
 // can reclassify processes after this call, but established TCP and UDP flows
 // are not guaranteed to move to the newly selected path.
 func (p *Policy) Update(ctx context.Context, config BootstrapConfig) error {
-	if p == nil || p.session == nil {
+	if p == nil || p.session == nil || p.resolver == nil {
 		return errors.New("update split policy: policy is not configured")
 	}
 	if ctx == nil {
@@ -470,12 +497,22 @@ func (p *Policy) StopEvents() {
 	if p == nil {
 		return
 	}
-	p.closeOnce.Do(p.cancel)
+	p.closeOnce.Do(func() {
+		p.cancel()
+		if !p.eventsStarted {
+			close(p.done)
+		}
+	})
 	<-p.done
 }
 
 func (p *Policy) stopEvents(ctx context.Context) error {
-	p.closeOnce.Do(p.cancel)
+	p.closeOnce.Do(func() {
+		p.cancel()
+		if !p.eventsStarted {
+			close(p.done)
+		}
+	})
 	select {
 	case <-p.done:
 		return nil

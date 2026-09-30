@@ -195,7 +195,7 @@ func (n *BoundNetwork) ListenUDPConfig(ctx context.Context, config *gonnect.List
 	return n.listenUDP(ctx, config, network, laddr)
 }
 
-func (n *BoundNetwork) listenUDP(ctx context.Context, config *gonnect.ListenConfig, network, laddr string) (*net.UDPConn, error) {
+func (n *BoundNetwork) listenUDP(ctx context.Context, config *gonnect.ListenConfig, network, laddr string) (gonnect.UDPConn, error) {
 	_, family, local, localIP, err := listenEndpoint(network, laddr, "udp")
 	if err != nil {
 		return nil, err
@@ -220,7 +220,7 @@ func (n *BoundNetwork) listenUDP(ctx context.Context, config *gonnect.ListenConf
 		_ = connection.Close()
 		return nil, fmt.Errorf("listen UDP returned %T: %w", connection, gonnect.ErrUnsupported)
 	}
-	return udp, nil
+	return &policyUDPConn{UDPConn: udp}, nil
 }
 
 func (*BoundNetwork) ListenMulticastUDP(context.Context, string, string, gonnect.MulticastOptions) (gonnect.MulticastPacketConn, error) {
@@ -470,7 +470,77 @@ func endpointFamily(host string, selected Family, wildcard bool) (Family, netip.
 	if !wildcard && address.IsUnspecified() {
 		return 0, netip.Addr{}, &net.AddrError{Err: "remote address is unspecified", Addr: host}
 	}
+	if !wildcard && address.IsMulticast() {
+		return 0, netip.Addr{}, multicastDestinationError(address.String())
+	}
 	return family, address, nil
+}
+
+type policyUDPConn struct{ gonnect.UDPConn }
+
+func (c *policyUDPConn) WriteTo(packet []byte, destination net.Addr) (int, error) {
+	if err := validatePacketDestination(destination); err != nil {
+		return 0, err
+	}
+	return c.UDPConn.WriteTo(packet, destination)
+}
+
+func (c *policyUDPConn) WriteToUDP(packet []byte, destination *net.UDPAddr) (int, error) {
+	if err := validatePacketDestination(destination); err != nil {
+		return 0, err
+	}
+	return c.UDPConn.WriteToUDP(packet, destination)
+}
+
+func (c *policyUDPConn) WriteToUDPAddrPort(packet []byte, destination netip.AddrPort) (int, error) {
+	if err := validatePacketAddrPort(destination); err != nil {
+		return 0, err
+	}
+	return c.UDPConn.WriteToUDPAddrPort(packet, destination)
+}
+
+func (c *policyUDPConn) WriteMsgUDP(packet, outOfBand []byte, destination *net.UDPAddr) (int, int, error) {
+	if err := validatePacketDestination(destination); err != nil {
+		return 0, 0, err
+	}
+	return c.UDPConn.WriteMsgUDP(packet, outOfBand, destination)
+}
+
+func (c *policyUDPConn) WriteMsgUDPAddrPort(packet, outOfBand []byte, destination netip.AddrPort) (int, int, error) {
+	if err := validatePacketAddrPort(destination); err != nil {
+		return 0, 0, err
+	}
+	return c.UDPConn.WriteMsgUDPAddrPort(packet, outOfBand, destination)
+}
+
+func validatePacketDestination(destination net.Addr) error {
+	udp, ok := destination.(*net.UDPAddr)
+	if !ok || udp == nil {
+		return nil
+	}
+	address, ok := netip.AddrFromSlice(udp.IP)
+	if !ok {
+		return nil
+	}
+	if udp.Zone != "" {
+		address = address.WithZone(udp.Zone)
+	}
+	if address.IsMulticast() {
+		return multicastDestinationError(address.String())
+	}
+	return nil
+}
+
+func validatePacketAddrPort(destination netip.AddrPort) error {
+	if destination.Addr().IsMulticast() {
+		return multicastDestinationError(destination.Addr().String())
+	}
+	return nil
+}
+
+func multicastDestinationError(address string) error {
+	return errors.Join(gonnect.ErrUnsupported, ErrUnsupportedSocketNetwork,
+		&net.AddrError{Err: "multicast destination is not supported", Addr: address})
 }
 
 func familyNetworkName(transport string, family Family) string {

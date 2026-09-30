@@ -80,6 +80,67 @@ func TestUpstreamProviderExcludesManagedProxyAndUsesTCPFallback(t *testing.T) {
 	}
 }
 
+func TestUpstreamProviderCloseCancelsActiveRequest(t *testing.T) {
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	configurator := &blockingDNSConfigurator{started: started, canceled: canceled}
+	provider, err := NewUpstreamProvider(
+		&dnsPathSource{snapshot: underlay.Snapshot{IPv4: &underlay.Path{InterfaceLUID: 4}}},
+		configurator,
+		func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("dial must not run")
+		},
+		time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("NewUpstreamProvider() error = %v", err)
+	}
+	queryDone := make(chan error, 1)
+	go func() {
+		_, queryErr := gonnectdns.Query(context.Background(), provider, &gonnectdns.Message{
+			Questions: []gonnectdns.Question{{Name: "cancel.example.", Type: gonnectdns.TypeA, Class: gonnectdns.ClassIN}},
+		})
+		queryDone <- queryErr
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("active DNS configuration read did not start")
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- provider.Close() }()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not cancel the active request")
+	}
+	select {
+	case err := <-queryDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("query error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled query did not return")
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+type blockingDNSConfigurator struct {
+	started  chan struct{}
+	canceled chan struct{}
+}
+
+func (c *blockingDNSConfigurator) Read(ctx context.Context, _ uint64) (State, error) {
+	close(c.started)
+	<-ctx.Done()
+	close(c.canceled)
+	return State{}, ctx.Err()
+}
+
+func (*blockingDNSConfigurator) Apply(context.Context, uint64, State) error { return nil }
+
 type dnsPathSource struct{ snapshot underlay.Snapshot }
 
 func (s *dnsPathSource) Snapshot() underlay.Snapshot { return s.snapshot }

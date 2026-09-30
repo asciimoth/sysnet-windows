@@ -255,6 +255,9 @@ func (s *System) Capabilities() sysnet.CapabilityReport {
 }
 
 func (s *System) CapabilitiesForTun(device tun.Tun) (sysnet.TunCapabilityReport, error) {
+	if _, ok := device.(*defaultTun); ok {
+		return s.defaultTunCapabilities(device)
+	}
 	return s.regularTunCapabilities(device)
 }
 

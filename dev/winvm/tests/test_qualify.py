@@ -73,7 +73,7 @@ class QualificationTest(unittest.TestCase):
                 "architecture": "arm64",
                 "startedAt": "2026-09-29T10:00:00Z",
                 "finishedAt": "2026-09-29T10:01:00Z",
-                "goVersion": "go version go1.25.5 windows/arm64",
+                "goVersion": "go version go1.25.14 windows/arm64",
                 "os": {
                     "caption": "Fixture Windows", "version": "1.2.42",
                     "build": "42", "productType": 1,
@@ -92,7 +92,7 @@ class QualificationTest(unittest.TestCase):
                     "sourceArchiveSha256": SOURCE_HASH,
                     "startedAt": "2026-09-29T09:00:00Z",
                     "finishedAt": "2026-09-29T09:01:00Z",
-                    "goVersion": "go version go1.25.5 linux/amd64",
+                    "goVersion": "go version go1.25.14 linux/amd64",
                     "requiredStages": ["check-fast"],
                     "stageResults": {"check-fast": "pass"},
                 },

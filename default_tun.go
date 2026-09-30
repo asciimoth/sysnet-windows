@@ -350,20 +350,25 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 			splitEntry := reconcile.Entry{
 				Key: splitKey,
 				Apply: func(ctx context.Context) error {
-					session, acquireErr := split.Acquire(ctx, s.dependencies.splitDependencies)
-					if acquireErr != nil {
-						s.recordSplitCapability(acquireErr)
-						return acquireErr
-					}
 					addresses, addressErr := splitAddresses(desired.tun.addresses, s.underlayMonitor.Snapshot())
 					if addressErr != nil {
-						return errors.Join(addressErr, session.Close())
+						return addressErr
 					}
 					paths := make([]string, len(desired.excludes))
 					for index, rule := range desired.excludes {
 						paths[index] = rule.value
 					}
-					policy, bootstrapErr := split.Bootstrap(ctx, session, s.dependencies.splitDependencies, split.BootstrapConfig{
+					session, acquireErr := split.Acquire(ctx, s.dependencies.splitDependencies)
+					if acquireErr != nil {
+						s.recordSplitCapability(acquireErr)
+						return acquireErr
+					}
+					policy := split.NewPolicy(session, s.dependencies.splitDependencies)
+					// Publish cleanup ownership before Bootstrap sends the first
+					// initialization IOCTL. The journal can then retry cleanup if
+					// both bootstrap and its first rollback attempt fail.
+					result.splitPolicy = policy
+					bootstrapErr := policy.Bootstrap(ctx, s.dependencies.splitDependencies, split.BootstrapConfig{
 						Generation: id,
 						Addresses:  addresses,
 						Paths:      paths,
@@ -381,9 +386,8 @@ func (s *System) buildDefaultTun(opts sysnet.DefaultTunOpts, desired desiredDefa
 						},
 					})
 					if bootstrapErr != nil {
-						return errors.Join(bootstrapErr, session.Close())
+						return bootstrapErr
 					}
-					result.splitPolicy = policy
 					result.splitPrefixes = append([]netip.Prefix(nil), desired.tun.addresses...)
 					s.recordSplitCapability(nil)
 					return nil

@@ -59,6 +59,39 @@ func TestD01D04ProxyServesUDPAndTCPWithTruncationFallback(t *testing.T) {
 	}
 }
 
+func TestProxyRejectsMalformedSVCBWithoutPanic(t *testing.T) {
+	// This 30-byte response declares an SVCB parameter value of 65535 bytes
+	// inside a seven-byte RDATA field. It is the GO-2026-5942 shape.
+	packet := []byte{
+		0, 1, 0x80, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+		0, 0, 64, 0, 1, 0, 0, 0, 0, 0, 7,
+		0, 1, 0, 0, 1, 0xff, 0xff,
+	}
+	if message, err := unpackDNS(packet); err == nil || message != nil {
+		t.Fatalf("unpackDNS(malformed SVCB) = %#v, %v; want parse error", message, err)
+	}
+}
+
+func FuzzProxyDNSPackets(f *testing.F) {
+	valid, err := gonnectdns.Pack(dnsQuery(gonnectdns.TypeA))
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(valid)
+	f.Add([]byte{})
+	f.Add([]byte{
+		0, 1, 0x80, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+		0, 0, 64, 0, 1, 0, 0, 0, 0, 0, 7,
+		0, 1, 0, 0, 1, 0xff, 0xff,
+	})
+	f.Fuzz(func(t *testing.T, packet []byte) {
+		message, parseErr := unpackDNS(packet)
+		if parseErr == nil && message == nil {
+			t.Fatal("successful parse returned a nil message")
+		}
+	})
+}
+
 func TestD05D08ProviderReplacementNilAndShutdown(t *testing.T) {
 	proxy, endpoint := newTestProxy(t, 200*time.Millisecond)
 	oldStarted := make(chan struct{})

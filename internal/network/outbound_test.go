@@ -224,6 +224,77 @@ func TestN09N12BoundNetworkRejectsAmbiguousMappedAndRawRequests(t *testing.T) {
 	}
 }
 
+func TestBoundNetworkRejectsMulticastAtDialAndPacketWrite(t *testing.T) {
+	t.Parallel()
+	paths := &fakePaths{snapshot: underlaySnapshotForTests()}
+	binder, err := NewBinder(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	network, err := NewBoundNetwork(binder, paths, Families{IPv4: true, IPv6: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	dials := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "generic IPv4", run: func() error { _, err := network.Dial(ctx, "udp4", "239.1.2.3:1234"); return err }},
+		{name: "packet IPv6", run: func() error { _, err := network.PacketDial(ctx, "udp6", "[ff0e::1234]:1234"); return err }},
+		{name: "TCP IPv4", run: func() error { _, err := network.DialTCP(ctx, "tcp4", "", "239.1.2.3:1234"); return err }},
+		{name: "UDP IPv6", run: func() error { _, err := network.DialUDP(ctx, "udp6", "", "[ff0e::1234]:1234"); return err }},
+	}
+	for _, test := range dials {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(); !errors.Is(err, gonnect.ErrUnsupported) || !errors.Is(err, ErrUnsupportedSocketNetwork) {
+				t.Fatalf("multicast dial error = %v, want unsupported socket network", err)
+			}
+		})
+	}
+
+	connection := &policyUDPConn{UDPConn: &stubUDPConn{}}
+	ipv4 := &net.UDPAddr{IP: net.IPv4(239, 1, 2, 3), Port: 1234}
+	ipv6 := &net.UDPAddr{IP: net.ParseIP("ff0e::1234"), Port: 1234}
+	writes := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "WriteTo IPv4", run: func() error { _, err := connection.WriteTo(nil, ipv4); return err }},
+		{name: "WriteToUDP IPv6", run: func() error { _, err := connection.WriteToUDP(nil, ipv6); return err }},
+		{name: "WriteToUDPAddrPort IPv4", run: func() error {
+			_, err := connection.WriteToUDPAddrPort(nil, netip.MustParseAddrPort("239.1.2.3:1234"))
+			return err
+		}},
+		{name: "WriteMsgUDP IPv6", run: func() error { _, _, err := connection.WriteMsgUDP(nil, nil, ipv6); return err }},
+		{name: "WriteMsgUDPAddrPort IPv6", run: func() error {
+			_, _, err := connection.WriteMsgUDPAddrPort(nil, nil, netip.MustParseAddrPort("[ff0e::1234]:1234"))
+			return err
+		}},
+	}
+	for _, test := range writes {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(); !errors.Is(err, gonnect.ErrUnsupported) || !errors.Is(err, ErrUnsupportedSocketNetwork) {
+				t.Fatalf("multicast write error = %v, want unsupported socket network", err)
+			}
+		})
+	}
+	if _, err := connection.WriteToUDPAddrPort([]byte("ok"), netip.MustParseAddrPort("192.0.2.1:1234")); err != nil {
+		t.Fatalf("unicast write error = %v", err)
+	}
+}
+
+func FuzzSocketEndpoint(f *testing.F) {
+	f.Add("udp4", "192.0.2.1:53", false)
+	f.Add("udp6", "[2001:db8::1]:53", false)
+	f.Add("udp4", "239.1.2.3:53", false)
+	f.Add("udp6", "[ff0e::1234]:53", false)
+	f.Add("ip4:icmp", "192.0.2.1:0", false)
+	f.Fuzz(func(t *testing.T, network, endpoint string, wildcard bool) {
+		_, _, _, _ = socketEndpoint(network, endpoint, wildcard)
+	})
+}
+
 func TestBoundNetworkRejectsDisabledFamilyBeforeSocketCreation(t *testing.T) {
 	t.Parallel()
 	paths := &fakePaths{snapshot: underlay.Snapshot{IPv4: pathPointer(underlay.Path{

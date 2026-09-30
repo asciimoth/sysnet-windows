@@ -13,7 +13,7 @@
 
     # Keep the minimum toolchain required by gonnect and tuntap even after the
     # main Nixpkgs input removes it at end of life.
-    toolchain-nixpkgs.url = "github:nixos/nixpkgs/c5296fdd05cfa2c187990dd909864da9658df755";
+    toolchain-nixpkgs.url = "github:nixos/nixpkgs/72a867531d4e5bb044424b89d4bc84c731bf9579";
   };
 
   outputs =
@@ -129,7 +129,7 @@
 
           checks = {
             go-version = pkgs.runCommand "sysnet-windows-go-version" { nativeBuildInputs = [ go ]; } ''
-              test "$(go env GOVERSION)" = go1.25.5
+              test "$(go env GOVERSION)" = go1.25.14
               touch "$out"
             '';
 
@@ -257,8 +257,8 @@
               ${checks.pre-commit-check.shellHook}
               export GOTOOLCHAIN=local
               actual_go=$(go env GOVERSION)
-              if test "$actual_go" != go1.25.5; then
-                printf 'Expected Go 1.25.5, got %s\n' "$actual_go" >&2
+              if test "$actual_go" != go1.25.14; then
+                printf 'Expected Go 1.25.14, got %s\n' "$actual_go" >&2
                 return 1
               fi
             '';

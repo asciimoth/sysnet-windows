@@ -187,6 +187,64 @@ func TestM6SplitBootstrapFailurePointsCleanEveryOwnedResource(t *testing.T) {
 	}
 }
 
+func TestSplitBootstrapAndRollbackFailureRetainsRecoveryOwnership(t *testing.T) {
+	bootstrapErr := errors.New("process registration failed")
+	resetErr := errors.New("split reset failed")
+	controller := &defaultSplitController{
+		state: split.StateStarted, registerErr: bootstrapErr,
+		resetErr: resetErr, resetState: split.StateEngaged,
+	}
+	native := &defaultSplitNative{controller: controller}
+	factory := &regularTunFactory{}
+	manager := newRegularTunManager()
+	system := newDefaultTunTestSystem(t, factory, manager)
+	system.dependencies.splitDependencies = split.Dependencies{
+		Verifier: defaultSplitVerifier{}, Opener: native,
+		WFP:      defaultSplitWFPFactory{manager: native},
+		Snapshot: defaultSplitSnapshotter{snapshot: split.ProcessSnapshot{Processes: []split.Process{{PID: 4}}}},
+		Resolver: defaultSplitResolver{}, CleanupTimeout: time.Second,
+	}
+	system.probeFacts.split = sysnet.Capability{
+		State: sysnet.CapabilityUnknown, Reasons: []sysnet.CapabilityReason{sysnet.ReasonProbeNotRun},
+	}
+	system.rebuildCapabilitiesLocked()
+
+	device, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{
+		TunAddrs: []string{"10.97.0.1/24"},
+		Exclude:  []sysnet.Rule{{Type: ruleExecutableTree, Rule: `C:\excluded.exe`}},
+	})
+	if device != nil || !errors.Is(err, bootstrapErr) || !errors.Is(err, resetErr) ||
+		!errors.Is(err, split.ErrRecoveryRequired) {
+		t.Fatalf("BuildDefaultTun() = %v, %v; want bootstrap and retained recovery errors", device, err)
+	}
+	if got := system.journal.Len(); got != 1 {
+		t.Fatalf("recovery journal entries = %d, want split ownership", got)
+	}
+	if native.deleteCalls != 0 {
+		t.Fatalf("WFP delete calls = %d before reset confirmation, want 0", native.deleteCalls)
+	}
+	if len(factory.created) != 1 || !factory.created[0].closed || !netIOConfigEmpty(manager.config(factory.created[0].interfaceID())) {
+		t.Fatal("ordinary default-TUN resources were not cleaned after split failure")
+	}
+	system.mu.RLock()
+	state := system.state
+	system.mu.RUnlock()
+	if state != lifecycleRecoveryRequired {
+		t.Fatalf("System state = %s, want recovery-required", state)
+	}
+
+	controller.mu.Lock()
+	controller.resetErr = nil
+	controller.resetState = split.StateStarted
+	controller.mu.Unlock()
+	if err := system.Close(); err != nil {
+		t.Fatalf("System.Close() recovery error = %v", err)
+	}
+	if got := system.journal.Len(); got != 0 || native.deleteCalls != 1 {
+		t.Fatalf("recovered journal=%d WFP deletes=%d, want 0 and 1", got, native.deleteCalls)
+	}
+}
+
 func TestR37R44DefaultTunPreservesSplitJournalButCleansOrdinaryState(t *testing.T) {
 	resetErr := errors.New("split reset failed")
 	controller := &defaultSplitController{state: split.StateStarted}

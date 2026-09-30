@@ -59,6 +59,58 @@ func TestT19DefaultTunTransactionPublishesOnlyUsablePolicy(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesForDefaultTunLifecycleAndOwnership(t *testing.T) {
+	system := newDefaultTunTestSystem(t, &regularTunFactory{}, newRegularTunManager())
+	device, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.89.0.1/24"}})
+	if err != nil {
+		t.Fatalf("BuildDefaultTun() error = %v", err)
+	}
+	report, err := system.CapabilitiesForTun(device)
+	if err != nil {
+		t.Fatalf("CapabilitiesForTun(default) error = %v", err)
+	}
+	if err := report.Validate(); err != nil {
+		t.Fatalf("default-TUN capabilities are invalid: %v", err)
+	}
+	if len(report.Operations) == 0 {
+		t.Fatal("default-TUN capability report has no instance operations")
+	}
+	for _, operation := range report.Operations {
+		if operation.Key.Target != sysnet.TargetDefaultTun || operation.Key.Operation == sysnet.OpCreate || operation.Key.Operation == sysnet.OpCreateNamed {
+			t.Fatalf("non-instance default-TUN operation = %+v", operation.Key)
+		}
+	}
+
+	other := newDefaultTunTestSystem(t, &regularTunFactory{}, newRegularTunManager())
+	foreign, err := other.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.88.0.1/24"}})
+	if err != nil {
+		t.Fatalf("foreign BuildDefaultTun() error = %v", err)
+	}
+	if _, err := system.CapabilitiesForTun(foreign); !errors.Is(err, sysnet.ErrUnknownTun) {
+		t.Fatalf("CapabilitiesForTun(foreign default) error = %v, want ErrUnknownTun", err)
+	}
+	if err := other.Close(); err != nil {
+		t.Fatalf("foreign System.Close() error = %v", err)
+	}
+
+	replacement, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.87.0.1/24"}})
+	if err != nil {
+		t.Fatalf("replacement BuildDefaultTun() error = %v", err)
+	}
+	if _, err := system.CapabilitiesForTun(device); !errors.Is(err, sysnet.ErrUnknownTun) {
+		t.Fatalf("CapabilitiesForTun(retired default) error = %v, want ErrUnknownTun", err)
+	}
+	if err := replacement.Close(); err != nil {
+		t.Fatalf("replacement Close() error = %v", err)
+	}
+	if _, err := system.CapabilitiesForTun(replacement); !errors.Is(err, sysnet.ErrUnknownTun) {
+		t.Fatalf("CapabilitiesForTun(closed default) error = %v, want ErrUnknownTun", err)
+	}
+	if err := system.Close(); err != nil {
+		t.Fatalf("System.Close() error = %v", err)
+	}
+}
+
 func TestDefaultTunEmptyOptionsAllocateOwnedAddress(t *testing.T) {
 	factory := &regularTunFactory{}
 	manager := newRegularTunManager()

@@ -358,6 +358,52 @@ func (s *System) regularTunCapabilities(device gtun.Tun) (sysnet.TunCapabilityRe
 	return result.Clone(), nil
 }
 
+func (s *System) defaultTunCapabilities(device gtun.Tun) (sysnet.TunCapabilityReport, error) {
+	owned, ok := device.(*defaultTun)
+	if !ok || owned == nil || owned.owner != s {
+		return sysnet.TunCapabilityReport{}, sysnet.ErrUnknownTun
+	}
+	s.defaultTunMu.Lock()
+	defer s.defaultTunMu.Unlock()
+	known := s.defaultTun == owned && !owned.retired.Load() && !owned.closed.Load()
+	if !known {
+		return sysnet.TunCapabilityReport{}, sysnet.ErrUnknownTun
+	}
+	if err := s.acceptingWork(); err != nil {
+		return sysnet.TunCapabilityReport{}, err
+	}
+	report, err := s.finalPreflight()
+	if err != nil {
+		return sysnet.TunCapabilityReport{}, err
+	}
+	_, _, _, failed, unknown := owned.snapshot()
+	if unknown {
+		return sysnet.TunCapabilityReport{}, errors.Join(sysnet.ErrUnknownTun, failed)
+	}
+	if failed != nil {
+		return sysnet.TunCapabilityReport{}, errors.Join(
+			stateValidationError(sysnet.ReasonRecoveryRequired, "default TUN reconciliation failed"), failed)
+	}
+	// Default-TUN address mutation is intentionally unsupported, so direct
+	// native observation is still required even when the reported read
+	// capability is unavailable.
+	ctx, cancel := context.WithTimeout(context.Background(), s.config.operationTimeout)
+	_, observeErr := s.observeRegularTun(ctx, owned.regularTun)
+	cancel()
+	if observeErr != nil {
+		return sysnet.TunCapabilityReport{}, observeErr
+	}
+	_, _, revision, _, _ := owned.snapshot()
+	result := sysnet.TunCapabilityReport{SystemRevision: report.Revision, InstanceRevision: revision}
+	for _, operation := range report.Operations {
+		if operation.Key.Target != sysnet.TargetDefaultTun || operation.Key.Operation == sysnet.OpCreate || operation.Key.Operation == sysnet.OpCreateNamed {
+			continue
+		}
+		result.Operations = append(result.Operations, operation)
+	}
+	return result.Clone(), nil
+}
+
 func (s *System) setRegularTunMTU(device gtun.Tun, raw int) error {
 	owned, err := s.requireKnownRegularTun(device)
 	if err != nil {

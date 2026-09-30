@@ -118,6 +118,8 @@ type UpstreamProvider struct {
 	requests     chan gonnectdns.Request
 	done         chan struct{}
 	limit        chan struct{}
+	lifetime     context.Context
+	cancel       context.CancelFunc
 
 	mu       sync.RWMutex
 	excluded map[netip.Addr]struct{}
@@ -140,11 +142,13 @@ func NewUpstreamProvider(
 	if timeout <= 0 {
 		timeout = defaultRequestTimeout
 	}
+	lifetime, cancel := context.WithCancel(context.Background())
 	p := &UpstreamProvider{
 		paths: paths, configurator: configurator, dial: dial, timeout: timeout,
 		requests: make(chan gonnectdns.Request), done: make(chan struct{}),
 		limit:    make(chan struct{}, maxConcurrentRequests),
 		excluded: make(map[netip.Addr]struct{}),
+		lifetime: lifetime, cancel: cancel,
 	}
 	p.workers.Add(1)
 	go p.run()
@@ -168,7 +172,10 @@ func (p *UpstreamProvider) SetExcluded(addresses ...netip.Addr) {
 }
 
 func (p *UpstreamProvider) Close() error {
-	p.close.Do(func() { close(p.done) })
+	p.close.Do(func() {
+		p.cancel()
+		close(p.done)
+	})
 	p.workers.Wait()
 	return nil
 }
@@ -199,6 +206,8 @@ func (p *UpstreamProvider) query(request gonnectdns.Request) {
 		ctx = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
+	stopLifetime := context.AfterFunc(p.lifetime, cancel)
+	defer stopLifetime()
 	defer cancel()
 	servers, err := p.upstreams(ctx)
 	if err != nil {
@@ -542,7 +551,7 @@ func (p *Proxy) writeCurrent(generation <-chan struct{}, write func() error) boo
 }
 
 func (p *Proxy) forward(packet []byte) ([]byte, <-chan struct{}, bool) {
-	request, err := gonnectdns.Unpack(packet)
+	request, err := unpackDNS(packet)
 	if err != nil {
 		return nil, nil, false
 	}
@@ -579,6 +588,19 @@ func (p *Proxy) forward(packet []byte) ([]byte, <-chan struct{}, bool) {
 	response.ID = clientID
 	wire, err := gonnectdns.Pack(response)
 	return wire, generation, err == nil
+}
+
+// unpackDNS contains parser failures at the untrusted network boundary. The
+// dependency is expected to return an error for malformed wire data, but this
+// proxy must not terminate its owner if a parser regression panics.
+func unpackDNS(packet []byte) (message *gonnectdns.Message, err error) {
+	defer func() {
+		if recover() != nil {
+			message = nil
+			err = errors.New("malformed DNS packet caused a parser panic")
+		}
+	}()
+	return gonnectdns.Unpack(packet)
 }
 
 var _ ManagedProxy = (*Proxy)(nil)

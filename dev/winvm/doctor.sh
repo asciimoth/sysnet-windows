@@ -5,7 +5,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 source "$script_dir/common.sh"
 validate() {
     jq -e '.schemaVersion==1 and .architecture=="amd64" and .machine.cpus>=2 and .machine.memoryMiB>=4096 and .machine.diskGiB>=40 and .machine.bootTimeoutSeconds>0 and .machine.installTimeoutSeconds>0 and .machine.testTimeoutSeconds>0 and .ssh.user=="winvm" and .ssh.portMinimum>=1024 and .ssh.portMaximum>=.ssh.portMinimum and .artifacts.directory==".artifacts/winvm"' "$config_file" >/dev/null || die 'invalid config.json'
-    jq -e '.schemaVersion==1 and .go.version=="1.25.5" and .driver.version=="1.3.0.0" and .driver.upstreamCommit=="0a0eb97f67d1dbcb3d08bda66d3b24f465d95475" and ([.windows.sha256,.virtio.sha256,.go.sha256,.openssh.sha256,.driver.files[]]|all(test("^[0-9a-f]{64}$")))' "$lock_file" >/dev/null || die 'invalid image-lock.json'
+    jq -e '.schemaVersion==1 and .go.version=="1.25.14" and .driver.version=="1.3.0.0" and .driver.upstreamCommit=="0a0eb97f67d1dbcb3d08bda66d3b24f465d95475" and ([.windows.sha256,.virtio.sha256,.go.sha256,.openssh.sha256,.driver.files[]]|all(test("^[0-9a-f]{64}$")))' "$lock_file" >/dev/null || die 'invalid image-lock.json'
 }
 case ${1:-check} in
     --validate)

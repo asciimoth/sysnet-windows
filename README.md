@@ -184,7 +184,7 @@ nix develop
 just check-fast
 ```
 
-The shell pins Go 1.25.5, installs the Go, documentation, Nix, shell, and CI
+The shell pins Go 1.25.14, installs the Go, documentation, Nix, shell, and CI
 tools, and exposes verified split-driver and Wintun inputs for both supported
 architectures. `just check-fast` does not start a guest or change networking.
 Use `just` to list all commands.
