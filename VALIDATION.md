@@ -44,10 +44,11 @@ resource and packet-flow suites. `just check-release` is required for release
 qualification and for changes to native routing, DNS, WFP, split-driver, or
 packet-path behavior.
 
-GitHub Actions intentionally runs the current portable, Windows cross-build, and
-native baseline jobs only. Privileged and long-running release gates run
-manually on disposable systems because adding them to routine CI would make CI
-unacceptably slow.
+GitHub Actions intentionally runs lightweight portable tests, including the fuzz
+seed corpora, plus Windows cross-build and native baseline jobs. The local
+`just check` gate keeps race detection and timed fuzzing. Privileged and
+long-running release gates run manually on disposable systems because adding
+them to routine CI would make CI unacceptably slow.
 
 ## Unsupported scope
 

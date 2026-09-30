@@ -22,8 +22,8 @@ jobs:
         shell: bash
         run: test -z "$(gofmt -l .)"
       - run: go vet ./...
-      - run: go test -race -count=1 -timeout 2m ./...
-      - run: dev/run-fuzz.sh
+      - name: Run lightweight tests, including fuzz seeds
+        run: go test -count=1 -timeout 2m ./...
       - name: Install VM harness test tools
         run: sudo apt-get update && sudo apt-get install -y jq qemu-utils shellcheck
       - run: dev/winvm/tests/host-scripts.sh
