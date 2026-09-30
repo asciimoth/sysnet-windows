@@ -3,8 +3,8 @@
 Windows network integration for `github.com/asciimoth/gonnect`.
 
 > [!WARNING]
-> This project is experimental. APIs and behavior can change without notice.
-> Do not use it for production systems without your own review and tests.
+> This project is experimental. APIs and behavior can change without notice. Do
+> not use it for production systems without your own review and tests.
 
 The root package implements host-aware allocation, regular and default Wintun
 ownership, underlay selection, the outbound network bypass, confined local

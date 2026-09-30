@@ -41,6 +41,7 @@
             pythonPackages: with pythonPackages; [
               mdformat
               mdformat-gfm
+              mdformat-gfm-alerts
             ]
           );
 
