@@ -1,6 +1,6 @@
 # sysnet-windows
 
-Windows network integration backend for `github.com/asciimoth/gonnect`.  
+Windows network integration backend for `github.com/asciimoth/gonnect`.\
 [sysnet-linux](https://github.com/asciimoth/sysnet-linux) provides a linux
 backend for same interface.
 

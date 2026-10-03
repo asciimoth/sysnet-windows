@@ -3,9 +3,9 @@ module github.com/asciimoth/sysnet-windows
 go 1.25.14
 
 require (
-	github.com/asciimoth/gonnect v0.55.0
-	github.com/asciimoth/mullvad-split-tunnel-go v0.0.0-20260926123106-f5db35e093d7
-	github.com/asciimoth/tuntap v0.4.3
+	github.com/asciimoth/gonnect v0.56.0
+	github.com/asciimoth/mullvad-split-tunnel-go v0.1.0
+	github.com/asciimoth/tuntap v0.4.4
 	github.com/tailscale/wf v0.0.0-20240214030419-6fbb0a674ee6
 	golang.org/x/sys v0.47.0
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
