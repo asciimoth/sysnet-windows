@@ -479,26 +479,9 @@ func (s *System) recordSplitCapability(err error) {
 	s.rebuildCapabilitiesLocked()
 }
 
-// DefaultTunWarnings reports limits which remain true for every active default
-// TUN. Interface DNS configuration and preferred default routes do not block
-// NRPT, encrypted DNS, application-owned resolvers, or a more-specific route.
-// Therefore, this implementation cannot claim system-wide DNS-route
-// exclusivity.
-func (s *System) DefaultTunWarnings(device sysnet.DefaultTun) []sysnet.Warning {
-	if s == nil || device == nil {
-		return nil
-	}
-	owned, ok := device.(*defaultTun)
-	if !ok || owned.regularTun == nil || owned.owner != s || owned.closed.Load() || owned.retired.Load() {
-		return nil
-	}
-	s.defaultTunMu.Lock()
-	active := s.defaultTun == owned
-	s.defaultTunMu.Unlock()
-	if !active {
-		return nil
-	}
-	return []sysnet.Warning{sysnet.WarningDefaultTunDNSRouteNotExclusive}
+// DefaultTunWarnings returns no warnings for a default TUN.
+func (*System) DefaultTunWarnings(sysnet.DefaultTun) []sysnet.Warning {
+	return nil
 }
 
 func (s *System) BuildTun(opts sysnet.TunOpts) (tun.Tun, error) {

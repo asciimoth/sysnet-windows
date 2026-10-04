@@ -138,9 +138,7 @@ previous DHCP mode or static values only when the current state still matches
 the System's applied value. It does not overwrite an external edit made while
 the TUN is active.
 
-Check `DefaultTunWarnings`. The `default_tun_dns_route_not_exclusive` warning
-states that interface DNS configuration is not a system-wide DNS enforcement
-boundary.
+Interface DNS configuration is not a system-wide DNS enforcement boundary.
 
 ## Threading and errors
 

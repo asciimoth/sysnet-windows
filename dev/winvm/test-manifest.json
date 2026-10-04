@@ -23,7 +23,7 @@
         "github.com/asciimoth/sysnet-windows::TestNativeHostAwareAllocation",
         "github.com/asciimoth/sysnet-windows::TestNativeUnderlayMonitor",
         "github.com/asciimoth/sysnet-windows::TestN25N28SystemLocalNetOwnsResourcesAndRejectsWorkAfterClose",
-        "github.com/asciimoth/sysnet-windows::TestD21D28DefaultTunReportsNonexclusiveDNSScope",
+        "github.com/asciimoth/sysnet-windows::TestDefaultTunWarningsReturnsNoWarnings",
         "github.com/asciimoth/sysnet-windows::TestM3DefaultTunResourceAccountingCycles",
         "github.com/asciimoth/sysnet-windows::TestT28T30RegularTunBuildFailureRollsBack",
         "github.com/asciimoth/sysnet-windows::TestDefaultTunFailuresBeforeRetirementPreserveOldObject",

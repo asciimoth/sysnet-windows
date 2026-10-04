@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -532,22 +531,14 @@ func TestDNSConfigurationPreservesOtherFamilyState(t *testing.T) {
 	}
 }
 
-func TestD21D28DefaultTunReportsNonexclusiveDNSScope(t *testing.T) {
+func TestDefaultTunWarningsReturnsNoWarnings(t *testing.T) {
 	system := newDefaultTunTestSystem(t, &regularTunFactory{}, newRegularTunManager())
 	device, err := system.BuildDefaultTun(sysnet.DefaultTunOpts{TunAddrs: []string{"10.109.0.1/24"}})
 	if err != nil {
 		t.Fatalf("BuildDefaultTun() error = %v", err)
 	}
-	want := []sysnet.Warning{sysnet.WarningDefaultTunDNSRouteNotExclusive}
-	if got := system.DefaultTunWarnings(device); !slices.Equal(got, want) {
-		t.Fatalf("DefaultTunWarnings(active) = %v, want %v", got, want)
-	}
-	// The result is a fresh stable-identifier slice. A caller cannot mutate the
-	// warning reported by a later call.
-	got := system.DefaultTunWarnings(device)
-	got[0] = "caller-mutation"
-	if next := system.DefaultTunWarnings(device); !slices.Equal(next, want) {
-		t.Fatalf("DefaultTunWarnings(after mutation) = %v, want %v", next, want)
+	if got := system.DefaultTunWarnings(device); got != nil {
+		t.Fatalf("DefaultTunWarnings(active) = %v, want nil", got)
 	}
 	if got := system.DefaultTunWarnings(&defaultTun{}); got != nil {
 		t.Fatalf("DefaultTunWarnings(foreign) = %v, want nil", got)

@@ -120,15 +120,13 @@ Close restores static values or DHCP mode only if the current state still
 matches the System's write. An administrator, DHCP, or another VPN change made
 while the TUN is active is not overwritten.
 
-This configuration is not a system-wide DNS enforcement boundary.
-`DefaultTunWarnings` returns `default_tun_dns_route_not_exclusive` for each
-active default TUN. The System changes only the name-server field on its own
-adapter. It does not change DNS settings on other interfaces, the suffix search
-list, NRPT, encrypted-DNS policy, or application-owned DoH/DoT. Windows can use
-those paths, and a more-specific route can take priority over a default route.
-No per-application behavior is claimed for requests sent through the shared
-Windows DNS Client service. A process which sends DNS itself can use a separate
-path.
+This configuration is not a system-wide DNS enforcement boundary. The System
+changes only the name-server field on its own adapter. It does not change DNS
+settings on other interfaces, the suffix search list, NRPT, encrypted-DNS
+policy, or application-owned DoH/DoT. Windows can use those paths, and a
+more-specific route can take priority over a default route. No per-application
+behavior is claimed for requests sent through the shared Windows DNS Client
+service. A process which sends DNS itself can use a separate path.
 
 The proxy must own UDP and TCP port 53 on its TUN address. A port conflict makes
 the build fail before default routes are published. OutDNS returns an observable
