@@ -168,6 +168,128 @@ func TestN05N08NativeUnconnectedUDPRetainsUnderlayPolicy(t *testing.T) {
 	}
 }
 
+// TestNativeWildcardUDPUsesOneRequestedPort verifies the concrete socket
+// bindings behind a wildcard UDP connection. It covers automatic allocation,
+// a requested port, and a conflicting requested port for each available
+// address family.
+func TestNativeWildcardUDPUsesOneRequestedPort(t *testing.T) {
+	snapshot := nativeUnderlaySnapshot(t)
+	tests := []struct {
+		name     string
+		network  string
+		wildcard netip.Addr
+		loopback netip.Addr
+		family   Family
+		path     *underlay.Path
+	}{
+		{name: "IPv4", network: "udp4", wildcard: netip.IPv4Unspecified(), loopback: netip.MustParseAddr("127.0.0.1"), family: FamilyIPv4, path: snapshot.IPv4},
+		{name: "IPv6", network: "udp6", wildcard: netip.IPv6Unspecified(), loopback: netip.IPv6Loopback(), family: FamilyIPv6, path: snapshot.IPv6},
+	}
+	tested := 0
+	for _, test := range tests {
+		if test.path == nil {
+			t.Logf("host has no selected %s underlay", test.name)
+			continue
+		}
+		tested++
+		t.Run(test.name, func(t *testing.T) {
+			paths := staticPaths{snapshot: snapshotFor(test.family, *test.path)}
+			binder, err := NewBinder(paths)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bound, err := NewBoundNetwork(binder, paths, Families{IPv4: true, IPv6: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, requested := range []bool{false, true} {
+				name := "automatic"
+				port := 0
+				if requested {
+					name = "requested"
+					port = reserveWildcardUDPPort(t, test.network, test.wildcard)
+				}
+				t.Run(name, func(t *testing.T) {
+					endpoint := netip.AddrPortFrom(test.wildcard, uint16(port)).String()
+					connection, listenErr := bound.ListenUDP(context.Background(), test.network, endpoint)
+					if listenErr != nil {
+						t.Fatalf("ListenUDP(%q) error = %v", endpoint, listenErr)
+					}
+					defer connection.Close()
+					composite, ok := connection.(*wildcardUDPConn)
+					if !ok {
+						t.Fatalf("ListenUDP(%q) returned %T, want *wildcardUDPConn", endpoint, connection)
+					}
+					logicalPort := composite.LocalAddr().(*net.UDPAddr).Port
+					if logicalPort == 0 || requested && logicalPort != port {
+						t.Fatalf("logical port = %d, requested port = %d", logicalPort, port)
+					}
+					underlayPort := composite.underlay.LocalAddr().(*net.UDPAddr).Port
+					loopbackPort := composite.loopback.LocalAddr().(*net.UDPAddr).Port
+					if underlayPort != logicalPort || loopbackPort != logicalPort {
+						t.Fatalf("ports = logical %d, underlay %d, loopback %d", logicalPort, underlayPort, loopbackPort)
+					}
+				})
+			}
+
+			blocker, err := net.ListenUDP(test.network, net.UDPAddrFromAddrPort(netip.AddrPortFrom(test.path.Source, 0)))
+			if err != nil {
+				t.Fatalf("create selected-underlay conflict: %v", err)
+			}
+			defer blocker.Close()
+			endpoint := netip.AddrPortFrom(test.wildcard, uint16(blocker.LocalAddr().(*net.UDPAddr).Port)).String()
+			connection, listenErr := bound.ListenUDP(context.Background(), test.network, endpoint)
+			if connection != nil {
+				_ = connection.Close()
+				t.Fatalf("ListenUDP(%q) returned a connection during a bind conflict", endpoint)
+			}
+			if listenErr == nil {
+				t.Fatalf("ListenUDP(%q) succeeded during a bind conflict", endpoint)
+			}
+
+			t.Run("loopback-conflict-closes-underlay", func(t *testing.T) {
+				loopbackBlocker, listenErr := net.ListenUDP(test.network, net.UDPAddrFromAddrPort(netip.AddrPortFrom(test.loopback, 0)))
+				if listenErr != nil {
+					t.Fatalf("create loopback conflict: %v", listenErr)
+				}
+				defer loopbackBlocker.Close()
+				port := loopbackBlocker.LocalAddr().(*net.UDPAddr).Port
+				endpoint := netip.AddrPortFrom(test.wildcard, uint16(port)).String()
+				connection, conflictErr := bound.ListenUDP(context.Background(), test.network, endpoint)
+				if connection != nil {
+					_ = connection.Close()
+					t.Fatalf("ListenUDP(%q) returned a connection during a loopback bind conflict", endpoint)
+				}
+				if conflictErr == nil {
+					t.Fatalf("ListenUDP(%q) succeeded during a loopback bind conflict", endpoint)
+				}
+				probe, probeErr := net.ListenUDP(test.network, net.UDPAddrFromAddrPort(netip.AddrPortFrom(test.path.Source, uint16(port))))
+				if probeErr != nil {
+					t.Fatalf("underlay socket remained bound after loopback bind failure: %v", probeErr)
+				}
+				_ = probe.Close()
+			})
+		})
+	}
+	if tested == 0 {
+		t.Fatal("host has no selected underlay")
+	}
+}
+
+func reserveWildcardUDPPort(t *testing.T, network string, wildcard netip.Addr) int {
+	t.Helper()
+	reservation, err := net.ListenUDP(network, net.UDPAddrFromAddrPort(netip.AddrPortFrom(wildcard, 0)))
+	if err != nil {
+		t.Fatalf("reserve wildcard UDP port: %v", err)
+	}
+	port := reservation.LocalAddr().(*net.UDPAddr).Port
+	if err := reservation.Close(); err != nil {
+		t.Fatalf("release wildcard UDP port %d: %v", port, err)
+	}
+	return port
+}
+
 func listenNativeUDP(t *testing.T, network string, source netip.Addr) *net.UDPConn {
 	t.Helper()
 	listener, err := net.ListenUDP(network, &net.UDPAddr{IP: source.AsSlice()})

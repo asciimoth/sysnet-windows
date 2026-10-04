@@ -21,7 +21,7 @@ const (
 // listenWildcardUDP creates two concrete sockets with one logical port. The
 // underlay socket is always pinned. The loopback socket is used only for a
 // loopback destination, so it cannot become an external fallback.
-func (n *BoundNetwork) listenWildcardUDP(ctx context.Context, caller ControlFunc, family Family) (gonnect.UDPConn, error) {
+func (n *BoundNetwork) listenWildcardUDP(ctx context.Context, caller ControlFunc, family Family, requestedPort int) (gonnect.UDPConn, error) {
 	path, err := n.binder.currentPath("listen UDP", family, netip.Addr{})
 	if err != nil {
 		return nil, err
@@ -30,7 +30,7 @@ func (n *BoundNetwork) listenWildcardUDP(ctx context.Context, caller ControlFunc
 	if err != nil {
 		return nil, err
 	}
-	underlayLocal := net.JoinHostPort(path.Source.String(), "0")
+	underlayLocal := net.JoinHostPort(path.Source.String(), strconv.Itoa(requestedPort))
 	underlayPacket, err := (&net.ListenConfig{Control: control}).ListenPacket(ctx, familyNetworkName("udp", family), underlayLocal)
 	if err != nil {
 		return nil, err

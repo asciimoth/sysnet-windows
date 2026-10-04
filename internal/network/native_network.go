@@ -239,7 +239,9 @@ func (n *BoundNetwork) listenUDP(ctx context.Context, config *gonnect.ListenConf
 		return &policyUDPConn{UDPConn: udp}, nil
 	}
 	if localIP.IsUnspecified() {
-		return n.listenWildcardUDP(ctx, caller, family)
+		_, portText, _ := net.SplitHostPort(local)
+		port, _ := strconv.Atoi(portText)
+		return n.listenWildcardUDP(ctx, caller, family, port)
 	}
 	control, err := n.binder.Control("listen UDP", family, localIP, caller)
 	if err != nil {
