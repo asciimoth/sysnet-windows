@@ -138,6 +138,147 @@ func TestTrackedResourceAndCallerShareOneConcurrentClose(t *testing.T) {
 	}
 }
 
+func TestTrackPacketConnPreservesUDPMethodsAndOwnership(t *testing.T) {
+	t.Parallel()
+	base := &countingUDPConn{}
+	registry := &testRegistry{}
+	packet, err := trackPacketConn(registry.track, base)
+	if err != nil {
+		t.Fatalf("trackPacketConn() error = %v", err)
+	}
+	udp, ok := packet.(gonnect.UDPConn)
+	if !ok {
+		t.Fatalf("trackPacketConn() type = %T, want gonnect.UDPConn", packet)
+	}
+	wrapper, ok := packet.(gonnect.Wrapper)
+	if !ok || wrapper.GetWrapped() != base {
+		t.Fatalf("tracked connection wrapper = %T wrapping %T, want %T", packet, gonnect.GetWrapped(packet), base)
+	}
+	if _, err := udp.WriteToUDPAddrPort([]byte("packet"), netip.MustParseAddrPort("127.0.0.1:9")); err != nil {
+		t.Fatalf("preserved UDP write error = %v", err)
+	}
+	if err := packet.Close(); err != nil {
+		t.Fatalf("first Close() error = %v", err)
+	}
+	if err := packet.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	tracked, released := registry.counts()
+	if tracked != 1 || released != 1 || base.closeCalls != 1 {
+		t.Fatalf("ownership counts = tracked %d, released %d, closes %d; want 1, 1, 1", tracked, released, base.closeCalls)
+	}
+}
+
+func TestTrackPacketConnKeepsGenericPacketPath(t *testing.T) {
+	t.Parallel()
+	base := &stubPacketConn{}
+	packet, err := trackPacketConn((&testRegistry{}).track, base)
+	if err != nil {
+		t.Fatalf("trackPacketConn() error = %v", err)
+	}
+	defer func() { _ = packet.Close() }()
+	if _, ok := packet.(gonnect.UDPConn); ok {
+		t.Fatalf("generic packet connection gained UDP methods: %T", packet)
+	}
+	if wrapped := gonnect.GetWrapped(packet); wrapped != base {
+		t.Fatalf("GetWrapped() = %T, want %T", wrapped, base)
+	}
+}
+
+func TestTrackPacketConnRegistrationFailureClosesUDPOnce(t *testing.T) {
+	t.Parallel()
+	base := &countingUDPConn{}
+	want := errors.New("registration failed")
+	packet, err := trackPacketConn(func(io.Closer) (func(), error) { return nil, want }, base)
+	if packet != nil || !errors.Is(err, want) {
+		t.Fatalf("trackPacketConn() = %T, %v; want nil, %v", packet, err, want)
+	}
+	if base.closeCalls != 1 {
+		t.Fatalf("base Close() calls = %d, want 1", base.closeCalls)
+	}
+}
+
+func TestOutboundPacketOperationsPreserveUDPMethods(t *testing.T) {
+	t.Parallel()
+	base := &packetUDPNetwork{}
+	provider := dns.NewResolverProvider(&recordingResolver{}, time.Minute, nil)
+	t.Cleanup(func() { _ = provider.Close() })
+	registry := &testRegistry{}
+	outbound, err := NewOutbound(base, provider, func() error { return nil }, registry.track)
+	if err != nil {
+		t.Fatalf("NewOutbound() error = %v", err)
+	}
+	config := &gonnect.ListenConfig{}
+	operations := []struct {
+		name string
+		run  func() (gonnect.PacketConn, error)
+	}{
+		{name: "PacketDial", run: func() (gonnect.PacketConn, error) {
+			return outbound.PacketDial(context.Background(), "udp4", "127.0.0.1:9")
+		}},
+		{name: "ListenPacket", run: func() (gonnect.PacketConn, error) {
+			return outbound.ListenPacket(context.Background(), "udp4", "127.0.0.1:0")
+		}},
+		{name: "ListenPacketConfig", run: func() (gonnect.PacketConn, error) {
+			return outbound.ListenPacketConfig(context.Background(), config, "udp4", "127.0.0.1:0")
+		}},
+	}
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			packet, operationErr := operation.run()
+			if operationErr != nil {
+				t.Fatalf("%s() error = %v", operation.name, operationErr)
+			}
+			if _, ok := packet.(gonnect.UDPConn); !ok {
+				t.Fatalf("%s() type = %T, want gonnect.UDPConn", operation.name, packet)
+			}
+			if gonnect.GetWrapped(packet) == nil {
+				t.Fatalf("%s() does not expose its wrapped connection", operation.name)
+			}
+			if closeErr := packet.Close(); closeErr != nil {
+				t.Fatalf("%s() Close() error = %v", operation.name, closeErr)
+			}
+		})
+	}
+	tracked, released := registry.counts()
+	if tracked != len(operations) || released != len(operations) {
+		t.Fatalf("ownership counts = tracked %d, released %d; want %d, %d", tracked, released, len(operations), len(operations))
+	}
+}
+
+func TestEveryOwnershipWrapperExposesImmediateWrappedValue(t *testing.T) {
+	t.Parallel()
+	closer := &trackedCloser{close: func() error { return nil }, release: func() {}}
+	conn := &stubConn{}
+	packet := &stubPacketConn{}
+	tcp := &stubTCPConn{}
+	udp := &stubUDPConn{}
+	listener := &stubListener{}
+	tests := []struct {
+		name    string
+		wrapper any
+		want    any
+	}{
+		{name: "connection", wrapper: &ownedConn{Conn: conn, trackedCloser: closer}, want: conn},
+		{name: "packet connection", wrapper: &ownedPacketConn{PacketConn: packet, trackedCloser: closer}, want: packet},
+		{name: "TCP connection", wrapper: &ownedTCPConn{TCPConn: tcp, trackedCloser: closer}, want: tcp},
+		{name: "UDP connection", wrapper: &ownedUDPConn{UDPConn: udp, trackedCloser: closer}, want: udp},
+		{name: "listener", wrapper: &ownedListener{Listener: listener, trackedCloser: closer}, want: listener},
+		{name: "TCP listener", wrapper: &ownedTCPListener{TCPListener: listener, trackedCloser: closer}, want: listener},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			wrapper, ok := test.wrapper.(gonnect.Wrapper)
+			if !ok {
+				t.Fatalf("wrapper type %T does not implement gonnect.Wrapper", test.wrapper)
+			}
+			if got := wrapper.GetWrapped(); got != test.want {
+				t.Fatalf("GetWrapped() = %T, want %T", got, test.want)
+			}
+		})
+	}
+}
+
 func TestN13N16EveryResolverMethodUsesOutDNS(t *testing.T) {
 	t.Parallel()
 	resolver := &recordingResolver{}
@@ -423,6 +564,18 @@ type recordingNetwork struct {
 	calls int
 }
 
+type packetUDPNetwork struct{ recordingNetwork }
+
+func (*packetUDPNetwork) PacketDial(context.Context, string, string) (gonnect.PacketConn, error) {
+	return &stubUDPConn{}, nil
+}
+func (*packetUDPNetwork) ListenPacket(context.Context, string, string) (gonnect.PacketConn, error) {
+	return &stubUDPConn{}, nil
+}
+func (*packetUDPNetwork) ListenPacketConfig(context.Context, *gonnect.ListenConfig, string, string) (gonnect.PacketConn, error) {
+	return &stubUDPConn{}, nil
+}
+
 func (n *recordingNetwork) called()        { n.mu.Lock(); n.calls++; n.mu.Unlock() }
 func (n *recordingNetwork) callCount() int { n.mu.Lock(); defer n.mu.Unlock(); return n.calls }
 func (n *recordingNetwork) Dial(context.Context, string, string) (net.Conn, error) {
@@ -502,6 +655,13 @@ func (*stubPacketConn) ReadFrom([]byte) (int, net.Addr, error)    { return 0, ni
 func (*stubPacketConn) WriteTo(p []byte, _ net.Addr) (int, error) { return len(p), nil }
 
 type stubUDPConn struct{ stubPacketConn }
+
+type countingUDPConn struct {
+	stubUDPConn
+	closeCalls int
+}
+
+func (c *countingUDPConn) Close() error { c.closeCalls++; return nil }
 
 func (*stubUDPConn) ReadFromUDP([]byte) (int, *net.UDPAddr, error) { return 0, nil, io.EOF }
 func (*stubUDPConn) ReadFromUDPAddrPort([]byte) (int, netip.AddrPort, error) {

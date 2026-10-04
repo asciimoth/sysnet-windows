@@ -339,28 +339,32 @@ type ownedConn struct {
 	*trackedCloser
 }
 
-func (c *ownedConn) Close() error { return c.trackedCloser.Close() }
+func (c *ownedConn) Close() error    { return c.trackedCloser.Close() }
+func (c *ownedConn) GetWrapped() any { return c.Conn }
 
 type ownedPacketConn struct {
 	gonnect.PacketConn
 	*trackedCloser
 }
 
-func (c *ownedPacketConn) Close() error { return c.trackedCloser.Close() }
+func (c *ownedPacketConn) Close() error    { return c.trackedCloser.Close() }
+func (c *ownedPacketConn) GetWrapped() any { return c.PacketConn }
 
 type ownedTCPConn struct {
 	gonnect.TCPConn
 	*trackedCloser
 }
 
-func (c *ownedTCPConn) Close() error { return c.trackedCloser.Close() }
+func (c *ownedTCPConn) Close() error    { return c.trackedCloser.Close() }
+func (c *ownedTCPConn) GetWrapped() any { return c.TCPConn }
 
 type ownedUDPConn struct {
 	gonnect.UDPConn
 	*trackedCloser
 }
 
-func (c *ownedUDPConn) Close() error { return c.trackedCloser.Close() }
+func (c *ownedUDPConn) Close() error    { return c.trackedCloser.Close() }
+func (c *ownedUDPConn) GetWrapped() any { return c.UDPConn }
 
 type ownedListener struct {
 	net.Listener
@@ -369,7 +373,8 @@ type ownedListener struct {
 	track Tracker
 }
 
-func (l *ownedListener) Close() error { return l.trackedCloser.Close() }
+func (l *ownedListener) Close() error    { return l.trackedCloser.Close() }
+func (l *ownedListener) GetWrapped() any { return l.Listener }
 
 func (l *ownedListener) Accept() (net.Conn, error) {
 	if err := l.check(); err != nil {
@@ -389,7 +394,8 @@ type ownedTCPListener struct {
 	track Tracker
 }
 
-func (l *ownedTCPListener) Close() error { return l.trackedCloser.Close() }
+func (l *ownedTCPListener) Close() error    { return l.trackedCloser.Close() }
+func (l *ownedTCPListener) GetWrapped() any { return l.TCPListener }
 
 func (l *ownedTCPListener) Accept() (net.Conn, error) {
 	if err := l.check(); err != nil {
@@ -424,6 +430,9 @@ func trackConn(track Tracker, connection net.Conn) (net.Conn, error) {
 }
 
 func trackPacketConn(track Tracker, connection gonnect.PacketConn) (gonnect.PacketConn, error) {
+	if udp, ok := connection.(gonnect.UDPConn); ok {
+		return trackUDPConn(track, udp)
+	}
 	closer := &trackedCloser{close: connection.Close}
 	release, err := track(closer)
 	if err != nil {

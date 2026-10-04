@@ -211,11 +211,15 @@ func (c *wildcardUDPConn) WriteTo(packet []byte, destination net.Addr) (int, err
 	if err := validatePacketDestination(destination); err != nil {
 		return 0, err
 	}
-	if udp, ok := destination.(*net.UDPAddr); ok && udp != nil && udp.IP.IsLoopback() {
-		return c.loopback.WriteTo(packet, destination)
+	udp, ok := udpPacketDestination(destination)
+	if ok && udp.IP.IsLoopback() {
+		return c.loopback.WriteToUDP(packet, udp)
 	}
 	if err := c.validateExternal(); err != nil {
 		return 0, err
+	}
+	if ok {
+		return c.underlay.WriteToUDP(packet, udp)
 	}
 	return c.underlay.WriteTo(packet, destination)
 }

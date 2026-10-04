@@ -130,6 +130,8 @@
         "github.com/asciimoth/sysnet-windows/integration::TestNativeOutNetDirectUDPLoopback",
         "github.com/asciimoth/sysnet-windows/integration::TestNativeOutNetWildcardUDPExternalUsesSelectedUnderlay",
         "github.com/asciimoth/sysnet-windows/integration::TestNativeOutNetWildcardUDPPortContract",
+        "github.com/asciimoth/sysnet-windows/integration::TestNativeOutNetListenPacketUDPContract",
+        "github.com/asciimoth/sysnet-windows/integration::TestNativeOutNetPacketDialPreservesUDPConn",
         "github.com/asciimoth/sysnet-windows/integration::TestNativeLocalNetRejectsEveryNonLoopbackUDPWrite",
         "github.com/asciimoth/sysnet-windows/integration::TestNativeDNSProxyRejectsIdleTCPConnectionsAboveLimit",
         "github.com/asciimoth/sysnet-windows/integration::TestNativeDefaultTunPropertiesRequireRebuild",

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/asciimoth/gonnect"
 )
 
 func TestWildcardUDPConnRoutesEveryWriteByDestination(t *testing.T) {
@@ -95,6 +97,79 @@ func TestWildcardUDPConnRoutesEveryWriteByDestination(t *testing.T) {
 	}
 }
 
+func TestWildcardUDPConnRoutesGenericUDPAddresses(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		destination net.Addr
+		loopback    bool
+	}{
+		{name: "gonnect IPv4 loopback", destination: &gonnect.NetAddr{Net: "udp4", Addr: "127.0.0.1:9001"}, loopback: true},
+		{name: "gonnect IPv6 loopback", destination: &gonnect.NetAddr{Net: "udp6", Addr: "[::1]:9002"}, loopback: true},
+		{name: "AddrPort IPv4 loopback", destination: packetAddr{network: "relay", address: netip.MustParseAddrPort("127.0.0.2:9003")}, loopback: true},
+		{name: "AddrPort IPv6 loopback", destination: packetAddr{network: "relay", address: netip.MustParseAddrPort("[::1]:9004")}, loopback: true},
+		{name: "gonnect IPv4 external", destination: &gonnect.NetAddr{Net: "udp4", Addr: "192.0.2.1:9005"}},
+		{name: "gonnect IPv6 external", destination: &gonnect.NetAddr{Net: "udp6", Addr: "[2001:db8::1]:9006"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			underlay := newRecordingUDPConn()
+			loopback := newRecordingUDPConn()
+			connection := newWildcardUDPConn(underlay, loopback, &net.UDPAddr{}, nil)
+			t.Cleanup(func() { _ = connection.Close() })
+			if _, err := connection.WriteTo([]byte("generic"), test.destination); err != nil {
+				t.Fatalf("WriteTo() error = %v", err)
+			}
+			wantLoopback, wantUnderlay := 0, 1
+			if test.loopback {
+				wantLoopback, wantUnderlay = 1, 0
+			}
+			if loopback.writeCount() != wantLoopback || underlay.writeCount() != wantUnderlay {
+				t.Fatalf("writes = loopback %d, underlay %d; want %d, %d", loopback.writeCount(), underlay.writeCount(), wantLoopback, wantUnderlay)
+			}
+		})
+	}
+}
+
+func TestUDPPacketDestinationClassification(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		addr net.Addr
+		want netip.AddrPort
+		ok   bool
+	}{
+		{name: "UDP IPv4", addr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 80}, want: netip.MustParseAddrPort("127.0.0.1:80"), ok: true},
+		{name: "UDP IPv6", addr: &net.UDPAddr{IP: net.IPv6loopback, Port: 81}, want: netip.MustParseAddrPort("[::1]:81"), ok: true},
+		{name: "generic IPv4", addr: &gonnect.NetAddr{Net: "udp4", Addr: "127.0.0.1:82"}, want: netip.MustParseAddrPort("127.0.0.1:82"), ok: true},
+		{name: "generic IPv6", addr: &gonnect.NetAddr{Net: "udp6", Addr: "[::1]:83"}, want: netip.MustParseAddrPort("[::1]:83"), ok: true},
+		{name: "AddrPort provider", addr: packetAddr{network: "custom", address: netip.MustParseAddrPort("192.0.2.1:84")}, want: netip.MustParseAddrPort("192.0.2.1:84"), ok: true},
+		{name: "non-UDP string", addr: &gonnect.NetAddr{Net: "custom", Addr: "127.0.0.1:85"}},
+		{name: "invalid UDP string", addr: &gonnect.NetAddr{Net: "udp", Addr: "not-an-endpoint"}},
+		{name: "nil"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			udp, ok := udpPacketDestination(test.addr)
+			if ok != test.ok {
+				t.Fatalf("udpPacketDestination() ok = %v, want %v", ok, test.ok)
+			}
+			if ok && udp.AddrPort() != test.want {
+				t.Fatalf("udpPacketDestination() = %s, want %s", udp.AddrPort(), test.want)
+			}
+		})
+	}
+	for _, address := range []net.Addr{
+		&gonnect.NetAddr{Net: "udp4", Addr: "239.1.2.3:90"},
+		&gonnect.NetAddr{Net: "udp6", Addr: "[ff02::1]:90"},
+		packetAddr{network: "custom", address: netip.MustParseAddrPort("239.1.2.3:91")},
+	} {
+		if err := validatePacketDestination(address); !errors.Is(err, gonnect.ErrUnsupported) {
+			t.Errorf("validatePacketDestination(%v) error = %v, want unsupported", address, err)
+		}
+	}
+}
+
 func TestWildcardUDPConnMultiplexesReadsAndPreservesLogicalAddress(t *testing.T) {
 	t.Parallel()
 	underlay := newRecordingUDPConn()
@@ -166,6 +241,15 @@ type recordedDatagram struct {
 	flags  int
 	from   netip.AddrPort
 }
+
+type packetAddr struct {
+	network string
+	address netip.AddrPort
+}
+
+func (a packetAddr) Network() string          { return a.network }
+func (a packetAddr) String() string           { return a.address.String() }
+func (a packetAddr) AddrPort() netip.AddrPort { return a.address }
 
 type recordingUDPConn struct {
 	mu             sync.Mutex

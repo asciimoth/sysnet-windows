@@ -559,8 +559,8 @@ func (c *policyUDPConn) WriteMsgUDPAddrPort(packet, outOfBand []byte, destinatio
 }
 
 func validatePacketDestination(destination net.Addr) error {
-	udp, ok := destination.(*net.UDPAddr)
-	if !ok || udp == nil {
+	udp, ok := udpPacketDestination(destination)
+	if !ok {
 		return nil
 	}
 	address, ok := netip.AddrFromSlice(udp.IP)
@@ -574,6 +574,43 @@ func validatePacketDestination(destination net.Addr) error {
 		return multicastDestinationError(address.String())
 	}
 	return nil
+}
+
+// udpPacketDestination converts numeric UDP address implementations to the
+// concrete address required by net.UDPConn. Packet relays commonly retain the
+// destination in a generic net.Addr, so routing must not depend on its concrete
+// Go type.
+func udpPacketDestination(destination net.Addr) (*net.UDPAddr, bool) {
+	if destination == nil {
+		return nil, false
+	}
+	if udp, ok := destination.(*net.UDPAddr); ok {
+		if udp == nil {
+			return nil, false
+		}
+		address := udp.AddrPort()
+		if address.IsValid() {
+			address = netip.AddrPortFrom(address.Addr().Unmap(), address.Port())
+			return net.UDPAddrFromAddrPort(address), true
+		}
+		return udp, true
+	}
+	if provider, ok := destination.(interface{ AddrPort() netip.AddrPort }); ok {
+		address := provider.AddrPort()
+		if address.IsValid() {
+			return net.UDPAddrFromAddrPort(address), true
+		}
+	}
+	switch destination.Network() {
+	case "udp", "udp4", "udp6":
+	default:
+		return nil, false
+	}
+	address, err := netip.ParseAddrPort(destination.String())
+	if err != nil {
+		return nil, false
+	}
+	return net.UDPAddrFromAddrPort(address), true
 }
 
 func validatePacketAddrPort(destination netip.AddrPort) error {
