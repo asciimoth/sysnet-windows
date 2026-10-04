@@ -59,6 +59,9 @@ func (n *BoundNetwork) Dial(ctx context.Context, network, address string) (net.C
 	if err := n.requireFamily(family); err != nil {
 		return nil, err
 	}
+	if transport == "udp" && endpointIsLoopback(remote) {
+		return (&net.Dialer{}).DialContext(ctx, familyNetworkName(transport, family), remote)
+	}
 	control, err := n.binder.Control("dial "+strings.ToUpper(transport), family, netip.Addr{}, nil)
 	if err != nil {
 		return nil, err
@@ -162,6 +165,22 @@ func (n *BoundNetwork) DialUDP(ctx context.Context, network, laddr, raddr string
 	if err != nil {
 		return nil, err
 	}
+	if endpointIsLoopback(remote) {
+		if localIP.IsValid() && !localIP.IsUnspecified() && !localIP.IsLoopback() {
+			return nil, errors.Join(ErrLocalAddressConflict,
+				&net.AddrError{Err: "loopback destination requires a loopback local address", Addr: localIP.String()})
+		}
+		connection, dialErr := (&net.Dialer{LocalAddr: local}).DialContext(ctx, familyNetworkName("udp", family), remote)
+		if dialErr != nil {
+			return nil, dialErr
+		}
+		udp, ok := connection.(*net.UDPConn)
+		if !ok {
+			_ = connection.Close()
+			return nil, fmt.Errorf("dial UDP returned %T: %w", connection, gonnect.ErrUnsupported)
+		}
+		return udp, nil
+	}
 	control, err := n.binder.Control("dial UDP", family, localIP, nil)
 	if err != nil {
 		return nil, err
@@ -207,6 +226,21 @@ func (n *BoundNetwork) listenUDP(ctx context.Context, config *gonnect.ListenConf
 	if config != nil {
 		caller = config.Control
 	}
+	if localIP.IsLoopback() {
+		connection, listenErr := (&net.ListenConfig{Control: caller}).ListenPacket(ctx, familyNetworkName("udp", family), local)
+		if listenErr != nil {
+			return nil, listenErr
+		}
+		udp, ok := connection.(*net.UDPConn)
+		if !ok {
+			_ = connection.Close()
+			return nil, fmt.Errorf("listen UDP returned %T: %w", connection, gonnect.ErrUnsupported)
+		}
+		return &policyUDPConn{UDPConn: udp}, nil
+	}
+	if localIP.IsUnspecified() {
+		return n.listenWildcardUDP(ctx, caller, family)
+	}
 	control, err := n.binder.Control("listen UDP", family, localIP, caller)
 	if err != nil {
 		return nil, err
@@ -221,6 +255,15 @@ func (n *BoundNetwork) listenUDP(ctx context.Context, config *gonnect.ListenConf
 		return nil, fmt.Errorf("listen UDP returned %T: %w", connection, gonnect.ErrUnsupported)
 	}
 	return &policyUDPConn{UDPConn: udp}, nil
+}
+
+func endpointIsLoopback(endpoint string) bool {
+	host, _, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return false
+	}
+	address, err := netip.ParseAddr(host)
+	return err == nil && address.IsLoopback()
 }
 
 func (*BoundNetwork) ListenMulticastUDP(context.Context, string, string, gonnect.MulticastOptions) (gonnect.MulticastPacketConn, error) {

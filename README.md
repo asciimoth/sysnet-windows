@@ -82,18 +82,23 @@ it is not a routing enforcement boundary.
 
 ## Outbound network
 
-`System.OutNet` binds each TCP or UDP socket to the selected IPv4 or IPv6
-underlay before bind or connect. It supports the generic and typed dial,
-listener, and packet methods in `gonnect.Network`. Returned sockets, listeners,
-and accepted TCP connections belong to the System and close during
-`System.Close`. New operations fail after close starts. `IsNative` is false so a
-caller cannot bypass binding, DNS routing, or resource tracking.
+`System.OutNet` binds TCP sockets and non-loopback UDP sockets to the selected
+IPv4 or IPv6 underlay before bind or connect. A UDP loopback destination stays
+on the host loopback path. A wildcard UDP endpoint uses one logical port for its
+loopback and selected-underlay paths. It does not use the loopback socket as an
+external fallback. It supports the generic and typed dial, listener, and packet
+methods in `gonnect.Network`. Returned sockets, listeners, and accepted TCP
+connections belong to the System and close during `System.Close`. New operations
+fail after close starts. `IsNative` is false so a caller cannot bypass binding,
+DNS routing, or resource tracking.
 
 Use an explicit `tcp4`, `tcp6`, `udp4`, or `udp6` network for a wildcard local
 address. OutNet rejects ambiguous generic wildcards, IPv4-mapped IPv6 addresses,
-raw sockets, and multicast. An explicit local address must equal the selected
-underlay source. Loss of the selected underlay makes new operations fail; there
-is no unbound retry.
+raw sockets, and multicast. An explicit non-loopback local address must equal
+the selected underlay source. A direct UDP loopback operation can use a loopback
+local address. Loss or replacement of the selected underlay makes new operations
+and external writes from wildcard UDP endpoints fail. There is no unbound
+external retry.
 
 OutNet resolves names through `System.OutDNS`. OutDNS reads numeric servers from
 the currently selected underlay interfaces for each request, excludes the

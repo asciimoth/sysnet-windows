@@ -85,15 +85,20 @@ objects return `sysnet.ErrUnknownTun` and do not cause host mutation.
 
 ## OutNet and OutDNS
 
-Use `OutNet` for transport that must bypass the default TUN. It binds TCP and
-UDP sockets to the selected family-specific underlay before bind or connect.
-There is no unrestricted fallback. New operations fail when the selected
-underlay is unavailable.
+Use `OutNet` for transport that must bypass the default TUN. It binds TCP
+sockets and non-loopback UDP sockets to the selected family-specific underlay
+before bind or connect. UDP loopback traffic stays on the host loopback path. A
+wildcard UDP endpoint has loopback and underlay components on the same logical
+port. Only the loopback component can send to loopback. Only the pinned
+component can send elsewhere. There is no unrestricted external fallback. New
+operations and external wildcard UDP writes fail when the selected underlay is
+unavailable or changes.
 
 Use an explicit `tcp4`, `tcp6`, `udp4`, or `udp6` network with a wildcard local
-address. Explicit local addresses must match the selected underlay source.
-OutNet rejects raw sockets, multicast, ambiguous generic wildcards, and
-IPv4-mapped IPv6 addresses.
+address. Explicit non-loopback local addresses must match the selected underlay
+source. Direct UDP loopback operations can use a loopback local address. OutNet
+rejects raw sockets, multicast, ambiguous generic wildcards, and IPv4-mapped
+IPv6 addresses.
 
 OutNet hostname operations use `OutDNS`. OutDNS discovers numeric DNS servers
 from the current underlay and sends DNS traffic through bound OutNet sockets. It
